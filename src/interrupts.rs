@@ -23,7 +23,7 @@ const KEYBOARD_INTERRUPT_VECTOR: u8 = PIC_1_OFFSET + 1;
 
 /// Máscara do PIC mestre: todas as linhas desabilitadas (bit 1), exceto a
 /// IRQ1 (bit 0 em zero = habilitada) — mantém o timer (IRQ0) e as demais
-/// linhas caladas, conforme a constitution (só IRQ1 fica habilitada).
+/// linhas caladas (só IRQ1 fica habilitada).
 const MASTER_PIC_MASK: u8 = 0b1111_1101;
 /// Máscara do PIC escravo: todas as linhas desabilitadas.
 const SLAVE_PIC_MASK: u8 = 0b1111_1111;
@@ -138,7 +138,7 @@ extern "x86-interrupt" fn double_fault_handler(
 /// Mostra a tela de exceção fatal (tela + serial, FR-009) compartilhada
 /// pelas quatro exceções fatais (`#UD`, `#GP`, `#PF`, `#DF`), no mesmo
 /// estilo visual da tela de panic, com o cabeçalho `[EXCEPTION]` para
-/// distinguir as duas (Assumptions da spec). Contém sempre nome/sigla,
+/// distinguir as duas. Contém sempre nome/sigla,
 /// endereço da instrução e a versão do os-rust (FR-007); `error_code`
 /// aparece quando a exceção tem um (`#GP`, `#PF`); `page_fault_info`
 /// aparece só para `#PF`, com o endereço de falha e a interpretação em

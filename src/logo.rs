@@ -1,7 +1,6 @@
-//! Texto canônico do logo (ver `spec.md`, seção "O logo"), incluído
-//! direto do arquivo-fonte em tempo de compilação — sem nenhum escape de
-//! Rust, então este texto é byte a byte igual ao da spec e ao do
-//! `README.md` (FR-008).
+//! Texto canônico do logo, incluído direto do arquivo-fonte em tempo de
+//! compilação — sem nenhum escape de Rust, então este texto é byte a byte
+//! igual ao do `README.md` (FR-008).
 
 /// 20 linhas, no máximo 45 colunas, sem espaços no final de linha.
 /// Desenhado na tela por `vga_buffer::draw_logo()`.

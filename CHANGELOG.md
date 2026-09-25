@@ -33,8 +33,8 @@ Marco de manutenção: nenhuma capacidade nova do kernel.
   por que o pacote `os-rust` vira a crate `os_rust`, por que o nome do
   arquivo JSON do target decide o nome da subpasta em `target/`, e por
   que `█` em UTF-8 não é o byte `0xDB` da code page 437.
-- Cláusula no Princípio I da constitution do projeto, codificando a
-  exceção de "marco de manutenção" (constitution v2.0.1).
+- Cláusula nos princípios de governança do projeto, codificando a
+  exceção de "marco de manutenção" (v2.0.1).
 
 ### Alterado
 

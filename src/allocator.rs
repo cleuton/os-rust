@@ -14,8 +14,7 @@ use x86_64::VirtAddr;
 /// mapeamento feito pelo bootloader (FR-010).
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 
-/// Tamanho fixo do heap, definido em tempo de compilação — não cresce
-/// (Assumptions da spec).
+/// Tamanho fixo do heap, definido em tempo de compilação — não cresce.
 pub const HEAP_SIZE: usize = 100 * 1024;
 
 /// O alocador global: atende `Box`, `Vec`, `String` e qualquer outro
