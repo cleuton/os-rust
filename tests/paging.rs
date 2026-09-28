@@ -45,7 +45,7 @@ fn physical_memory_offset() -> VirtAddr {
 #[test_case]
 fn traduz_endereco_ja_mapeado_pelo_bootloader() {
     // O buffer de texto VGA, em uso desde o Marco 0, sempre mapeado pelo
-    // bootloader antes do kernel rodar (US3 cenário 1).
+    // bootloader antes do kernel rodar.
     let vga = VirtAddr::new(0xb8000);
 
     // SAFETY: `physical_memory_offset()` veio do `BootInfo` real
@@ -59,8 +59,7 @@ fn traduz_endereco_ja_mapeado_pelo_bootloader() {
 fn traduz_endereco_nao_mapeado_devolve_none() {
     // Endereço deliberadamente fora de qualquer região mapeada: acima do
     // que uma VM de teste com uma faixa modesta de RAM cobre (mapeamento
-    // completo da física) e bem longe do heap e da imagem do kernel
-    // (US3 cenário 2).
+    // completo da física) e bem longe do heap e da imagem do kernel.
     let nao_mapeado = VirtAddr::new(0xdead_beaf_000);
 
     // SAFETY: mesma garantia da função acima.
@@ -72,7 +71,7 @@ fn traduz_endereco_nao_mapeado_devolve_none() {
 #[test_case]
 fn mapear_pagina_nova_permite_ler_e_escrever_nela() {
     // Página virtual fora do heap e de qualquer mapeamento existente,
-    // dedicada só a este teste (US3 cenário 3).
+    // dedicada só a este teste.
     let pagina = Page::containing_address(VirtAddr::new(0x_2222_2222_0000));
 
     // SAFETY: `boot_info().memory_map` veio do `BootInfo` real entregue

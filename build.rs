@@ -1,7 +1,7 @@
 // Compila os programas de usuário (crate `programs/`) e os embute no kernel.
 //
 // Este script roda dentro do mesmo `cargo run`/`cargo test` de sempre, então
-// nenhum passo manual é necessário (Princípio VI da constitution): ele
+// nenhum passo manual é necessário: ele
 // executa um segundo `cargo build`, para o target de usuário
 // (`x86_64-os_rust_user.json`), copia cada ELF resultante para `OUT_DIR` e
 // escreve `OUT_DIR/programs.rs`, a tabela `PROGRAMS` que `src/programs.rs`
@@ -90,7 +90,7 @@ fn main() {
     fs::write(out_dir.join("programs.rs"), table).expect("escreve programs.rs em OUT_DIR");
 
     // `rerun-if-changed` numa pasta observa todos os arquivos dentro dela:
-    // qualquer mudança no código dos programas refaz o embutimento (SC-006).
+    // qualquer mudança no código dos programas refaz o embutimento.
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=programs");
     println!("cargo:rerun-if-changed=x86_64-os_rust_user.json");

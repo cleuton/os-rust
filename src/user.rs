@@ -3,7 +3,7 @@
 //! Este módulo reúne o que o kernel sabe sobre onde um programa vive: a
 //! região de endereços do usuário (código e dados, heap e pilha), a pilha
 //! inicial e o estado dos registradores na primeira instrução. Tudo aqui está documentado em
-//! `SYSCALLS.md` (Princípio VII da constitution): um programa só pode
+//! `SYSCALLS.md`: um programa só pode
 //! depender do que está naquele arquivo.
 
 /// Primeiro byte da região de memória do usuário: 1 GiB. Escolhida por três

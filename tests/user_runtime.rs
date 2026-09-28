@@ -7,13 +7,13 @@
 //! scancodes na fila do kernel (`interrupts::push_scancode`) antes de rodar o
 //! programa, e o programa os lê pelo caminho real (`SYS_READ_LINE`).
 //!
-//! Quais User Stories e requisitos cada bloco prova:
-//! - leitura de teclado com `eco` (US1, FR-005, FR-013);
-//! - memória dentro de um programa (FR-013), com programas reais e ELFs
+//! O que cada bloco prova:
+//! - leitura de teclado com `eco`;
+//! - memória dentro de um programa com programas reais e ELFs
 //!   sintéticos;
-//! - `SYS_READ_LINE` inválida, e o prompt retomando o teclado (FR-004);
-//! - isolamento com `falha_memoria` (US2, FR-007, FR-013);
-//! - o guia bate com o código (US3, FR-008, FR-009).
+//! - `SYS_READ_LINE` inválida, e o prompt retomando o teclado;
+//! - isolamento com `falha_memoria`;
+//! - o guia bate com o código.
 
 #![no_std]
 #![no_main]
@@ -152,7 +152,7 @@ fn digitar_no_prompt(linha: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// US1: `eco` lê o teclado e responde (FR-005, FR-013)
+// `eco` lê o teclado e responde
 // ---------------------------------------------------------------------------
 
 #[test_case]
@@ -204,7 +204,7 @@ fn rodar_eco_varias_vezes_nao_esgota_frames() {
 }
 
 // ---------------------------------------------------------------------------
-// FR-013: memória dentro de um programa (`SYS_ALLOC`), com ELFs sintéticos
+// Memória dentro de um programa (`SYS_ALLOC`), com ELFs sintéticos
 // ---------------------------------------------------------------------------
 
 /// `alloc(size)`: `mov eax, 4 ; mov edi, size ; syscall`.
@@ -342,7 +342,7 @@ fn escrita_alem_do_heap_e_pf_e_o_kernel_segue_vivo() {
 }
 
 // ---------------------------------------------------------------------------
-// SYS_READ_LINE inválida e o prompt retomando o teclado (FR-004, FR-013)
+// SYS_READ_LINE inválida e o prompt retomando o teclado
 // ---------------------------------------------------------------------------
 
 /// `read_line(ptr, len)`: `mov eax, 3 ; movabs rdi, ptr ; mov esi, len ; syscall`.
@@ -429,7 +429,7 @@ fn teclas_digitadas_com_antecedencia_chegam_ao_prompt() {
 }
 
 // ---------------------------------------------------------------------------
-// US2: `falha_memoria` é encerrado sem derrubar o kernel (FR-007, FR-013)
+// `falha_memoria` é encerrado sem derrubar o kernel
 // ---------------------------------------------------------------------------
 
 #[test_case]
@@ -512,7 +512,7 @@ fn crash_continua_igual_ao_marco_5() {
 }
 
 // ---------------------------------------------------------------------------
-// US3: o guia do programador bate com o código (FR-008, FR-009)
+// O guia do programador bate com o código
 // ---------------------------------------------------------------------------
 
 const GUIA: &str = include_str!("../GUIA_DO_PROGRAMADOR.md");

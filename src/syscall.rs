@@ -5,7 +5,7 @@
 //! para `syscall_entry` (registrada em `LSTAR`). O stub troca de pilha,
 //! chama `syscall_dispatch` e volta ao programa com `sysretq`. Números,
 //! registradores, erros e semântica de cada chamada estão em `SYSCALLS.md`,
-//! a única fonte da interface (Princípio VII da constitution): nenhuma
+//! a única fonte da interface: nenhuma
 //! syscall existe sem estar naquele arquivo.
 
 use core::arch::global_asm;
@@ -272,8 +272,8 @@ mod tests {
     use alloc::format;
 
     /// O contrato publicado, embutido no teste: se o texto e o código
-    /// divergirem, o teste falha (Princípio VII: `SYSCALLS.md` é a única
-    /// fonte da interface).
+    /// divergirem, o teste falha (`SYSCALLS.md` é a única fonte da
+    /// interface).
     const CONTRATO: &str = include_str!("../SYSCALLS.md");
 
     /// Formata um endereço como o documento o escreve, com `_` no meio por

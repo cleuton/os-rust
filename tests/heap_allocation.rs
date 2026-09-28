@@ -39,7 +39,6 @@ fn dentro_do_heap(endereco: usize) -> bool {
 
 #[test_case]
 fn box_e_vec_tem_valores_corretos_e_ficam_no_heap() {
-    // US3 cenário 4.
     let valor = Box::new(42);
     assert_eq!(*valor, 42);
     assert!(dentro_do_heap(&*valor as *const _ as usize));
@@ -56,7 +55,7 @@ fn box_e_vec_tem_valores_corretos_e_ficam_no_heap() {
 
 #[test_case]
 fn alocar_e_liberar_muitas_vezes_reaproveita_o_heap() {
-    // US3 cenário 5, SC-004: soma, ao longo do teste, pelo menos 10x o
+    // Soma, ao longo do teste, pelo menos 10x o
     // tamanho do heap, sem nenhuma falha — só é possível porque a
     // memória liberada a cada iteração é reaproveitada pela próxima.
     let bloco = 4 * 1024; // 4 KiB por iteração
@@ -72,7 +71,7 @@ fn alocar_e_liberar_muitas_vezes_reaproveita_o_heap() {
 
 #[test_case]
 fn reaproveitamento_nao_depende_do_heap_inteiro_estar_livre() {
-    // US3 cenário 6: um objeto mantido vivo durante todo o teste,
+    // Um objeto mantido vivo durante todo o teste,
     // enquanto muitos outros são alocados e liberados ao redor dele.
     let ancora = Box::new([0u8; 1024]);
 

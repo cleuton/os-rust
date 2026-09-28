@@ -2,7 +2,7 @@
 //!
 //! O texto do contrato (números, registradores, semântica de cada chamada,
 //! erros, limites) é o `SYSCALLS.md`, na raiz do repositório: ele é a única
-//! fonte da interface (Princípio VII da constitution). Esta crate só guarda
+//! fonte da interface. Esta crate só guarda
 //! os valores que kernel e biblioteca de runtime precisam **concordar**.
 //! Ambos dependem daqui, então os números nunca divergem; e o teste do
 //! kernel que compara `SYSCALLS.md` com estas constantes protege os dois

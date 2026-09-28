@@ -193,7 +193,7 @@ fn cmd_panic() {
 /// tamanho, capacidade e soma dos elementos. `valor` e `lista` saem de
 /// escopo ao final desta função, devolvendo a memória usada ao heap —
 /// por isso o comando pode ser repetido indefinidamente sem esgotar a
-/// memória (User Story 1, cenário 2).
+/// memória.
 fn cmd_mem() {
     let info = memory::info();
     println!("memoria fisica utilizavel: {} KiB", info.usable_bytes / 1024);

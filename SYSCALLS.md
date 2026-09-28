@@ -190,7 +190,7 @@ Não há errno: o programa recebe só o valor em `rax`.
 | Outra exceção de CPU em ring 3 (`#DE`, `#UD`, `#GP`, `#SS`, `#NP`) | `[run] <nome> encerrado por erro: <sigla> (<nome da exceção>) em <rip>` (+ código de erro, quando houver) | volta ao prompt |
 | Número de syscall inexistente | `[run] <nome> encerrado: syscall inexistente (<n>)` | volta ao prompt |
 
-Uma falha do programa **nunca** derruba o kernel (Princípio VII): o
+Uma falha do programa **nunca** derruba o kernel: o
 programa é encerrado, suas páginas são liberadas e o prompt volta a
 responder; o programa seguinte roda normalmente. Tudo que não seja uma das
 linhas acima (por exemplo, um laço infinito) fica fora do contrato: não há
