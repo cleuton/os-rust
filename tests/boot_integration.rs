@@ -37,6 +37,19 @@ fn boas_vindas_mostra_a_versao() {
 }
 
 #[test_case]
+fn boas_vindas_sao_so_a_linha_da_versao() {
+    // `print_welcome` escreve apenas `VERSION`: as antigas linhas de
+    // apresentação ("sem sistema operacional embaixo", "escrito direto no
+    // buffer de video VGA") não podem reaparecer na tela.
+    os_rust::vga_buffer::clear_screen();
+    os_rust::print_welcome();
+    assert!(os_rust::vga_buffer::screen_contains(os_rust::VERSION));
+    assert!(!os_rust::vga_buffer::screen_contains("sem sistema operacional"));
+    assert!(!os_rust::vga_buffer::screen_contains("buffer de video VGA"));
+    assert!(!os_rust::vga_buffer::screen_contains("nenhum SO por baixo"));
+}
+
+#[test_case]
 fn identificacao_bate_com_o_manifesto() {
     // Montada aqui de novo, independentemente, a partir de `env!` — nunca
     // um literal `"os-rust"`/`"0.4.1"` copiado à mão, que ficaria

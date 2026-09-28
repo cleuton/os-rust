@@ -2,6 +2,11 @@
 
 use spin::Mutex;
 
+/// Tamanho máximo de uma linha digitada, do prompt e também das linhas que um
+/// programa lê com `SYS_READ_LINE`. Suficiente para qualquer comando razoável
+/// em uma demonstração ao vivo; nada além disso é alocado.
+pub const LINE_CAPACITY: usize = 128;
+
 const LEFT_SHIFT_MAKE: u8 = 0x2A;
 const LEFT_SHIFT_BREAK: u8 = 0xAA;
 const RIGHT_SHIFT_MAKE: u8 = 0x36;
@@ -137,6 +142,65 @@ fn ascii_for_make_code(code: u8, shift: bool) -> Option<u8> {
     Some(if shift { upper } else { lower })
 }
 
+/// Lê uma linha do teclado para `out`, **bloqueando** até o Enter, com eco na
+/// tela e Backspace. Devolve quantos bytes escreveu, incluindo o `\n` final
+/// (sempre `1 ≤ n ≤ out.len()`; `0` só se `out` for vazio).
+///
+/// Aceita bytes ASCII imprimíveis (`0x20`–`0x7e`), no máximo `out.len() - 1`
+/// (sobra lugar para o `\n`); o que passar disso é ignorado, sem eco, como o
+/// prompt faz no limite de linha. É a parte do kernel de `SYS_READ_LINE`.
+///
+/// Espera com `sti; hlt` dentro da syscall, e é a única parte do kernel que
+/// liga as interrupções durante uma syscall: sem isso a IRQ1 nunca chegaria e a
+/// fila de scancodes nunca ganharia uma tecla. **Sempre volta com as
+/// interrupções desligadas**: uma interrupção depois de o stub de `syscall`
+/// trocar `rsp` de volta para a pilha do programa, e antes do `sysretq`,
+/// rodaria no kernel em cima de uma pilha em que ele não pode confiar.
+pub fn read_line(out: &mut [u8]) -> usize {
+    use x86_64::instructions::interrupts;
+
+    if out.is_empty() {
+        return 0;
+    }
+    let max_chars = out.len() - 1;
+    let mut len = 0;
+    loop {
+        // A fila só é tocada com as interrupções desligadas (invariante de
+        // `next_scancode`): a IRQ1 nunca disputa o `Mutex` dela.
+        interrupts::disable();
+        let Some(scancode) = crate::interrupts::next_scancode() else {
+            // Fila vazia. `enable_and_hlt` é `sti; hlt` como uma única
+            // instrução atômica: uma tecla que chegue entre o teste da fila e
+            // o `hlt` acorda a CPU em vez de ficar esquecida até a tecla
+            // seguinte. Ao acordar as interrupções seguem ligadas; o topo do
+            // laço as desliga de novo antes de tocar na fila.
+            interrupts::enable_and_hlt();
+            continue;
+        };
+        match translate(scancode) {
+            Some(b'\n') => {
+                crate::println!();
+                out[len] = b'\n';
+                interrupts::disable();
+                return len + 1;
+            }
+            Some(0x08) => {
+                if len > 0 {
+                    len -= 1;
+                    crate::vga_buffer::backspace();
+                }
+            }
+            Some(byte) if (0x20..=0x7e).contains(&byte) && len < max_chars => {
+                out[len] = byte;
+                len += 1;
+                crate::print!("{}", byte as char);
+            }
+            // Byte fora da faixa, linha cheia ou tecla sem tradução: ignora.
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,5 +249,116 @@ mod tests {
         reset_shift();
         // 0x01 (Escape) não está na tabela de tradução.
         assert_eq!(translate(0x01), None);
+    }
+
+    // --- read_line ---
+
+    const ENTER: u8 = 0x1C;
+    const BACKSPACE: u8 = 0x0E;
+    const KEY_H: u8 = 0x23;
+    const KEY_I: u8 = 0x17;
+    const KEY_A: u8 = 0x1E;
+    const KEY_B: u8 = 0x30;
+    const KEY_C: u8 = 0x2E;
+    const KEY_D: u8 = 0x20;
+    const KEY_E: u8 = 0x12;
+    const ESCAPE: u8 = 0x01;
+
+    /// Fila vazia e Shift solto: `read_line` usa a fila global e o estado
+    /// global de Shift, então cada teste começa do zero.
+    fn reset_teclado() {
+        while crate::interrupts::next_scancode().is_some() {}
+        reset_shift();
+    }
+
+    fn digitar(scancodes: &[u8]) {
+        for &scancode in scancodes {
+            crate::interrupts::push_scancode(scancode);
+        }
+    }
+
+    #[test_case]
+    fn read_line_devolve_exatamente_o_que_foi_digitado() {
+        reset_teclado();
+        digitar(&[KEY_H, KEY_I, ENTER]);
+        let mut out = [0u8; 8];
+        assert_eq!(read_line(&mut out), 3);
+        assert_eq!(&out[..3], b"hi\n");
+    }
+
+    #[test_case]
+    fn read_line_com_so_enter_devolve_a_quebra_de_linha() {
+        reset_teclado();
+        digitar(&[ENTER]);
+        let mut out = [0u8; 8];
+        assert_eq!(read_line(&mut out), 1);
+        assert_eq!(out[0], b'\n');
+    }
+
+    #[test_case]
+    fn read_line_respeita_shift() {
+        reset_teclado();
+        digitar(&[LEFT_SHIFT_MAKE, KEY_A, LEFT_SHIFT_BREAK, ENTER]);
+        let mut out = [0u8; 8];
+        assert_eq!(read_line(&mut out), 2);
+        assert_eq!(&out[..2], b"A\n");
+    }
+
+    #[test_case]
+    fn read_line_backspace_apaga_o_ultimo_caractere() {
+        reset_teclado();
+        digitar(&[KEY_A, KEY_B, KEY_C, BACKSPACE, KEY_D, ENTER]);
+        let mut out = [0u8; 8];
+        assert_eq!(read_line(&mut out), 4);
+        assert_eq!(&out[..4], b"abd\n");
+    }
+
+    #[test_case]
+    fn read_line_backspace_com_linha_vazia_nao_faz_nada() {
+        reset_teclado();
+        digitar(&[BACKSPACE, KEY_A, ENTER]);
+        let mut out = [0u8; 8];
+        assert_eq!(read_line(&mut out), 2);
+        assert_eq!(&out[..2], b"a\n");
+    }
+
+    #[test_case]
+    fn read_line_ignora_o_que_passa_do_limite() {
+        reset_teclado();
+        // Buffer de 4 bytes: cabem 3 caracteres e o `\n`.
+        digitar(&[KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, ENTER]);
+        let mut out = [0u8; 4];
+        assert_eq!(read_line(&mut out), 4);
+        assert_eq!(&out[..4], b"abc\n");
+    }
+
+    #[test_case]
+    fn read_line_ignora_tecla_sem_traducao() {
+        reset_teclado();
+        digitar(&[ESCAPE, KEY_A, ENTER]);
+        let mut out = [0u8; 8];
+        assert_eq!(read_line(&mut out), 2);
+        assert_eq!(&out[..2], b"a\n");
+    }
+
+    #[test_case]
+    fn read_line_com_buffer_vazio_devolve_zero_sem_esperar() {
+        reset_teclado();
+        let mut out = [0u8; 0];
+        assert_eq!(read_line(&mut out), 0);
+    }
+
+    #[test_case]
+    fn read_line_volta_com_as_interrupcoes_desligadas() {
+        use x86_64::instructions::interrupts;
+        reset_teclado();
+        digitar(&[KEY_H, ENTER]);
+        // Liga as interrupções antes: `read_line` precisa devolvê-las
+        // desligadas, senão o `sysretq` de `SYS_READ_LINE` abriria uma janela
+        // com a pilha do programa em uso pelo kernel.
+        interrupts::enable();
+        let mut out = [0u8; 8];
+        read_line(&mut out);
+        assert!(!interrupts::are_enabled());
     }
 }

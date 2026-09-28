@@ -28,8 +28,8 @@ pub mod user;
 /// preserva o hífen do manifesto (`"os-rust"`), ao contrário do
 /// identificador da crate (`os_rust`, com underscore). Única fonte do
 /// nome exibido em todo o código, para nunca ficar dessincronizado do
-/// nome real do pacote; reutilizada por `VERSION` logo abaixo, por
-/// `print_welcome`, e por `shell::PROMPT`/`shell::cmd_sobre`.
+/// nome real do pacote; reutilizada por `shell::cmd_sobre` (`shell::PROMPT`
+/// e `VERSION` repetem o `env!` por causa de `concat!`).
 pub const NAME: &str = env!("CARGO_PKG_NAME");
 
 /// Identificação do sistema no formato `os-rust vX.Y.Z`, derivada do
@@ -40,15 +40,12 @@ pub const NAME: &str = env!("CARGO_PKG_NAME");
 /// por `panic::handle` e pela tela de exceção fatal de `interrupts.rs`.
 pub const VERSION: &str = concat!(env!("CARGO_PKG_NAME"), " v", env!("CARGO_PKG_VERSION"));
 
-/// Escreve a mensagem de boas-vindas na tela, com `VERSION` como primeira
-/// linha. Chamada pelo binário de produção (`main.rs::kernel_main`) e por
+/// Escreve a mensagem de boas-vindas na tela: uma única linha, `VERSION`.
+/// Chamada pelo binário de produção (`main.rs::kernel_main`) e por
 /// testes de integração que verificam o conteúdo exato da tela — extraída
 /// para a biblioteca justamente para ser testável por `cargo test`.
 pub fn print_welcome() {
     println!("{}", VERSION);
-    println!("{} - sem sistema operacional embaixo", NAME);
-    println!("Este texto foi escrito direto no buffer de video VGA,");
-    println!("por este mesmo binario Rust, sem nenhum SO por baixo.");
 }
 
 /// Inicializa a infraestrutura de baixo nível do kernel, nesta ordem:

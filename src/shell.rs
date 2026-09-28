@@ -4,8 +4,12 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+use crate::keyboard::LINE_CAPACITY;
 use crate::user::{self, RunError, Termination};
-use crate::{allocator, memory, print, println, serial_println, vga_buffer, NAME, VERSION};
+use crate::{
+    allocator, interrupts, keyboard, memory, print, println, serial_println, vga_buffer, NAME,
+    VERSION,
+};
 
 /// Texto fixo do prompt, exibido sempre que o sistema está pronto para
 /// receber uma nova linha — derivado do nome do pacote em `Cargo.toml`,
@@ -14,10 +18,6 @@ use crate::{allocator, memory, print, println, serial_println, vga_buffer, NAME,
 /// aceita literais/outras macros em cada posição, não uma `const` já
 /// calculada.
 const PROMPT: &str = concat!(env!("CARGO_PKG_NAME"), "> ");
-
-/// Tamanho máximo de uma linha digitada. Suficiente para qualquer comando
-/// razoável em uma demonstração ao vivo; nada além disso é alocado.
-const LINE_CAPACITY: usize = 128;
 
 /// Tabela fechada de comandos: nome + descrição de uma linha (usada por
 /// `help`) e também a lista de nomes válidos para o `match` de despacho.
@@ -89,6 +89,27 @@ static LINE: Mutex<LineBuffer> = Mutex::new(LineBuffer::new());
 /// Imprime o prompt fixo, sem quebra de linha (o cursor fica logo após).
 pub fn print_prompt() {
     print!("{}", PROMPT);
+}
+
+/// Esvazia a fila de scancodes e entrega ao prompt cada byte que o teclado
+/// traduz. É o laço de teclado do kernel (chamado por `main.rs` a cada volta
+/// do laço ocioso), extraído para os testes usarem exatamente o mesmo caminho
+/// do prompt real.
+///
+/// Roda com as interrupções desligadas, para a IRQ1 nunca disputar a fila
+/// (ver `interrupts::next_scancode`). Se um comando for `run <programa>`, o
+/// programa roda **dentro** deste laço: enquanto ele executa, a fila não é
+/// lida por aqui, e o único leitor do teclado é o programa (via
+/// `SYS_READ_LINE`); quando ele termina, este laço continua e o prompt volta a
+/// ser o leitor, com o que sobrou na fila.
+pub fn poll_keyboard() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        while let Some(scancode) = interrupts::next_scancode() {
+            if let Some(byte) = keyboard::translate(scancode) {
+                feed(byte);
+            }
+        }
+    });
 }
 
 /// Processa um byte já traduzido pelo teclado (ver `keyboard::translate`):
@@ -324,9 +345,17 @@ fn report(name: &str, termination: &Termination) {
             error_code,
             fault_address,
         } => {
+            // Um `#PF` é um acesso inválido à memória: a mensagem diz isso em
+            // palavras (`SYSCALLS.md`, seção 7). As demais exceções mantêm o
+            // texto do Marco 5.
+            let kind = if mnemonic == "#PF" {
+                "erro de memoria"
+            } else {
+                "erro"
+            };
             say(format_args!(
-                "[run] {} encerrado por erro: {} ({}) em {:#x}",
-                name, mnemonic, exception, rip
+                "[run] {} encerrado por {}: {} ({}) em {:#x}",
+                name, kind, mnemonic, exception, rip
             ));
             if let Some(code) = error_code {
                 say(format_args!("codigo de erro: {:#x}", code));
@@ -493,6 +522,8 @@ mod tests {
         execute("run");
         assert!(vga_buffer::screen_contains("run: informe o programa"));
         assert!(vga_buffer::screen_contains("hello"));
+        assert!(vga_buffer::screen_contains("eco"));
+        assert!(vga_buffer::screen_contains("falha_memoria"));
     }
 
     #[test_case]
@@ -502,6 +533,30 @@ mod tests {
         assert!(vga_buffer::screen_contains("programa desconhecido: xpto"));
         assert!(vga_buffer::screen_contains("disponiveis: "));
         assert!(vga_buffer::screen_contains("hello"));
+        assert!(vga_buffer::screen_contains("eco"));
+        assert!(vga_buffer::screen_contains("falha_memoria"));
+    }
+
+    #[test_case]
+    fn run_falha_memoria_mostra_erro_de_memoria_e_o_kernel_segue_vivo() {
+        // Ao contrário de `falha pagina`, `run falha_memoria` não é fatal: só o
+        // programa é encerrado.
+        vga_buffer::clear_screen();
+        execute("run falha_memoria");
+        assert!(vga_buffer::screen_contains("encerrado por erro de memoria"));
+        assert!(vga_buffer::screen_contains("0xdeadbeef"));
+
+        // Outra exceção de programa mantém o texto do Marco 5, sem "de memoria".
+        vga_buffer::clear_screen();
+        execute("run crash");
+        assert!(vga_buffer::screen_contains("encerrado por erro:"));
+        assert!(!vga_buffer::screen_contains("erro de memoria"));
+        assert!(vga_buffer::screen_contains("#UD"));
+
+        // O kernel segue vivo: o próximo programa roda.
+        vga_buffer::clear_screen();
+        execute("run hello");
+        assert!(vga_buffer::screen_contains("Ola do ring 3!"));
     }
 
     #[test_case]

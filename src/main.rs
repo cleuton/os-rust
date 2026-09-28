@@ -7,7 +7,7 @@
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
 #[cfg(not(test))]
-use os_rust::{interrupts, keyboard, panic, serial_println, shell, vga_buffer};
+use os_rust::{panic, serial_println, shell, vga_buffer};
 
 #[cfg(not(test))]
 entry_point!(kernel_main);
@@ -33,13 +33,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial_println!("[boot] prompt pronto");
 
     loop {
-        x86_64::instructions::interrupts::without_interrupts(|| {
-            while let Some(scancode) = interrupts::next_scancode() {
-                if let Some(byte) = keyboard::translate(scancode) {
-                    shell::feed(byte);
-                }
-            }
-        });
+        shell::poll_keyboard();
 
         // `enable_and_hlt` executa `sti; hlt` como uma única instrução
         // atômica: habilita interrupções e pausa a CPU até a próxima, sem

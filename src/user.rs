@@ -1,8 +1,8 @@
 //! Programas de usuário (ring 3): layout de memória, carregador e execução.
 //!
 //! Este módulo reúne o que o kernel sabe sobre onde um programa vive: a
-//! região de endereços do usuário, a pilha inicial e o estado dos
-//! registradores na primeira instrução. Tudo aqui está documentado em
+//! região de endereços do usuário (código e dados, heap e pilha), a pilha
+//! inicial e o estado dos registradores na primeira instrução. Tudo aqui está documentado em
 //! `SYSCALLS.md` (Princípio VII da constitution): um programa só pode
 //! depender do que está naquele arquivo.
 
@@ -39,11 +39,30 @@ pub const USER_STACK_BOTTOM: u64 = USER_STACK_TOP - USER_STACK_PAGES * 4096;
 /// chamar `exit`.
 pub const USER_INITIAL_RSP: u64 = USER_STACK_TOP - 8;
 
+/// Primeiro byte do heap do programa: 1,5 GiB. Fica dentro da mesma entrada
+/// `P3[1]` que já contém o resto da região do usuário (nenhuma tabela de
+/// página nova de nível alto) e deixa `[USER_REGION_START, USER_HEAP_START)`
+/// (512 MiB) para código e dados, muito além do que qualquer programa daqui
+/// precisa. O carregador recusa segmentos que passem daí (`elf.rs`).
+pub const USER_HEAP_START: u64 = 0x6000_0000;
+
+/// Máximo de páginas do heap de um programa: 256, ou seja, 1 MiB. Um limite
+/// fixo torna testável "pedir mais memória do que resta" sem depender do
+/// tamanho da RAM da máquina.
+pub const USER_HEAP_MAX_PAGES: u64 = 256;
+
+/// Fim (exclusivo) da janela do heap. A página que começa aqui nunca é
+/// mapeada: uma escrita além do fim do heap vira `#PF`, não corrupção.
+pub const USER_HEAP_END: u64 = USER_HEAP_START + USER_HEAP_MAX_PAGES * 4096;
+
 /// Valor de `rflags` na primeira instrução do programa: bit reservado 1
 /// sempre ligado e `IF` (interrupções habilitadas) ligado, o resto zero.
 /// `sysretq` carrega `rflags` de `r11`.
 pub const USER_RFLAGS: u64 = 0x202;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use abi::{ERR_INVAL, ERR_NOMEM};
 use spin::Mutex;
 use x86_64::structures::paging::{Page, PageTableFlags, Size4KiB};
 use x86_64::VirtAddr;
@@ -88,6 +107,11 @@ pub enum RunError {
 /// Motivo do término do programa em execução; `None` enquanto ele roda e
 /// depois que `run_image` o leu.
 static TERMINATION: Mutex<Option<Termination>> = Mutex::new(None);
+
+/// Quantas páginas o heap do programa em execução já tem. Zerado antes de
+/// cada `enter_user` e de novo quando o programa termina. O heap ocupa
+/// `[USER_HEAP_START, USER_HEAP_START + HEAP_PAGES * 4096)`.
+static HEAP_PAGES: AtomicU64 = AtomicU64::new(0);
 
 /// Um intervalo de páginas mapeado por `load`, para `unload` desfazer.
 #[derive(Clone, Copy)]
@@ -209,6 +233,43 @@ fn load_into(image: &ElfImage, loaded: &mut Loaded) -> Result<(), LoadError> {
     Ok(())
 }
 
+/// `SYS_ALLOC`: amplia o heap do programa em `size` bytes (arredondados para
+/// cima até um múltiplo de 4 KiB) e devolve o endereço do início da área
+/// nova, que é contígua às anteriores. A área nasce zerada e é gravável,
+/// nunca executável. Tudo ou nada: se o total passaria de
+/// `USER_HEAP_MAX_PAGES`, ou se faltarem frames, devolve `ERR_NOMEM` e o heap
+/// fica como estava.
+pub(crate) fn grow_heap(size: u64) -> Result<u64, i64> {
+    if size == 0 {
+        return Err(ERR_INVAL);
+    }
+    // `div_ceil` não estoura, mesmo com um `size` enorme.
+    let pages = size.div_ceil(4096);
+    let used = HEAP_PAGES.load(Ordering::Relaxed);
+    if pages > USER_HEAP_MAX_PAGES - used {
+        return Err(ERR_NOMEM);
+    }
+
+    let start = USER_HEAP_START + used * 4096;
+    let flags = PageTableFlags::PRESENT
+        | PageTableFlags::USER_ACCESSIBLE
+        | PageTableFlags::WRITABLE
+        | PageTableFlags::NO_EXECUTE;
+    for index in 0..pages {
+        if map_zeroed_page(start + index * 4096, flags).is_err() {
+            // Faltou frame: desfaz só as páginas mapeadas **nesta chamada**.
+            // Devolver frames (`recycle`) pode alocar no heap do kernel, o que
+            // é permitido aqui: uma syscall roda com as interrupções
+            // desligadas e nenhum lock do heap está preso por quem a
+            // interrompeu. O que não pode alocar é um handler de interrupção.
+            memory::unmap_user_range(VirtAddr::new(start), index);
+            return Err(ERR_NOMEM);
+        }
+    }
+    HEAP_PAGES.store(used + pages, Ordering::Relaxed);
+    Ok(start)
+}
+
 extern "C" {
     /// Desce para ring 3 no ponto `entry` com a pilha em `user_rsp` e só
     /// "retorna" quando o programa termina (via `leave_user`). Assembly logo
@@ -307,7 +368,14 @@ pub fn run_image(image: &[u8]) -> Result<Termination, LoadError> {
     // foi validado por `elf::parse` como um endereço dentro de um segmento
     // executável; `USER_INITIAL_RSP` é o topo da pilha mapeada. `enter_user`
     // só retorna depois de `terminate`, que restaura o estado do kernel.
+    HEAP_PAGES.store(0, Ordering::Relaxed);
     unsafe { enter_user(elf.entry, USER_INITIAL_RSP) };
+    // O heap volta ao alocador de frames em qualquer término (`exit`, falha ou
+    // syscall inválida), junto com as páginas de código, dados e pilha.
+    memory::unmap_user_range(
+        VirtAddr::new(USER_HEAP_START),
+        HEAP_PAGES.swap(0, Ordering::Relaxed),
+    );
     unload(&loaded);
     // `enter_user` só retorna via `terminate`, que sempre grava o motivo
     // antes; um `None` aqui seria um bug do kernel, não do programa.

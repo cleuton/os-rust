@@ -1,0 +1,17 @@
+# Biblioteca de runtime dos programas de usuário do os-rust: o equivalente da
+# libc do projeto (ponto de entrada, `print!`, leitura de linha, alocador).
+# Compilada para o target de usuário pelo `build.rs` do kernel, como
+# dependência de `programs`; nunca por `cargo run`/`cargo test` diretamente.
+[package]
+name = "runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+abi = { path = "../abi" }
+# Única dependência externa: o mesmo alocador que o kernel já usa
+# (`src/allocator.rs`), na mesma versão do `Cargo.lock`. Não entra nenhuma
+# crate nova no projeto; muda só de onde vem a memória (`SYS_ALLOC` em vez de
+# um heap fixo pré-mapeado). Blocos liberados são reaproveitados e o
+# alinhamento é respeitado sem escrever um algoritmo de alocação próprio.
+linked_list_allocator = "0.10.5"

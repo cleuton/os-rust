@@ -10,22 +10,15 @@
 #![no_std]
 #![no_main]
 
-use core::arch::asm;
+use runtime::entry;
 
-/// Ponto de entrada (mesmo esqueleto de `hello`): executa `ud2`, o opcode
-/// que a arquitetura x86 reserva como sempre inválido. A CPU levanta uma
-/// exceção de instrução inválida (`#UD`) em ring 3; o kernel a trata,
-/// encerra o programa e devolve o controle ao prompt.
-#[no_mangle]
-pub extern "C" fn _start() -> ! {
+entry!(main);
+
+/// Executa `ud2`, o opcode que a arquitetura x86 reserva como sempre inválido.
+/// A CPU levanta uma exceção de instrução inválida (`#UD`) em ring 3; o kernel
+/// a trata, encerra o programa e devolve o controle ao prompt.
+fn main() -> i32 {
     // SAFETY: `ud2` não lê nem escreve memória; a exceção que ele provoca é
     // exatamente o comportamento intencional deste programa.
-    unsafe { asm!("ud2", options(noreturn)) }
-}
-
-/// Um programa sem biblioteca padrão precisa dizer o que fazer num `panic!`.
-/// Este não tem nada que possa entrar em pânico; se acontecer, fica parado.
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {}
+    unsafe { core::arch::asm!("ud2", options(noreturn)) }
 }

@@ -14,7 +14,7 @@
 
 use core::fmt;
 
-use crate::user::{USER_REGION_START, USER_STACK_BOTTOM};
+use crate::user::{USER_HEAP_START, USER_REGION_START};
 
 /// Máximo de segmentos `PT_LOAD` aceitos. O carregador guarda os intervalos
 /// que mapeou num array de tamanho fixo (sem heap), para poder desfazer o
@@ -36,9 +36,12 @@ const PT_LOAD: u32 = 1;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 
-/// Fim (exclusivo) da área que os segmentos podem ocupar: logo abaixo da
-/// página de guarda da pilha (a página que fica sem mapeamento, sob a pilha).
-const SEGMENTS_END: u64 = USER_STACK_BOTTOM - PAGE_SIZE;
+/// Fim (exclusivo) da área que os segmentos podem ocupar: o começo do heap do
+/// programa (`USER_HEAP_START`). Código e dados ficam em
+/// `[USER_REGION_START, USER_HEAP_START)`; um segmento que passasse daí cairia
+/// em cima do heap, que só existe por `SYS_ALLOC`. A pilha, mais acima ainda,
+/// fica fora do alcance por consequência.
+const SEGMENTS_END: u64 = USER_HEAP_START;
 
 /// Por que um executável foi recusado (ou por que a carga falhou). Devolvido
 /// antes de qualquer página do usuário ser mapeada, ou depois de desfazer os
@@ -53,8 +56,9 @@ pub enum LoadError {
     /// segmento fora do arquivo, `p_filesz > p_memsz`, `p_vaddr` desalinhado
     /// ou segmentos demais.
     Malformed,
-    /// Algum segmento não cabe inteiro na região do usuário (ou invade a
-    /// pilha).
+    /// Algum segmento não cabe inteiro na faixa de código e dados do usuário
+    /// (`[USER_REGION_START, USER_HEAP_START)`): fora da região, ou invadindo
+    /// o heap ou a pilha.
     OutOfRegion,
     /// Dois segmentos usam a mesma página.
     Overlap,
@@ -267,6 +271,7 @@ pub fn parse(bytes: &[u8]) -> Result<ElfImage<'_>, LoadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::user::USER_STACK_BOTTOM;
     use alloc::vec::Vec;
 
     /// Um segmento para o construtor de ELF dos testes.
@@ -386,6 +391,20 @@ mod tests {
     fn segmento_sobre_a_pilha_e_recusado() {
         let seg = Seg { vaddr: USER_STACK_BOTTOM, flags: RX, data: &[0x0f, 0x0b], mem_size: 2 };
         assert_eq!(parse(&build(USER_STACK_BOTTOM, &[seg])).unwrap_err(), LoadError::OutOfRegion);
+    }
+
+    #[test_case]
+    fn segmento_que_comeca_no_heap_e_recusado() {
+        let seg = Seg { vaddr: USER_HEAP_START, flags: RX, data: &[0x0f, 0x0b], mem_size: 2 };
+        assert_eq!(parse(&build(USER_HEAP_START, &[seg])).unwrap_err(), LoadError::OutOfRegion);
+    }
+
+    #[test_case]
+    fn segmento_que_termina_no_comeco_do_heap_e_aceito() {
+        // A última página antes do heap ainda é da faixa de código e dados.
+        let vaddr = USER_HEAP_START - 4096;
+        let seg = Seg { vaddr, flags: RX, data: &[0x0f, 0x0b], mem_size: 2 };
+        assert!(parse(&build(vaddr, &[seg])).is_ok());
     }
 
     #[test_case]

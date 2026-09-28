@@ -1,6 +1,9 @@
 # Programas de usuário do os-rust (ring 3). Compilados para o target
 # `x86_64-os_rust_user.json` pelo `build.rs` do kernel, nunca diretamente
 # por `cargo run`/`cargo test` (ver `default-members` no Cargo.toml raiz).
+# Cada arquivo de `src/bin/` é um programa; todos usam a biblioteca de
+# runtime do projeto (`runtime/`), que fornece o ponto de entrada, `print!`,
+# a leitura de linha e o alocador.
 #
 # Sem `[profile.*]`: perfis só valem na raiz do workspace, e o
 # `panic = "abort"` já vem do próprio target de usuário.
@@ -8,3 +11,6 @@
 name = "programs"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+runtime = { path = "../runtime" }

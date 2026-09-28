@@ -1,0 +1,8 @@
+# O contrato de syscalls do os-rust, só como constantes. Usada pelo kernel
+# (dependência do pacote raiz) e pela biblioteca de runtime dos programas
+# (`runtime/`), para que os números nunca divirjam. O texto do contrato é o
+# `SYSCALLS.md`, na raiz do repositório.
+[package]
+name = "abi"
+version = "0.1.0"
+edition = "2021"

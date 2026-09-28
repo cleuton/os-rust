@@ -5,6 +5,65 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.6.0] - 2026-09-28
+
+Marco 6: interface de programação. Escrever, compilar e rodar um programa
+de usuário passa a ser possível sem conhecer o kernel por dentro: o
+contrato de syscalls ganha a leitura de teclado e memória para o programa,
+há uma biblioteca de runtime, e a garantia de que uma falha no programa
+não derruba o kernel ganha um programa de demonstração. `run eco` lê uma
+linha do teclado e responde; `run falha_memoria` é encerrado por acesso
+inválido à memória sem derrubar o kernel.
+
+### Adicionado
+
+- Syscalls `SYS_READ_LINE` (3: espera uma linha do teclado, com eco e
+  Backspace feitos pelo kernel, e a entrega ao programa) e `SYS_ALLOC` (4:
+  amplia o heap do programa, numa janela de até 1 MiB em `0x6000_0000`), e o
+  código de erro `ERR_NOMEM` (`-3`).
+- Contrato de syscalls versão 2 (`SYSCALLS.md`): as duas syscalls, o erro
+  novo, a janela do heap, a faixa de código e dados do ELF, a mensagem de
+  `#PF` de programa e uma seção sobre o teclado enquanto o programa roda.
+  Programas da versão 1 continuam funcionando.
+- Crate `abi/`: as constantes do contrato (números, erros, limites),
+  compartilhadas pelo kernel e pela biblioteca de runtime.
+- Crate `runtime/`: a biblioteca de runtime dos programas (`entry!`,
+  `print!`/`println!`, `read_line`, `exit`, alocador global sobre
+  `SYS_ALLOC` com o mesmo `linked_list_allocator` do kernel, e um tratador de
+  `panic!` que escreve `[panic] <mensagem>` e sai com o código 101).
+- Programas de exemplo `eco` (lê uma linha, devolve o texto e conta as
+  palavras com um `Vec`) e `falha_memoria` (escreve em `0xdead_beef`).
+- `GUIA_DO_PROGRAMADOR.md`: o guia de quem escreve programas para o os-rust,
+  com o código completo dos dois programas de exemplo.
+- `interrupts::push_scancode` (pública, para os testes "digitarem") e
+  `shell::poll_keyboard` (o laço de teclado do prompt, extraído de
+  `main.rs`).
+- `tests/user_runtime.rs` (29 testes de integração em ring 3: leitura de
+  teclado, memória, `SYS_READ_LINE` inválida, isolamento de falhas, o prompt
+  retomando o teclado, o guia batendo com o código) e testes de unidade para
+  `keyboard::read_line`, o contrato v2, o limite do ELF, o texto do `#PF`
+  de programa e o alinhamento da pilha de entrada.
+
+### Alterado
+
+- `hello` e `crash` passam a usar a biblioteca de runtime (mesmo
+  comportamento observável). O `asm!` da instrução `syscall`, que o `hello`
+  do Marco 5 trazia à mão, vive agora em `runtime/src/sys.rs`.
+- A mensagem de um programa encerrado por `#PF` passa a dizer `encerrado por
+  erro de memoria`; as demais exceções mantêm o texto do Marco 5.
+- Os segmentos de um ELF ficam limitados a `[0x4000_0000, 0x6000_0000)`
+  (antes iam até a pilha), para não cair em cima do heap do programa.
+- O workspace ganha os membros `runtime` e `abi`; o kernel passa a depender
+  de `abi`.
+- Versão do projeto: `0.5.0` → `0.6.0`.
+
+### Corrigido
+
+- As pilhas do kernel para entradas vindas de ring 3 e para o double fault
+  não tinham alinhamento declarado, e o topo da primeira podia cair num
+  endereço que não é múltiplo de 16; a espera por uma tecla dentro de uma
+  syscall expôs o problema. Ambas passam a ser `#[repr(align(16))]`.
+
 ## [0.5.0] - 2026-09-28
 
 Marco 5: primeiro programa de usuário. O os-rust passa a executar código

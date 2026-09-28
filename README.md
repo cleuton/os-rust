@@ -49,7 +49,7 @@ sistema de arquivos ou multitarefa completa.
 
 ## Status
 
-**Versão atual: 0.5.0.** Os Marcos 0 (boot em modo texto VGA, com
+**Versão atual: 0.6.0.** Os Marcos 0 (boot em modo texto VGA, com
 mensagem de boas-vindas, rolagem e tratamento de panic legível), 1
 (interrupções, teclado e prompt de comandos), 2 (infraestrutura de
 depuração: saída serial e testes automatizados dentro do QEMU), 3
@@ -58,9 +58,11 @@ depuração: saída serial e testes automatizados dentro do QEMU), 3
 double fault com pilha dedicada), 4.1 (nova identidade: o projeto passa
 a se chamar os-rust, com o logo acima aparecendo na tela a cada boot) e
 5 (primeiro programa de usuário: ring 3, syscalls `write` e `exit`,
-carregador de ELF64 estático e o comando `run hello`) estão concluídos e
-são o que este repositório executa hoje. Os Marcos 6 em diante continuam
-planejados. A demonstração original de palestra, no
+carregador de ELF64 estático e o comando `run hello`) e 6 (interface de
+programação: leitura de teclado e memória para os programas, biblioteca de
+runtime, e o isolamento de falhas demonstrado com `run eco` e `run
+falha_memoria`) estão concluídos e são o que este repositório executa hoje.
+Os Marcos 7 em diante continuam planejados. A demonstração original de palestra, no
 formato usado em aula, está preservada na tag git `v1.0-demo` e continua
 podendo ser usada como está.
 
@@ -79,7 +81,7 @@ detalhes de cada um vêm na sequência.
 | 4. Proteção | Ter GDT e TSS próprias e tratar as exceções principais, incluindo page fault e double fault com pilha dedicada. | Provocar um page fault e ver uma mensagem legível em vez de reboot. | Concluído |
 | 4.1. Nova identidade | Renomear o projeto para os-rust em todo lugar (pacote, crate, target, pastas, prompt, mensagens, documentação) e acrescentar o logo na tela de boot e no README. | `cargo run` mostra o logo, depois `os-rust v0.4.1` e o prompt `os-rust> `. | Concluído |
 | **5. Primeiro programa de usuário (marco central)** | Rodar o primeiro programa de usuário em modo protegido (ring 3), usando um mecanismo de syscall e um carregador de executáveis ELF64 embutidos na imagem de boot. | Comando `run hello` no prompt executa um programa em modo usuário que imprime na tela e retorna ao prompt. | Concluído |
-| 6. Interface de programação | Ampliar o contrato de syscalls (teclado, memória, código de saída) e oferecer uma biblioteca de runtime para quem escreve programas. | Um programa escrito por um aluno lê entrada do teclado e responde; um programa com acesso inválido à memória é encerrado sem derrubar o kernel. | Planejado |
+| 6. Interface de programação | Ampliar o contrato de syscalls (teclado, memória, código de saída) e oferecer uma biblioteca de runtime para quem escreve programas. | Um programa escrito por um aluno lê entrada do teclado e responde (`run eco`); um programa com acesso inválido à memória é encerrado sem derrubar o kernel (`run falha_memoria`). | Concluído |
 | 7. Multitarefa | Trocar de contexto entre mais de um programa carregado, primeiro de forma cooperativa e depois preemptiva. | Dois programas intercalando saída na tela. | Planejado |
 | 8. Sistema de arquivos | Ler arquivos de um sistema de arquivos, primeiro um ramdisk embutido e depois um driver de disco com leitura somente. | Listar arquivos e executar um programa lido do disco. | Planejado |
 | 9. Drivers | Acrescentar suporte a periféricos adicionais dentro do escopo do projeto, um por marco. | Um novo periférico demonstrado funcionando no QEMU. | Planejado |
@@ -137,13 +139,17 @@ usuário que imprime na tela e retorna ao prompt; `run crash` mostra que
 uma falha em programa não derruba o kernel. Depende do Marco 4. Este é o marco que entrega o objetivo central descrito na
 seção Visão.
 
-**Marco 6. Interface de programação.** Contrato de syscalls ampliado
-(leitura de teclado, memória para o programa, código de saída), uma
-biblioteca de runtime para programas com `_start`, `print!` e um alocador,
-e isolamento: uma falha no programa encerra o programa, não o kernel.
-Demonstrável: um programa escrito por um aluno, usando a biblioteca, lê
-entrada do teclado e responde; e um programa que acessa memória inválida é
-encerrado sem derrubar o kernel. Depende do Marco 5.
+**Marco 6. Interface de programação.** Concluído. Contrato de syscalls
+ampliado (versão 2 do [`SYSCALLS.md`](SYSCALLS.md): `SYS_READ_LINE` lê uma
+linha do teclado e `SYS_ALLOC` dá memória ao programa), uma biblioteca de
+runtime para programas (`runtime/`: ponto de entrada com `entry!`, `print!`
+e `println!`, `read_line` e um alocador que permite `Box` e `Vec`), e
+isolamento: uma falha no programa encerra o programa, não o kernel.
+Demonstrável: `run eco` lê uma linha do teclado e responde; `run
+falha_memoria` acessa memória inválida e é encerrado sem derrubar o kernel,
+com o prompt respondendo logo depois. Quem quiser escrever o próprio
+programa segue o [`GUIA_DO_PROGRAMADOR.md`](GUIA_DO_PROGRAMADOR.md).
+Depende do Marco 5.
 
 **Marco 7. Multitarefa.** Timer, troca de contexto, primeiro cooperativa e
 depois preemptiva, com mais de um programa carregado. Demonstrável: dois
@@ -173,11 +179,22 @@ A interface de programação entre o kernel e os programas de usuário (o
 contrato de syscalls: números, semântica, convenções de registradores,
 códigos de erro, formato de executável, região de carga e pilha inicial)
 está documentada em um único arquivo versionado, [`SYSCALLS.md`](SYSCALLS.md),
-desde o Marco 5 (versão 1 do contrato: `write` e `exit`). Ele é a única
-fonte dessa interface: nenhuma syscall existe sem estar nele, e um
-teste automatizado confere que o texto continua batendo com o código. Uma
-mudança incompatível no contrato aumenta a versão dele e exige atualizar,
-no mesmo marco, a biblioteca de runtime dos programas (Marco 6 em diante).
+desde o Marco 5 (versão 1 do contrato: `write` e `exit`). A versão atual é a
+2, do Marco 6, que acrescenta a leitura de uma linha do teclado e memória
+para o programa (`SYS_READ_LINE` e `SYS_ALLOC`). Ele é a única fonte dessa
+interface: nenhuma syscall existe sem estar nele, e um teste automatizado
+confere que o texto continua batendo com o código. Uma mudança incompatível
+no contrato aumenta a versão dele e exige atualizar, no mesmo marco, a
+biblioteca de runtime dos programas (`runtime/`), que usa as mesmas
+constantes que o kernel (crate `abi`).
+
+Quem quiser **escrever o próprio programa de usuário** deve seguir o
+[`GUIA_DO_PROGRAMADOR.md`](GUIA_DO_PROGRAMADOR.md): a estrutura mínima de um
+programa, a biblioteca de runtime (`print!`, `read_line`, `Box`/`Vec`), um
+resumo do contrato e o passo a passo para compilar e rodar com `run <nome>`.
+O [`WALKTHROUGH.md`](WALKTHROUGH.md) explica o kernel por dentro; o guia
+explica como programar para ele, sem precisar entender GDT, IDT ou o
+carregador de ELF64.
 
 ### Sobre mudar essa ordem
 
@@ -276,12 +293,13 @@ projeto (`x86_64-os_rust.json`), gerar uma imagem de boot com `bootimage`,
 e abrir uma janela do QEMU que dá boot via BIOS direto nesse binário. Em
 poucos segundos você deve ver o logo do os-rust (as 20 linhas do símbolo
 e do nome, no topo da tela), seguido da linha de identificação
-`os-rust v0.5.0` — a versão atual do projeto — e do prompt `os-rust> `
+`os-rust v0.6.0` — a versão atual do projeto — e do prompt `os-rust> `
 pronto para digitação, não um terminal comum.
 
-O mesmo `cargo run` também compila os programas de usuário (a pasta
-`programs/`, para o target `x86_64-os_rust_user.json`) e os embute na
-imagem de boot: não há nenhum passo manual a mais. Se um programa de
+O mesmo `cargo run` também compila a biblioteca de runtime (`runtime/`) e
+os programas de usuário (a pasta `programs/`, para o target
+`x86_64-os_rust_user.json`) e os embute na imagem de boot: não há nenhum
+passo manual a mais. Se um programa de
 usuário não compilar, o `cargo run` para com o erro do compilador em vez
 de gerar uma imagem com um programa desatualizado.
 
@@ -311,7 +329,7 @@ Não é preciso nenhum passo manual adicional para isso: é o mesmo
 | `falha <tipo>` | Provoca uma exceção de CPU de propósito: `pagina` (`#PF`), `pilha` (`#DF`), `opcode` (`#UD`), `protecao` (`#GP`) ou `breakpoint` (`#BP`); sem argumento ou com um tipo desconhecido, lista os tipos disponíveis |
 | `run <nome>` | Executa um programa de usuário embutido na imagem, em modo usuário (ring 3), e volta ao prompt quando ele termina; sem argumento, ou com um nome desconhecido, lista os programas disponíveis |
 
-### Programas de usuário: `hello` e `crash`
+### Programas de usuário: `hello`, `crash`, `eco` e `falha_memoria`
 
 O comando `run` executa programas escritos fora do kernel. Cada um vive em
 `programs/src/bin/` e é compilado como um executável ELF64 estático:
@@ -319,17 +337,30 @@ O comando `run` executa programas escritos fora do kernel. Cada um vive em
 - **`hello`** (`run hello`): escreve `Ola do ring 3!` e termina. Demonstra o
   caminho completo: o programa roda em ring 3, pede ao kernel que escreva
   na tela com a syscall `write` e encerra com a syscall `exit`, e o prompt
-  volta a responder. O código-fonte (`programs/src/bin/hello.rs`) comenta o
-  ponto de entrada e cada instrução `syscall`.
+  volta a responder. Desde o Marco 6 ele usa a biblioteca de runtime
+  (`println!`); a instrução `syscall` crua mora em `runtime/src/sys.rs`.
 - **`crash`** (`run crash`): executa uma instrução inválida de propósito.
   O kernel mostra `[run] crash encerrado por erro: #UD (Invalid Opcode) em
   <endereço>` e o prompt continua funcionando (inclusive `run hello` logo
   depois). Compare com `falha opcode`, que provoca o mesmo erro **dentro
   do kernel** e para tudo: um erro em programa nunca derruba o kernel.
+- **`eco`** (`run eco`): pede um texto (`digite algo: `), espera você
+  digitar e apertar Enter (o texto aparece enquanto você digita, e o
+  Backspace apaga), e responde `voce digitou: <texto>` e `palavras: <n>`.
+  Demonstra a leitura do teclado por syscall (`SYS_READ_LINE`) e a memória
+  dinâmica dentro de um programa (a contagem de palavras usa um `Vec`, pelo
+  alocador da biblioteca, que pede memória com `SYS_ALLOC`). Enquanto ele
+  espera, o teclado é dele; quando termina, volta ao prompt.
+- **`falha_memoria`** (`run falha_memoria`): escreve num endereço que não é
+  dele (`0xdeadbeef`). O kernel mostra `[run] falha_memoria encerrado por
+  erro de memoria: #PF (Page Fault) em <endereço>`, o código de erro e o
+  `endereco de falha`, encerra só o programa, e o prompt continua
+  funcionando (`run hello` e `run eco` logo depois).
 
 Como um programa pede serviços ao kernel (números das syscalls,
 registradores, códigos de erro, onde ele é carregado) está em
-[`SYSCALLS.md`](SYSCALLS.md).
+[`SYSCALLS.md`](SYSCALLS.md). Para escrever o seu próprio programa, veja o
+[`GUIA_DO_PROGRAMADOR.md`](GUIA_DO_PROGRAMADOR.md).
 
 Backspace apaga o último caractere digitado; Enter executa a linha. Um
 comando não reconhecido mostra uma mensagem de erro sugerindo `help`.
@@ -411,6 +442,37 @@ testes anteriores:
   os programas. `src/vga_buffer.rs`: `write_bytes` troca bytes fora do
   ASCII pelo quadrado `0xfe`.
 
+### O que os testes do Marco 6 cobrem
+
+Para conferir à mão, rode `cargo run` e digite `run eco` (digite um texto e
+Enter: ele volta na tela) e `run falha_memoria` (mensagem de erro de
+memória, prompt de volta; `run hello` e `run eco` funcionam em seguida). A
+suíte automatizada (`cargo test`) cobre, além dos testes anteriores:
+
+- `tests/user_runtime.rs` (programas em ring 3 dentro do QEMU; os testes
+  "digitam" empurrando scancodes na fila do teclado): `eco` devolve
+  exatamente o texto digitado (com Shift e Backspace, e linha vazia) e
+  conta as palavras com um `Vec`; a syscall de memória devolve o início do
+  heap, áreas contíguas arredondadas em páginas, memória gravável e zerada,
+  `ERR_INVAL` para tamanho zero e `ERR_NOMEM` acima de 1 MiB, e devolve os
+  frames no fim (150 execuções de 1 MiB sem esgotar a memória); uma escrita
+  além do fim do heap é `#PF`; `SYS_READ_LINE` com ponteiro do kernel, página
+  somente leitura ou tamanho grande demais devolve erro sem esperar tecla;
+  `falha_memoria` termina em `#PF` no endereço `0xdeadbeef` sem derrubar o
+  kernel (o próximo programa roda, inclusive 40 falhas seguidas); o prompt
+  volta a ler o teclado depois de um programa, e teclas digitadas com
+  antecedência chegam a ele intactas; o `GUIA_DO_PROGRAMADOR.md` contém,
+  literalmente, o código de `eco` e de `falha_memoria`; os nomes dos
+  programas são únicos.
+- `src/keyboard.rs`: `read_line` devolve exatamente o que foi digitado, com
+  Shift, Backspace, limite de caracteres, teclas ignoradas, e volta com as
+  interrupções desligadas. `src/syscall.rs`: `SYSCALLS.md` (versão 2)
+  concorda com as constantes (números 3 e 4, `ERR_NOMEM`, janela do heap,
+  limites de linha e de heap). `src/elf.rs`: um segmento que invade o heap é
+  recusado. `src/gdt.rs`: o topo da pilha de entrada do kernel é múltiplo de
+  16. `src/shell.rs`: `run` lista `eco` e `falha_memoria`, e `#PF` de
+  programa mostra `erro de memoria`.
+
 Para entender por dentro como esse mecanismo funciona (a porta serial, o
 executor de testes sem biblioteca padrão, e como o resultado viaja do
 kernel até o código de saída do `cargo test`), veja o capítulo
@@ -453,7 +515,8 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   tela de exceção (tela + serial); quando a exceção vem de um programa de
   usuário (ring 3), o handler encerra só o programa.
 - `src/keyboard.rs`: tradução de scancodes (Scan Code Set 1) para ASCII,
-  layout US QWERTY.
+  layout US QWERTY, e a leitura bloqueante de uma linha (`read_line`, com
+  eco e Backspace) que a syscall `SYS_READ_LINE` usa.
 - `src/memory.rs`: o alocador de frames físicos a partir do mapa de
   memória do bootloader (global, com reciclagem de frames), e a
   tradução/criação de mapeamentos na tabela de páginas ativa (usando o
@@ -461,10 +524,11 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   usuário.
 - `src/elf.rs`: o leitor de executáveis ELF64 estáticos (escrito à mão) e
   as regras de validação.
-- `src/user.rs`: o layout de memória do usuário, o carregador, e a
-  entrada e saída de ring 3 (`enter_user`/`leave_user`).
+- `src/user.rs`: o layout de memória do usuário (código e dados, heap e
+  pilha), o carregador, o heap do programa (`grow_heap`), e a entrada e
+  saída de ring 3 (`enter_user`/`leave_user`).
 - `src/syscall.rs`: o mecanismo `syscall`/`sysret`, o despachante e as
-  syscalls `write` e `exit`.
+  syscalls `write`, `exit`, `read_line` e `alloc`.
 - `src/programs.rs`: a tabela dos programas embutidos, gerada pelo
   `build.rs`.
 - `src/allocator.rs`: a faixa fixa de endereços virtuais do heap, o
@@ -472,19 +536,26 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   esgotado.
 - `src/shell.rs`: o buffer de linha e o prompt de comandos (`help`,
   `clear`, `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `run <nome>`).
-- `programs/`: a crate dos programas de usuário (`hello`, `crash`), com o
-  linker script (`link.ld`); compilada para o target de usuário pelo
-  `build.rs` da raiz, nunca diretamente.
+- `abi/`: as constantes do contrato de syscalls (números, erros, limites),
+  compartilhadas pelo kernel e pela biblioteca de runtime.
+- `runtime/`: a biblioteca de runtime dos programas de usuário (`entry!`,
+  `print!`/`println!`, `read_line`, alocador global, tratador de `panic`).
+- `programs/`: a crate dos programas de usuário (`hello`, `crash`, `eco`,
+  `falha_memoria`, um arquivo por programa em `src/bin/`), com o linker
+  script (`link.ld`); compilada para o target de usuário pelo `build.rs` da
+  raiz, nunca diretamente.
+- `GUIA_DO_PROGRAMADOR.md`: o guia de quem escreve programas para o os-rust.
 - `build.rs`: compila `programs/` (com um `cargo` aninhado) e embute os
   ELFs no kernel.
-- `SYSCALLS.md`: o contrato de syscalls (versão 1).
+- `SYSCALLS.md`: o contrato de syscalls (versão 2).
 - `tests/`: os testes de integração, cada um iniciando o kernel do zero
   em seu próprio binário — um teste de boot (que também confere a versão
   na mensagem de boas-vindas), um teste cujo resultado esperado é um
   panic, testes do alocador de frames, da paginação e do heap, e dois
   testes dedicados de proteção: `double_fault.rs` (prova que o handler
   roda na pilha dedicada da IST) e `page_fault.rs` (prova o endereço de
-  falha esperado), e `user_mode.rs` (roda programas de usuário em ring 3).
+  falha esperado), `user_mode.rs` (roda programas de usuário em ring 3) e
+  `user_runtime.rs` (leitura de teclado, memória, isolamento e o guia).
 - `x86_64-os_rust.json`: a especificação do target bare-metal customizado
   (sem sistema operacional por baixo).
 - `x86_64-os_rust_user.json`: a especificação do target dos programas de

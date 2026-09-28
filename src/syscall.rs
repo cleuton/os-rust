@@ -17,20 +17,15 @@ use x86_64::structures::paging::PageTableFlags;
 use x86_64::VirtAddr;
 
 use crate::user::{self, Termination, USER_REGION_END, USER_REGION_START};
-use crate::{gdt, memory, vga_buffer};
+use crate::{gdt, keyboard, memory, vga_buffer};
 
-/// `write(ptr, len)`: escreve `len` bytes, a partir de `ptr`, na tela.
-pub const SYS_WRITE: u64 = 1;
-/// `exit(code)`: encerra o programa e devolve o controle ao prompt.
-pub const SYS_EXIT: u64 = 2;
-
-/// Ponteiro ou intervalo inválido (fora da região do usuário, não mapeado).
-pub const ERR_FAULT: i64 = -1;
-/// Argumento fora dos limites permitidos (`len` de `write` acima do máximo).
-pub const ERR_INVAL: i64 = -2;
-
-/// Maior `len` aceito por uma chamada de `write`.
-pub const WRITE_MAX_LEN: u64 = 4096;
+// As constantes do contrato (números das syscalls, códigos de erro, limite de
+// `len`) vivem na crate `abi`, compartilhada com a biblioteca de runtime dos
+// programas: os números nunca divergem entre kernel e programas. O texto do
+// contrato é o `SYSCALLS.md`.
+pub use abi::{
+    ERR_FAULT, ERR_INVAL, ERR_NOMEM, IO_MAX_LEN, SYS_ALLOC, SYS_EXIT, SYS_READ_LINE, SYS_WRITE,
+};
 
 /// `rsp` do kernel no momento em que `enter_user` (em `user.rs`) desceu para
 /// ring 3. `leave_user` o restaura para "retornar" de `enter_user` quando o
@@ -60,6 +55,13 @@ extern "C" {
 // preservado, menos `rax` (resultado), `rcx` e `r11` (usados pela própria
 // instrução): por isso o stub salva e restaura `rdi`, `rsi`, `rdx`, `r8`,
 // `r9` e `r10`, que o código Rust chamado pode destruir.
+//
+// A syscall roda com `IF` desligado, com uma única exceção: `SYS_READ_LINE`
+// liga as interrupções enquanto espera uma tecla (`sti; hlt`, em
+// `keyboard::read_line`) e as desliga de novo antes de voltar aqui. É
+// obrigatório voltar com `IF` desligado: uma interrupção depois de
+// `mov rsp, [user_rsp]` e antes do `sysretq` rodaria no kernel em cima da
+// pilha do programa.
 global_asm!(
     ".global syscall_entry",
     "syscall_entry:",
@@ -139,8 +141,9 @@ pub fn init() {
     // validados.
     LStar::write(VirtAddr::new(syscall_entry as *const () as usize as u64));
     // O kernel entra com interrupções desligadas (a syscall roda na pilha
-    // de entrada, sem reentrância), direção de string limpa e sem trace,
-    // seja qual for o estado do programa.
+    // de entrada, sem reentrância; a espera de `SYS_READ_LINE` é a única
+    // exceção, e devolve `IF` desligado), direção de string limpa e sem
+    // trace, seja qual for o estado do programa.
     SFMask::write(RFlags::INTERRUPT_FLAG | RFlags::DIRECTION_FLAG | RFlags::TRAP_FLAG);
 }
 
@@ -152,8 +155,87 @@ extern "C" fn syscall_dispatch(nr: u64, a1: u64, a2: u64, _a3: u64) -> u64 {
     match nr {
         SYS_WRITE => sys_write(a1, a2) as u64,
         SYS_EXIT => user::terminate(Termination::Exit { code: a1 }),
+        SYS_READ_LINE => sys_read_line(a1, a2) as u64,
+        SYS_ALLOC => match user::grow_heap(a1) {
+            Ok(start) => start,
+            Err(code) => code as u64,
+        },
         _ => user::terminate(Termination::BadSyscall { number: nr }),
     }
+}
+
+/// Confere que todo o intervalo `[ptr, ptr + len)` é memória do programa:
+/// dentro da região do usuário e, para cada página que ele toca, mapeada e
+/// acessível ao usuário, e também **gravável** quando `writable` (o kernel vai
+/// escrever nele). Supõe `len > 0`. Qualquer falha devolve `Err(ERR_FAULT)`.
+/// É a defesa de toda syscall que recebe um ponteiro: o kernel nunca confia
+/// no ponteiro que o programa passa (`write` lê dele, `read_line` escreve
+/// nele).
+fn validate_user_range(ptr: u64, len: u64, writable: bool) -> Result<(), i64> {
+    let Some(end) = ptr.checked_add(len) else {
+        return Err(ERR_FAULT);
+    };
+    if ptr < USER_REGION_START || end > USER_REGION_END {
+        return Err(ERR_FAULT);
+    }
+
+    // Todas as páginas que o intervalo toca: da página de `ptr` até a do
+    // último byte (`end - 1`).
+    let mut page = ptr & !0xfff;
+    let last_page = (end - 1) & !0xfff;
+    while page <= last_page {
+        match memory::user_page_flags(VirtAddr::new(page)) {
+            Some(flags)
+                if flags.contains(PageTableFlags::USER_ACCESSIBLE)
+                    && (!writable || flags.contains(PageTableFlags::WRITABLE)) => {}
+            _ => return Err(ERR_FAULT),
+        }
+        page += 4096;
+    }
+    Ok(())
+}
+
+/// `read_line(ptr, len)`: espera uma linha do teclado e a escreve em `ptr`
+/// (com o `\n` final). Devolve os bytes escritos (`1 ≤ n ≤ len`), `0` se
+/// `len == 0`, ou um erro. Toda a validação acontece **antes** de esperar: um
+/// ponteiro ruim devolve `ERR_FAULT` sem consumir nenhuma tecla. Detalhes em
+/// `SYSCALLS.md` (`SYS_READ_LINE`).
+fn sys_read_line(ptr: u64, len: u64) -> i64 {
+    if len == 0 {
+        return 0;
+    }
+    if len > IO_MAX_LEN {
+        return ERR_INVAL;
+    }
+    // O kernel vai **escrever** nesse intervalo: além de mapeado e do usuário,
+    // precisa ser gravável (uma página de código ou de dados somente-leitura
+    // é recusada).
+    if let Err(code) = validate_user_range(ptr, len, true) {
+        return code;
+    }
+
+    // A linha é montada num buffer do kernel (na pilha de entrada) e só
+    // copiada para o programa depois do Enter: durante a espera o kernel não
+    // segura o ponteiro do usuário.
+    let capacity = (len as usize).min(keyboard::LINE_CAPACITY);
+    let mut line = [0u8; keyboard::LINE_CAPACITY];
+    let written = keyboard::read_line(&mut line[..capacity]);
+
+    // SAFETY: o intervalo `ptr..ptr + len` foi validado acima (dentro da região
+    // do usuário, mapeado, `USER_ACCESSIBLE` e gravável) e nada altera esse
+    // mapeamento enquanto o programa está bloqueado aqui: uma CPU só, um único
+    // programa, nenhuma syscall que desmapeie. `written <= capacity <= len`,
+    // então a cópia cabe no intervalo; o buffer do kernel e a memória do
+    // programa nunca se sobrepõem.
+    unsafe {
+        core::ptr::copy_nonoverlapping(line.as_ptr(), ptr as *mut u8, written);
+    }
+
+    // `read_line` já devolve com as interrupções desligadas; repetir aqui deixa
+    // a garantia visível no ponto que importa: o `sysretq` só pode acontecer
+    // com `IF` desligado.
+    x86_64::instructions::interrupts::disable();
+    written as i64
 }
 
 /// `write(ptr, len)`. O kernel **não confia no ponteiro**: antes de ler,
@@ -164,26 +246,11 @@ fn sys_write(ptr: u64, len: u64) -> i64 {
     if len == 0 {
         return 0;
     }
-    if len > WRITE_MAX_LEN {
+    if len > IO_MAX_LEN {
         return ERR_INVAL;
     }
-    let Some(end) = ptr.checked_add(len) else {
-        return ERR_FAULT;
-    };
-    if ptr < USER_REGION_START || end > USER_REGION_END {
-        return ERR_FAULT;
-    }
-
-    // Todas as páginas que o intervalo toca: da página de `ptr` até a do
-    // último byte (`end - 1`).
-    let mut page = ptr & !0xfff;
-    let last_page = (end - 1) & !0xfff;
-    while page <= last_page {
-        match memory::user_page_flags(VirtAddr::new(page)) {
-            Some(flags) if flags.contains(PageTableFlags::USER_ACCESSIBLE) => {}
-            _ => return ERR_FAULT,
-        }
-        page += 4096;
+    if let Err(code) = validate_user_range(ptr, len, false) {
+        return code;
     }
 
     // SAFETY: todas as páginas de `ptr..ptr + len` foram conferidas acima
@@ -201,6 +268,7 @@ fn sys_write(ptr: u64, len: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::user::{USER_HEAP_END, USER_HEAP_MAX_PAGES, USER_HEAP_START};
     use alloc::format;
 
     /// O contrato publicado, embutido no teste: se o texto e o código
@@ -208,24 +276,31 @@ mod tests {
     /// fonte da interface).
     const CONTRATO: &str = include_str!("../SYSCALLS.md");
 
+    /// Formata um endereço como o documento o escreve, com `_` no meio por
+    /// legibilidade (`0x4000_0000`): o valor da constante do código é
+    /// formatado do mesmo jeito para a comparação.
+    fn com_separador(valor: u64) -> alloc::string::String {
+        format!("{:#06x}_{:04x}", valor >> 16, valor & 0xffff)
+    }
+
     #[test_case]
     fn contrato_cita_os_numeros_das_syscalls() {
         assert!(CONTRATO.contains(&format!("| {} | `SYS_WRITE` |", SYS_WRITE)));
         assert!(CONTRATO.contains(&format!("| {} | `SYS_EXIT` |", SYS_EXIT)));
+        assert!(CONTRATO.contains(&format!("| {} | `SYS_READ_LINE` |", SYS_READ_LINE)));
+        assert!(CONTRATO.contains(&format!("| {} | `SYS_ALLOC` |", SYS_ALLOC)));
     }
 
     #[test_case]
     fn contrato_cita_os_codigos_de_erro() {
         assert!(CONTRATO.contains(&format!("| `ERR_FAULT` | `{}` |", ERR_FAULT)));
         assert!(CONTRATO.contains(&format!("| `ERR_INVAL` | `{}` |", ERR_INVAL)));
-        assert!(CONTRATO.contains(&format!("`len > {}`", WRITE_MAX_LEN)));
+        assert!(CONTRATO.contains(&format!("| `ERR_NOMEM` | `{}` |", ERR_NOMEM)));
+        assert!(CONTRATO.contains(&format!("`len > {}`", IO_MAX_LEN)));
     }
 
     #[test_case]
     fn contrato_cita_a_regiao_do_usuario() {
-        // O documento escreve os endereços com `_` no meio, por legibilidade
-        // (`0x4000_0000`): aqui o valor da constante é formatado do mesmo jeito.
-        let com_separador = |valor: u64| format!("{:#06x}_{:04x}", valor >> 16, valor & 0xffff);
         let regiao = format!(
             "[{}, {})",
             com_separador(USER_REGION_START),
@@ -235,7 +310,32 @@ mod tests {
     }
 
     #[test_case]
-    fn contrato_declara_a_versao_1() {
-        assert!(CONTRATO.contains("**Versão do contrato**: 1"));
+    fn contrato_cita_a_janela_do_heap_e_a_faixa_de_codigo() {
+        let heap = format!(
+            "[{}, {})",
+            com_separador(USER_HEAP_START),
+            com_separador(USER_HEAP_END)
+        );
+        assert!(CONTRATO.contains(&heap), "heap nao encontrado: {}", heap);
+        // Código e dados: do começo da região até o começo do heap.
+        let codigo = format!(
+            "[{}, {})",
+            com_separador(USER_REGION_START),
+            com_separador(USER_HEAP_START)
+        );
+        assert!(CONTRATO.contains(&codigo), "faixa de codigo nao encontrada: {}", codigo);
+    }
+
+    #[test_case]
+    fn contrato_cita_os_limites_de_linha_e_de_heap() {
+        // O limite de caracteres de uma linha e o de páginas do heap são
+        // definidos no código: o documento precisa dizer os mesmos números.
+        assert!(CONTRATO.contains(&format!("min(len, {})", keyboard::LINE_CAPACITY)));
+        assert!(CONTRATO.contains(&format!("passaria de {} ", USER_HEAP_MAX_PAGES)));
+    }
+
+    #[test_case]
+    fn contrato_declara_a_versao_2() {
+        assert!(CONTRATO.contains("**Versão do contrato**: 2"));
     }
 }

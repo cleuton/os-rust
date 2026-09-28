@@ -363,7 +363,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
     // para ser lido nela.
     let scancode: u8 = unsafe { port.read() };
 
-    SCANCODE_QUEUE.lock().push(scancode);
+    push_scancode(scancode);
 
     // SAFETY: sem este EOI, o PIC nunca libera a linha IRQ1 e o teclado
     // para de gerar novas interrupções depois da primeira tecla.
@@ -419,6 +419,17 @@ impl ScancodeQueue {
 }
 
 static SCANCODE_QUEUE: Mutex<ScancodeQueue> = Mutex::new(ScancodeQueue::new());
+
+/// Enfileira um scancode para o consumidor da fila (o prompt, ou um programa
+/// de usuário esperando uma linha). É o que o handler da IRQ1 usa por
+/// dentro, e o que os testes usam para "digitar" sem teclado físico.
+///
+/// Mesmo invariante de `next_scancode`: só deve ser chamada de dentro do
+/// handler ou com as interrupções desligadas, para o `Mutex` da fila nunca
+/// ser disputado com a IRQ1. Não aloca (a fila é um array de tamanho fixo).
+pub fn push_scancode(scancode: u8) {
+    SCANCODE_QUEUE.lock().push(scancode);
+}
 
 /// Remove e retorna o próximo scancode pendente, se houver.
 ///

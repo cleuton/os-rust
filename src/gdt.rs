@@ -20,11 +20,21 @@ pub const DOUBLE_FAULT_IST_INDEX: u16 = 0;
 /// escrever uma mensagem de texto curta, sem alocar).
 const DOUBLE_FAULT_STACK_SIZE: usize = 5 * 4096;
 
+/// Uma pilha de `N` bytes alinhada a 16. Um `static` de `[u8; N]` tem
+/// alinhamento 1, então seu endereço (e o do topo, que é o que o processador e o
+/// stub de `syscall` usam) pode cair em qualquer byte; a convenção de chamada
+/// (System V) e o próprio stub de `syscall` (`syscall.rs`) pressupõem que o topo
+/// da pilha é múltiplo de 16. Com o alinhamento declarado aqui, o topo
+/// (`início + N`, com `N` múltiplo de 16) também é múltiplo de 16.
+#[repr(align(16))]
+struct Stack<const N: usize>([u8; N]);
+
 /// Região estática reservada só para a pilha de double fault. Nunca
 /// acessada por código Rust diretamente — só o processador a usa, através
 /// do ponteiro guardado na TSS (`interrupt_stack_table`, abaixo). Sem
 /// página de guarda abaixo dela (fora de escopo deste marco).
-static mut DOUBLE_FAULT_STACK: [u8; DOUBLE_FAULT_STACK_SIZE] = [0; DOUBLE_FAULT_STACK_SIZE];
+static mut DOUBLE_FAULT_STACK: Stack<DOUBLE_FAULT_STACK_SIZE> =
+    Stack([0; DOUBLE_FAULT_STACK_SIZE]);
 
 /// Tamanho da pilha do kernel usada quando o processador entra no kernel
 /// vindo de ring 3: 5 páginas de 4 KiB (20 KiB), o mesmo tamanho da pilha
@@ -40,7 +50,8 @@ const KERNEL_ENTRY_STACK_SIZE: usize = 5 * 4096;
 /// kernel. Nunca acessada por código Rust diretamente, só pelo
 /// processador e pelos trechos de assembly, através do endereço do topo
 /// (`kernel_entry_stack_top`).
-static mut KERNEL_ENTRY_STACK: [u8; KERNEL_ENTRY_STACK_SIZE] = [0; KERNEL_ENTRY_STACK_SIZE];
+static mut KERNEL_ENTRY_STACK: Stack<KERNEL_ENTRY_STACK_SIZE> =
+    Stack([0; KERNEL_ENTRY_STACK_SIZE]);
 
 /// Endereço do topo (fim, exclusivo) da pilha do kernel para entradas
 /// vindas de ring 3. A pilha cresce para baixo, então o endereço usado por
@@ -151,5 +162,19 @@ pub fn init() {
         CS::set_reg(GDT.1.kernel_code);
         SS::set_reg(GDT.1.kernel_data);
         load_tss(GDT.1.tss);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn o_topo_da_pilha_de_entrada_e_multiplo_de_16() {
+        // O stub de `syscall` e a convenção de chamada pressupõem um topo
+        // alinhado a 16; sem `#[repr(align(16))]`, o endereço do `static`
+        // podia cair em qualquer byte (o que quebrava a espera de tecla numa
+        // `SYS_READ_LINE` de verdade).
+        assert_eq!(kernel_entry_stack_top().as_u64() % 16, 0);
     }
 }

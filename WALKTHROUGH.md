@@ -963,3 +963,132 @@ páginas do kernel ficam sob outra entrada de nível 3 (o kernel vive nos
 primeiros MiB, o programa a partir de 1 GiB) e as suas entradas de página
 não têm o bit, então o processador continua barrando qualquer acesso de
 ring 3 a elas. É a combinação de todos os níveis que decide.
+
+## Marco 6: a interface de programação
+
+No Marco 5 o `hello` pedia tudo ao kernel com a instrução `syscall` escrita à
+mão. Isso prova que o mecanismo funciona, mas ninguém escreve um programa
+assim. O Marco 6 transforma o mecanismo numa **interface de programação**:
+uma biblioteca (`runtime/`) que esconde a instrução, duas syscalls novas
+(ler uma linha do teclado e pedir memória) e a garantia, agora demonstrada
+com um programa de propósito, de que um erro no programa nunca derruba o
+kernel. Você vê tudo digitando `run eco` e `run falha_memoria` no prompt.
+Quem quiser escrever o próprio programa, sem entender nada disto por
+dentro, lê o `GUIA_DO_PROGRAMADOR.md`; aqui está o que acontece por baixo.
+
+### Uma biblioteca de runtime: o equivalente da libc
+
+Um programa de usuário não tem biblioteca padrão: nem `println!`, nem `Box`,
+nem sequer um `main`. A crate `runtime/` dá isso a ele, e é o que a libc é
+para um programa em C. Ela tem quatro arquivos:
+
+- `sys.rs`: o **único** lugar com `asm!` de `syscall`. É o mesmo `asm!` que o
+  `hello` do Marco 5 tinha escrito à mão, agora escrito uma vez só, com um
+  wrapper fino por syscall (`write`, `exit`, `read_line_raw`, `alloc`).
+- `io.rs`: `print!` e `println!` (que fazem `write`) e `read_line`.
+- `heap.rs`: o alocador global, que faz `Box`, `Vec` e `String` funcionarem.
+- `lib.rs`: a macro `entry!` e o tratador de `panic!`.
+
+Os números das syscalls não são escritos duas vezes: vivem numa crate
+minúscula, `abi/`, de que dependem **o kernel e a biblioteca**. Assim os
+dois lados nunca divergem (o teste do kernel que compara o `SYSCALLS.md` com
+as constantes protege também a biblioteca).
+
+### O `_start` e a macro `entry!`
+
+O processador começa a executar o programa no endereço que o ELF chama de
+ponto de entrada, `_start`. Um `main` de Rust não é isso: alguém precisa
+preparar o terreno, chamar `main` e, quando ele retornar, chamar `exit`. Isso
+é o que a macro `entry!(main)` gera **dentro do programa**: uma função
+`_start` que chama `main`, pega o `i32` que ele devolve e o passa a `exit`.
+Como a macro chama `main` com a assinatura escrita, o compilador confere que
+`main` é `fn() -> i32`; um `main` com outro tipo não compila. Um programa
+nunca retorna de `_start`: não há para onde voltar, então o último passo é
+sempre `exit` (é a regra do contrato, seção 3 do `SYSCALLS.md`).
+
+### `print!` e o que cada `println!` faz
+
+`print!` escreve com `core::fmt::Write` sobre a syscall `write`. Cada trecho
+de texto que o `format_args!` produz vira uma chamada: `println!("a {}", 1)`
+faz três syscalls (`a `, `1` e `\n`). É simples de propósito, e o custo de
+uma syscall é irrelevante aqui.
+
+### `read_line`: esperar uma tecla dentro de uma syscall
+
+`read_line(&mut buffer)` faz a syscall `SYS_READ_LINE`, que **bloqueia** o
+programa até a pessoa apertar Enter. Enquanto espera, o kernel mostra na
+tela o que é digitado e apaga com Backspace (o `write` não sabe apagar, então
+essa edição tem de ser do kernel). A parte curiosa é como o kernel espera.
+
+A instrução `syscall` entra no kernel com as interrupções **desligadas** (é o
+`SFMASK`). Mas o teclado avisa que há uma tecla por uma interrupção (a
+IRQ1); com elas desligadas, a fila de teclas nunca ganharia nada e o
+programa esperaria para sempre. Por isso `keyboard::read_line` faz o que o
+laço ocioso do kernel já faz: quando a fila está vazia, executa `sti; hlt`
+(`enable_and_hlt`, como uma única instrução atômica: uma tecla que chegue
+entre olhar a fila e dormir acorda a CPU). Quando a tecla chega, a IRQ1
+roda em ring 0, na mesma pilha, só empilha o scancode e volta.
+
+Essa é a **única** exceção à regra "syscall roda com interrupções
+desligadas", e ela tem de ser fechada com cuidado: antes de voltar ao
+programa o kernel troca `rsp` de volta para a pilha do programa e só então
+executa `sysretq`; se uma interrupção chegasse entre as duas coisas, o
+handler rodaria em cima de uma pilha em que o kernel não pode confiar. Por
+isso `read_line` e `sys_read_line` terminam sempre com `disable()`, e um
+teste confere que as interrupções voltam desligadas.
+
+De quem é o teclado enquanto o programa roda? Do programa, e sem nenhum
+mecanismo novo. O laço que lê o teclado e alimenta o prompt
+(`shell::poll_keyboard`) está **parado dentro** de `run`, esperando o
+programa terminar; o único leitor da fila é a syscall. Quando o programa
+termina, o laço continua, e o que sobrou na fila (digitação antecipada) vai
+para o prompt, sem perder nada.
+
+### O heap que só cresce: `SYS_ALLOC`
+
+`Box` e `Vec` precisam de um alocador, e o alocador precisa de memória. O
+kernel tem um heap fixo, mapeado no boot; um programa começa **sem heap**.
+`SYS_ALLOC(size)` amplia o heap do programa: arredonda para páginas de
+4 KiB, mapeia páginas novas (zeradas, graváveis, nunca executáveis) logo
+depois das que ele já tem e devolve o endereço do começo da área nova.
+É o `brk` do Unix. O heap vive numa janela fixa, `[0x6000_0000,
+0x6010_0000)`, então cabe no máximo 1 MiB; passar disso devolve `ERR_NOMEM`
+em vez de travar ninguém, e a chamada é tudo ou nada. A página logo depois
+do fim da janela nunca é mapeada: escrever além do fim do heap é um
+`#PF`, não uma corrupção silenciosa.
+
+O alocador da biblioteca (`heap.rs`) é o mesmo `linked_list_allocator` do
+kernel: só muda de onde vem a memória. Quando a alocação falha, ele pede mais
+páginas com `SYS_ALLOC` (no mínimo 16 KiB, para não fazer uma syscall a cada
+`Box` pequeno) e **estende** o mesmo bloco, porque o contrato garante que
+cada área nova começa onde a anterior terminou. No fim do programa
+(`exit`, falha ou syscall inválida) o heap volta ao alocador de frames junto
+com o código e a pilha: rodar um programa de 1 MiB 150 vezes, mais que a
+memória do QEMU, não esgota nada, e um teste prova isso.
+
+### Por que uma falha de programa não derruba o kernel: `falha_memoria`
+
+O `falha_memoria` escreve no endereço `0xdead_beef`, que não é dele. A CPU
+levanta um `#PF` em ring 3. O handler de `#PF` olha de qual anel a exceção
+veio (`came_from_user`, o seletor de código que a CPU empilhou): em ring 3,
+guarda o motivo, encerra só o programa e devolve o controle ao prompt, que
+mostra `encerrado por erro de memoria` com o endereço de falha
+(`0xdeadbeef`) e o código de erro (`0x6`: veio de ring 3, era uma escrita, a
+página não existia). Em ring 0 o mesmo `#PF` continua fatal, com a tela de
+exceção do Marco 4. É a mesma regra do Marco 5, agora com um programa feito
+para mostrá-la: o kernel continua de pé, e o programa seguinte (`run hello`,
+`run eco`) roda normalmente.
+
+### Um bug que só apareceu com a espera de tecla
+
+Ao rodar `run eco` de verdade no QEMU, a tela enchia de lixo assim que a
+primeira tecla chegava, embora todos os testes automatizados passassem. O
+que estava errado era a pilha de entrada do kernel: um `static` de `[u8; N]`
+tem alinhamento 1, então o endereço da pilha (e do topo, que é o que o
+processador e o stub de `syscall` usam) podia cair em qualquer byte; o topo
+estava em `0x...f3`. O stub de `syscall` supõe um topo múltiplo de 16 (é o que
+a convenção de chamada exige), e nada tinha aparecido antes porque nenhuma
+syscall ficava esperando com interrupções chegando em cima dessa pilha.
+Declarar as duas pilhas com `#[repr(align(16))]` resolveu, e há um teste que
+confere o alinhamento. Os testes automatizados não pegam tudo: o QEMU
+com teclado de verdade continua sendo parte da validação.

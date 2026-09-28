@@ -94,4 +94,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=programs");
     println!("cargo:rerun-if-changed=x86_64-os_rust_user.json");
+    // A biblioteca de runtime e o contrato de syscalls também entram em todo
+    // programa: editar qualquer um dos dois refaz o embutimento.
+    println!("cargo:rerun-if-changed=runtime");
+    println!("cargo:rerun-if-changed=abi");
 }
