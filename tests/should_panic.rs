@@ -1,9 +1,10 @@
-//! Teste de integração cujo resultado esperado é um panic (FR-016).
+//! Teste de integração cujo resultado esperado é um panic.
 //!
 //! Diferente dos demais binários de teste, este NÃO usa
 //! `custom_test_frameworks`: o alvo usa `panic-strategy = "abort"` (sem
 //! *unwinding*), então `#[should_panic]` do harness padrão não
-//! funcionaria aqui de qualquer forma — ver `research.md`, seção 6. Em
+//! funcionaria aqui de qualquer forma, já que ele depende de capturar o
+//! panic via *unwinding* e continuar a execução dos testes seguintes. Em
 //! vez disso, o panic é tratado diretamente como sucesso pelo
 //! `#[panic_handler]` deste arquivo.
 

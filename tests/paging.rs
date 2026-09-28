@@ -1,8 +1,7 @@
 //! Teste de integração de tradução de endereços e criação de
-//! mapeamentos (User Story 3, cenários 1-3): traduzir um endereço já
-//! mapeado pelo bootloader, traduzir um endereço não mapeado, e mapear
-//! uma página nova (incluindo o erro explícito de mapear a mesma página
-//! duas vezes) (FR-007, FR-008, FR-009).
+//! mapeamentos: traduzir um endereço já mapeado pelo bootloader, traduzir
+//! um endereço não mapeado, e mapear uma página nova (incluindo o erro
+//! explícito de mapear a mesma página duas vezes).
 
 #![no_std]
 #![no_main]
@@ -18,8 +17,7 @@ use x86_64::VirtAddr;
 
 /// Guarda o `boot_info` recebido por `main`, para que cada `#[test_case]`
 /// possa reconstruir `physical_memory_offset`/`memory_map` sem manter
-/// nenhum `OffsetPageTable`/alocador de frames vivo entre os testes
-/// (`research.md`, seção 12).
+/// nenhum `OffsetPageTable`/alocador de frames vivo entre os testes.
 static BOOT_INFO: spin::Once<&'static BootInfo> = spin::Once::new();
 
 entry_point!(main);

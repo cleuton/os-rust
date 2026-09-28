@@ -22,9 +22,12 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     shell::print_prompt();
 
     // Desenhado por último, direto nas linhas 0-19 (sem passar pelo
-    // `Writer` normal), para não ser deslocado pela rolagem incondicional
-    // que `print_welcome`/`shell::print_prompt` já dispararam acima
-    // (FR-007, FR-012; `research.md`, seção 6).
+    // `Writer` normal). O `Writer` sempre escreve na última linha visível
+    // e rola a tela inteira a cada `\n`; se o logo fosse escrito primeiro
+    // pelo caminho normal, cada linha nova de `print_welcome`/
+    // `shell::print_prompt` rolaria o logo já escrito para fora da tela.
+    // Escrevendo por último e direto no buffer, sem passar pelo `Writer`,
+    // nenhuma rolagem seguinte pode deslocá-lo.
     vga_buffer::draw_logo();
 
     serial_println!("[boot] prompt pronto");
@@ -53,10 +56,12 @@ fn on_panic(info: &PanicInfo) -> ! {
 }
 
 // Segundo ponto de entrada, usado só quando este binário é compilado em
-// modo de teste (`cargo test` também compila e roda `main.rs`, ainda que
-// sem nenhum #[test_case] próprio — ver `research.md`, seção 8): apenas
-// inicializa o kernel e roda a suíte (vazia, neste binário) gerada pelo
-// framework de testes customizado.
+// modo de teste. `cargo test` compila e roda em QEMU um binário por
+// arquivo de teste, mais a própria `lib.rs` e este `main.rs` — mesmo sem
+// nenhum #[test_case] próprio, rodar este binário sob teste prova que o
+// binário de produção ainda compila e dá boot também em modo de teste;
+// por isso ele só inicializa o kernel e roda a suíte (vazia, aqui)
+// gerada pelo framework de testes customizado.
 #[cfg(test)]
 entry_point!(test_kernel_main);
 

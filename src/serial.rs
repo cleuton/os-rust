@@ -22,7 +22,9 @@ lazy_static! {
 }
 
 /// Inicializa a porta serial. Deve ser chamada uma única vez, antes de
-/// qualquer outra escrita na serial (FR-001).
+/// qualquer outra escrita na serial — chamar de novo reinicializaria a
+/// mesma porta sem necessidade, e escrever antes de inicializar leria um
+/// estado do hardware ainda não configurado.
 pub fn init() {
     // A inicialização de fato acontece na primeira vez que `SERIAL1` é
     // acessado (via `lazy_static!`); forçar esse acesso aqui garante que
@@ -45,7 +47,7 @@ macro_rules! serial_println {
 pub fn _serial_print(args: fmt::Arguments) {
     use core::fmt::Write;
     // A aquisição do Mutex e a escrita inteira acontecem com interrupções
-    // desabilitadas (FR-003): se o fluxo principal estiver com o lock
+    // desabilitadas: se o fluxo principal estiver com o lock
     // travado, ele nunca pode ser interrompido no meio dessa seção, então
     // um tratador de interrupção que também escreva na serial nunca tenta
     // adquirir o mesmo Mutex enquanto ele já está travado — sem disputa,
@@ -64,7 +66,7 @@ mod tests {
     fn escreve_na_serial_sem_falhar() {
         // Não há como ler de volta o outro lado do canal serial a partir
         // do próprio kernel; o teste passa se a chamada retorna
-        // normalmente, sem travar nem entrar em panic (FR-002, FR-003).
+        // normalmente, sem travar nem entrar em panic.
         crate::serial_println!("teste de escrita na serial");
     }
 }

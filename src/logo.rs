@@ -1,6 +1,10 @@
-//! Texto canônico do logo, incluído direto do arquivo-fonte em tempo de
-//! compilação — sem nenhum escape de Rust, então este texto é byte a byte
-//! igual ao do `README.md` (FR-008).
+//! Logo ASCII de 20 linhas, incluído direto de `logo.txt` em tempo de
+//! compilação via `include_str!`, em vez de uma string literal Rust —
+//! o logo usa muitas barras invertidas (`\`), e uma string literal
+//! exigiria escapar cada uma delas (`\\`), o que deixaria o texto no
+//! `.rs` diferente do texto real do logo. `include_str!` lê o arquivo
+//! como está, então o texto aqui é byte a byte igual ao de `logo.txt` e
+//! ao do `README.md`.
 
 /// 20 linhas, no máximo 45 colunas, sem espaços no final de linha.
 /// Desenhado na tela por `vga_buffer::draw_logo()`.

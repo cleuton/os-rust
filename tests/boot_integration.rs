@@ -1,6 +1,6 @@
 //! Teste de integração de boot: inicia o kernel do zero (próprio
 //! binário, próprio `entry_point!`) e confirma que ele chega até o
-//! prompt ficar pronto, sem entrar em panic (FR-017).
+//! prompt ficar pronto, sem entrar em panic.
 
 #![no_std]
 #![no_main]
@@ -39,7 +39,8 @@ fn boas_vindas_mostra_a_versao() {
 #[test_case]
 fn identificacao_bate_com_o_manifesto() {
     // Montada aqui de novo, independentemente, a partir de `env!` — nunca
-    // um literal `"os-rust"`/`"0.4.1"` copiado à mão (FR-004, FR-021).
+    // um literal `"os-rust"`/`"0.4.1"` copiado à mão, que ficaria
+    // desatualizado no próximo bump de versão sem que este teste notasse.
     assert_eq!(
         os_rust::VERSION,
         concat!(env!("CARGO_PKG_NAME"), " v", env!("CARGO_PKG_VERSION"))
@@ -49,8 +50,8 @@ fn identificacao_bate_com_o_manifesto() {
 /// Traduz uma linha do texto canônico do logo para os bytes esperados na
 /// tela: `'█'` -> `0xDB` (bloco cheio da code page 437), ASCII imprimível
 /// -> o próprio byte, resto -> `0xfe` — a mesma tradução que
-/// `vga_buffer::draw_logo` aplica (FR-009). Colunas além do fim da linha
-/// ficam com espaço, como a tela já está depois de `clear_screen()`.
+/// `vga_buffer::draw_logo` aplica. Colunas além do fim da linha ficam com
+/// espaço, como a tela já está depois de `clear_screen()`.
 fn linha_do_logo_traduzida(linha: &str) -> [u8; 80] {
     let mut esperado = [b' '; 80];
     for (col, ch) in linha.chars().enumerate() {
@@ -64,7 +65,7 @@ fn linha_do_logo_traduzida(linha: &str) -> [u8; 80] {
 }
 
 /// Confere que as 20 primeiras linhas da tela batem, char a char, com
-/// `os_rust::logo::LOGO` traduzido (FR-022).
+/// `os_rust::logo::LOGO` traduzido.
 fn assert_logo_intacto() {
     for (row, linha) in os_rust::logo::LOGO.lines().enumerate() {
         assert_eq!(
@@ -79,7 +80,8 @@ fn assert_logo_intacto() {
 #[test_case]
 fn logo_aparece_intacto_nas_20_primeiras_linhas() {
     // Isola `draw_logo()` do resto da sequência de boot, para provar só
-    // a tradução de caracteres (FR-022; `research.md`, seção 8).
+    // a tradução de caracteres, sem depender de mais nada ter escrito na
+    // tela antes.
     os_rust::vga_buffer::clear_screen();
     os_rust::vga_buffer::draw_logo();
     assert_logo_intacto();
@@ -87,12 +89,11 @@ fn logo_aparece_intacto_nas_20_primeiras_linhas() {
 
 #[test_case]
 fn logo_sobrevive_a_sequencia_completa_de_boot_sem_rolar() {
-    // Repete a ordem exata de `main.rs::kernel_main` (FR-007) e confere
-    // de novo que o logo continua intacto depois que a identificação e o
-    // prompt já escreveram na tela — prova FR-012/SC-001 (nenhuma linha
-    // do logo rola para fora quando o prompt aparece) automaticamente,
-    // em vez de só no roteiro manual de `quickstart.md`
-    // (`research.md`, seção 6 e seção 8).
+    // Repete a ordem exata de `main.rs::kernel_main` e confere de novo
+    // que o logo continua intacto depois que a identificação e o prompt
+    // já escreveram na tela — prova automaticamente que nenhuma linha do
+    // logo rola para fora quando eles aparecem, em vez de depender só de
+    // inspeção visual no QEMU.
     os_rust::vga_buffer::clear_screen();
     os_rust::print_welcome();
     os_rust::shell::print_prompt();

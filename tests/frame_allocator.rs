@@ -1,6 +1,6 @@
-//! Teste de integração do alocador de frames físicos (User Story 2):
-//! frame alinhado e utilizável, sem repetição ao longo de várias
-//! chamadas, e sinal explícito de esgotamento (FR-002, FR-003, FR-004).
+//! Teste de integração do alocador de frames físicos: frame alinhado e
+//! utilizável, sem repetição ao longo de várias chamadas, e sinal
+//! explícito de esgotamento.
 
 #![no_std]
 #![no_main]
@@ -16,8 +16,7 @@ use x86_64::structures::paging::FrameAllocator;
 /// Guarda o `boot_info` recebido por `main`, para que cada `#[test_case]`
 /// (que não recebe parâmetros) possa construir sua própria instância de
 /// `BootInfoFrameAllocator` a partir do mesmo mapa de memória — sem
-/// manter nenhum alocador ou mapeamento vivo entre os testes
-/// (`research.md`, seção 12).
+/// manter nenhum alocador ou mapeamento vivo entre os testes.
 static BOOT_INFO: spin::Once<&'static BootInfo> = spin::Once::new();
 
 entry_point!(main);
@@ -75,10 +74,10 @@ fn frames_entregues_nunca_se_repetem() {
 
 /// Um mapa de memória pequeno e sintético (32 frames utilizáveis), só
 /// para este teste: `allocate_frame` custa O(próximo índice) por chamada
-/// (ver `research.md` seção 3 — simplicidade sobre eficiência), então
-/// esgotar o mapa real do boot (dezenas de milhares de frames numa VM de
-/// teste comum) seria demorado sem testar nada a mais do que esgotar um
-/// mapa pequeno já testa.
+/// — uma escolha simples em vez de eficiente, aceitável para este marco
+/// — então esgotar o mapa real do boot (dezenas de milhares de frames
+/// numa VM de teste comum) seria demorado sem testar nada a mais do que
+/// esgotar um mapa pequeno já testa.
 fn mapa_pequeno() -> &'static bootloader::bootinfo::MemoryMap {
     use bootloader::bootinfo::{FrameRange, MemoryMap, MemoryRegion, MemoryRegionType};
 

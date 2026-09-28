@@ -1,9 +1,12 @@
-//! Teste de integração de page fault (User Story 1, FR-019).
+//! Teste de integração de page fault.
 //!
 //! Como `should_panic.rs`, este teste NÃO usa `custom_test_frameworks`:
 //! o cenário é um único evento dirigido (provocar um `#PF` esperado),
-//! não uma suíte de `#[test_case]`s independentes — ver `research.md`,
-//! seção 9. `os_rust::init(boot_info)` já carrega a IDT de produção;
+//! não uma suíte de `#[test_case]`s independentes — um page fault não
+//! tratado pelo handler de teste levaria à tela de exceção de produção,
+//! que nunca retorna, então não haveria como continuar rodando outros
+//! testes na mesma suíte. `os_rust::init(boot_info)` já carrega a IDT de
+//! produção;
 //! este arquivo sobrepõe só a entrada `page_fault` com um handler de
 //! teste próprio, que confere o endereço de falha (CR2) contra o valor
 //! esperado antes de sinalizar o resultado ao host — a tela de exceção

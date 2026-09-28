@@ -1,6 +1,6 @@
 [package]
 name = "os-rust"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 
 [dependencies]
@@ -36,3 +36,12 @@ run-args = ["-serial", "stdio"]
 test-args = ["-serial", "stdio", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-display", "none"]
 test-success-exit-code = 33
 test-timeout = 60
+
+# O pacote raiz continua sendo o kernel. `programs` é o segundo membro do
+# workspace só para satisfazer o cargo (um pacote dentro da árvore de outro
+# precisa ser membro ou estar excluído), e `default-members` mantém
+# `cargo run` e `cargo test` restritos ao kernel: `programs` só é compilado
+# pelo `build.rs` do kernel, para o target de usuário.
+[workspace]
+members = ["programs"]
+default-members = ["."]

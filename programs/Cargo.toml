@@ -1,0 +1,10 @@
+# Programas de usuário do os-rust (ring 3). Compilados para o target
+# `x86_64-os_rust_user.json` pelo `build.rs` do kernel, nunca diretamente
+# por `cargo run`/`cargo test` (ver `default-members` no Cargo.toml raiz).
+#
+# Sem `[profile.*]`: perfis só valem na raiz do workspace, e o
+# `panic = "abort"` já vem do próprio target de usuário.
+[package]
+name = "programs"
+version = "0.1.0"
+edition = "2021"

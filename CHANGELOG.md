@@ -5,6 +5,67 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.5.0] - 2026-09-28
+
+Marco 5: primeiro programa de usuário. O os-rust passa a executar código
+que não é do kernel, em modo usuário (ring 3): o comando `run hello` do
+prompt carrega um programa embutido na imagem de boot, que escreve na
+tela por meio de uma chamada de sistema e devolve o controle ao prompt.
+
+### Adicionado
+
+- Comando `run <nome>` no prompt: executa um programa de usuário embutido;
+  sem argumento, ou com um nome desconhecido, lista os programas
+  disponíveis.
+- Modo usuário (ring 3): segmentos de código e dados do usuário na GDT e
+  entrada em ring 3 (`src/user.rs`), com volta ao prompt quando o programa
+  termina, seja por `exit`, seja por uma falha.
+- Mecanismo de chamada de sistema com a instrução `syscall`/`sysret`
+  (`src/syscall.rs`) e as duas primeiras syscalls, `write` e `exit`.
+- Contrato de syscalls versão 1 em um único arquivo, `SYSCALLS.md`
+  (números, registradores, códigos de erro, formato do executável, região
+  de carga, pilha inicial); testes automatizados conferem que o texto
+  concorda com o código.
+- Carregador de executáveis ELF64 estáticos escrito à mão (`src/elf.rs`),
+  com permissões por segmento (W^X) e recusa de ELFs inválidos sem mapear
+  nada.
+- Programas de referência `hello` (escreve `Ola do ring 3!` e termina) e
+  `crash` (executa uma instrução inválida de propósito), na nova crate
+  `programs/`, compilada para o novo target `x86_64-os_rust_user.json`.
+- O `build.rs` da raiz compila os programas de usuário e os embute no
+  kernel dentro do mesmo `cargo run`/`cargo test`; um erro de compilação
+  no programa para o build com o erro à vista.
+- `tests/user_mode.rs` (16 testes de integração em ring 3), testes de
+  unidade para o leitor de ELF e para o contrato, dois testes do comando
+  `run` e um de `Writer::write_bytes`.
+
+### Alterado
+
+- A GDT e a TSS ganham segmentos de dados do kernel e de código e dados do
+  usuário, e uma pilha do kernel para as entradas vindas de ring 3.
+- O alocador de frames passa a ser global, com reciclagem dos frames dos
+  programas encerrados.
+- Os handlers de exceção distinguem ring 3 de ring 0: uma falha em programa
+  de usuário encerra só o programa; em ring 0 continuam fatais, como antes.
+- `#DE`, `#SS` e `#NP` passam a ter handler (sem eles, a CPU escalaria para
+  double fault).
+- O repositório vira um workspace Cargo (o kernel continua na raiz;
+  `programs/` é o segundo membro).
+- Versão do projeto: `0.4.2` → `0.5.0`.
+
+## [0.4.2] - 2026-09-25
+
+Ajuste cosmético: nenhuma capacidade nova do kernel, nenhuma mudança de
+comportamento observável.
+
+### Alterado
+
+- Comentários de código em `src/` e `tests/` (GDT/TSS, interrupções,
+  memória, heap, serial, teclado, prompt e todos os testes de
+  integração): cada um agora declara por extenso, no próprio comentário,
+  o motivo da decisão que ele documenta.
+- Versão do projeto: `0.4.1` → `0.4.2`.
+
 ## [0.4.1] - 2026-09-25
 
 Marco 4.1: nova identidade — o projeto passa a se chamar `os-rust`
@@ -33,8 +94,8 @@ Marco de manutenção: nenhuma capacidade nova do kernel.
   por que o pacote `os-rust` vira a crate `os_rust`, por que o nome do
   arquivo JSON do target decide o nome da subpasta em `target/`, e por
   que `█` em UTF-8 não é o byte `0xDB` da code page 437.
-- Cláusula nos princípios de governança do projeto, codificando a
-  exceção de "marco de manutenção" (v2.0.1).
+- Cláusula no Princípio I da constitution do projeto, codificando a
+  exceção de "marco de manutenção" (constitution v2.0.1).
 
 ### Alterado
 

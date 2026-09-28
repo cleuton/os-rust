@@ -1,8 +1,8 @@
-//! Teste de integração do heap do kernel (User Story 3, cenários 4-6,
-//! exigido literalmente por FR-019): `Box`/`Vec` corretos e dentro da
-//! faixa do heap, reaproveitamento de memória liberada em volume
-//! (SC-004), reaproveitamento com um objeto mantido vivo, e respeito ao
-//! alinhamento pedido (FR-014).
+//! Teste de integração do heap do kernel: `Box`/`Vec` corretos e dentro
+//! da faixa do heap, reaproveitamento de memória liberada em volume (pelo
+//! menos 10 vezes o tamanho do heap ao longo do teste, sem falha),
+//! reaproveitamento com um objeto mantido vivo, e respeito ao alinhamento
+//! pedido.
 
 #![no_std]
 #![no_main]
@@ -88,9 +88,9 @@ fn reaproveitamento_nao_depende_do_heap_inteiro_estar_livre() {
 
 #[test_case]
 fn alocacao_respeita_alinhamento_maior_que_8_bytes() {
-    // FR-014, Edge Case "Tamanho e alinhamento": uma alocação com
-    // alinhamento de 4 KiB (maior que os 8 bytes que um `u64` já
-    // exigiria) deve ser respeitada pelo alocador de heap.
+    // Edge Case "Tamanho e alinhamento": uma alocação com alinhamento de
+    // 4 KiB (maior que os 8 bytes que um `u64` já exigiria) deve ser
+    // respeitada pelo alocador de heap.
     #[repr(align(4096))]
     #[allow(dead_code)]
     struct Pagina([u8; 4096]);

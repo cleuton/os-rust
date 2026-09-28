@@ -97,7 +97,16 @@ impl Writer {
     }
 
     fn write_string(&mut self, s: &str) {
-        for byte in s.bytes() {
+        self.write_bytes(s.as_bytes());
+    }
+
+    /// Escreve bytes crus na tela, com a mesma regra de `write_string`:
+    /// ASCII imprimível e `\n` aparecem como são, qualquer outro byte vira
+    /// o quadrado `0xfe`. Existe porque a syscall `write` (Marco 5) recebe
+    /// de um programa de usuário bytes que não são necessariamente UTF-8, e
+    /// por isso não podem passar por um `&str`.
+    pub fn write_bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
             match byte {
                 // ASCII imprimível ou nova linha: escreve como está.
                 0x20..=0x7e | b'\n' => self.write_byte(byte),
@@ -271,11 +280,13 @@ pub fn screen_contains(needle: &str) -> bool {
 /// abaixo). Por isso só deve ser chamada depois que `print_welcome`/
 /// `shell::print_prompt` já tiverem escrito seu conteúdo pelo caminho
 /// normal, nunca antes — assim o logo nasce exatamente nas linhas 0-19 e
-/// nenhuma escrita seguinte o desloca (FR-007, FR-012; `research.md`,
-/// seção 6). Cada `'█'` vira o byte `0xDB` (bloco cheio da code page
-/// 437); ASCII imprimível vira o próprio byte; qualquer outro caractere
-/// vira `0xfe`, como em `write_string` (FR-009). Nunca escreve na serial
-/// (FR-011); não move `column_position` nem o cursor de hardware.
+/// nenhuma escrita seguinte o desloca. Cada `'█'` vira o byte `0xDB`
+/// (bloco cheio da code page 437); ASCII imprimível vira o próprio byte;
+/// qualquer outro caractere vira `0xfe`, como em `write_string`, para não
+/// confiar que o texto do logo seja só ASCII/`'█'`. O logo é só visual:
+/// nunca escreve na serial, e não move `column_position` nem o cursor de
+/// hardware, porque nenhum código depois dele volta a escrever nessas
+/// linhas.
 pub fn draw_logo() {
     let mut writer = WRITER.lock();
     let color_code = ColorCode::new(Color::LightCyan, Color::Black);
@@ -337,6 +348,18 @@ mod tests {
         crate::print!("A");
         let ch = WRITER.lock().buffer.chars[BUFFER_HEIGHT - 1][0].read();
         assert_eq!(ch.ascii_character, b'A');
+    }
+
+    #[test_case]
+    fn write_bytes_troca_byte_fora_do_ascii_pelo_quadrado() {
+        clear_screen();
+        WRITER.lock().write_bytes(b"ab\xffc");
+        let writer = WRITER.lock();
+        let ultima_linha = &writer.buffer.chars[BUFFER_HEIGHT - 1];
+        assert_eq!(ultima_linha[0].read().ascii_character, b'a');
+        assert_eq!(ultima_linha[1].read().ascii_character, b'b');
+        assert_eq!(ultima_linha[2].read().ascii_character, 0xfe);
+        assert_eq!(ultima_linha[3].read().ascii_character, b'c');
     }
 
     #[test_case]

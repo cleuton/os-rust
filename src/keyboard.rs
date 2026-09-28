@@ -74,7 +74,7 @@ pub fn translate(scancode: u8) -> Option<u8> {
 /// Tabela base do Scan Code Set 1 (US QWERTY): cada entrada é
 /// (minúscula/sem-Shift, maiúscula/com-Shift). Cobre letras, dígitos,
 /// pontuação da linha de números e das teclas ao lado das letras, espaço,
-/// Enter e Backspace — exatamente o conjunto exigido.
+/// Enter e Backspace — exatamente o conjunto exigido pela spec.
 fn ascii_for_make_code(code: u8, shift: bool) -> Option<u8> {
     let (lower, upper) = match code {
         0x0E => return Some(0x08), // Backspace

@@ -589,7 +589,9 @@ duas entradas: o segmento de código do kernel (`Descriptor::kernel_code_segment
 usado para recarregar `CS`) e o descritor da TSS
 (`Descriptor::tss_segment(&TSS)`). Segmentos de usuário (ring 3) ficam
 para o Marco 5, quando modo usuário exigir um segmento de código e um de
-dados próprios para rodar programas fora do kernel.
+dados próprios para rodar programas fora do kernel (foi o que aconteceu:
+ver o capítulo "Marco 5" no fim deste texto, onde a GDT ganha quatro
+descritores a mais).
 
 ## A TSS e a Interrupt Stack Table: a pilha que resolve o problema
 
@@ -778,3 +780,186 @@ normal: ele lê o logo **caractere Unicode por caractere Unicode**
 (`str::chars()`, não `str::bytes()`) e traduz cada `'█'` para o único
 byte `0xDB`, escrevendo direto nas células do buffer VGA.
 
+
+## Marco 5: o primeiro programa de usuário
+
+Até o Marco 4.1 o os-rust só executava código do próprio kernel. O Marco 5
+faz a coisa que dá sentido a todo o resto: executa um programa escrito
+**fora** do kernel, num nível de privilégio mais baixo, que só consegue
+escrever na tela pedindo ao kernel. Você o vê digitando `run hello` no
+prompt. Este capítulo explica o caminho inteiro, na ordem em que as peças
+entram em ação.
+
+### Por que o programa é compilado separadamente
+
+O kernel é um binário `no_std` para o target `x86_64-os_rust.json`, com
+detalhes que só fazem sentido dentro do kernel (por exemplo, o
+`code-model = kernel` e a zona vermelha da pilha desligada, porque uma
+interrupção pode chegar a qualquer momento em cima da pilha do kernel). Um programa de
+usuário é outra coisa: roda em ring 3, em endereços baixos, numa pilha
+que o kernel nunca usa. Por isso ele tem o **seu próprio target**,
+`x86_64-os_rust_user.json`, e a sua própria crate, `programs/`, com um
+executável por arquivo em `programs/src/bin/` (`hello.rs`, `crash.rs`).
+
+Um detalhe que aparece quando se escolhe onde o programa vai morar: o
+linker script `programs/link.ld` fixa a base em `0x4000_0000` (1 GiB).
+Parece arbitrário, mas não é: o modelo de código padrão do Rust gera
+endereços absolutos de 32 bits com sinal, então o programa precisa caber
+abaixo de 2 GiB. Numa tentativa com uma base bem mais alta o linker falhou
+com `relocation R_X86_64_32 out of range`. Cada grupo de seções (`.text`,
+`.rodata`, `.data`) começa numa página de 4 KiB própria, para que o
+carregador possa dar permissões diferentes a cada uma.
+
+### Como o executável chega dentro do kernel
+
+O kernel não compila nada enquanto roda: é um binário já pronto. Então o
+programa precisa estar **dentro** dele. Isso é feito em tempo de
+compilação, e sem nenhum passo manual, por um `build.rs` na raiz do
+repositório (um *build script*: um programa Rust que o Cargo roda antes de
+compilar o pacote). Esse script:
+
+1. roda um segundo `cargo build`, com o target de usuário, dentro de
+   `programs/`;
+2. copia cada ELF resultante para a pasta de saída do build (`OUT_DIR`);
+3. escreve, também em `OUT_DIR`, um arquivo `programs.rs` com uma tabela
+   (nome do programa + os bytes, via `include_bytes!`), que
+   `src/programs.rs` inclui com `include!`.
+
+O mesmo mecanismo que já embute o `src/logo.txt` como texto, agora
+embute um binário compilado. O `rerun-if-changed` faz o Cargo refazer tudo
+sempre que algo em `programs/` muda: por isso o `hello` embutido nunca fica
+desatualizado, e não precisa de `cargo clean`.
+
+Rodar um `cargo` dentro de um build script tem três armadilhas, todas
+resolvidas em `build.rs` e comentadas ali: o `cargo` de dentro usa um
+`--target-dir` próprio (o de fora segura o *lock* do diretório de build, e
+esperar por ele seria esperar para sempre); o ambiente que o `cargo` de
+fora injeta (flags, target, perfil) é apagado, para o programa de usuário
+não herdar as opções do kernel; e `programs` precisa ser membro do
+*workspace* declarado no `Cargo.toml` (`default-members = ["."]` mantém
+`cargo run` e `cargo test` compilando só o kernel).
+
+Se o programa não compila, o `build.rs` termina com `panic!` **antes** de
+copiar qualquer arquivo: o `cargo run` para com o erro do compilador à
+vista, e nunca sai uma imagem de boot com um programa velho por engano.
+
+### O que é um ELF e o que o carregador lê
+
+O arquivo que o `cargo` interno produz é um **ELF64**: o formato de
+executável dos sistemas Unix. Ele começa com um cabeçalho de 64 bytes
+(a "magia" `7f 45 4c 46`, se é de 32 ou 64 bits, para qual CPU, onde fica
+a primeira instrução) e uma tabela de **program headers**, que dizem o que
+copiar para onde. Cada `PT_LOAD` descreve um pedaço do programa: um
+endereço virtual, quantos bytes copiar do arquivo, quantos bytes ele ocupa
+na memória (o que passa do arquivo é zerado: a `.bss`) e se é legível,
+gravável, executável.
+
+`src/elf.rs` lê esses campos com `from_le_bytes`, sem nenhuma crate, e
+recusa, antes de mapear qualquer coisa, tudo que não seja um ELF64
+estático para x86-64, ou cujos segmentos saiam da região do usuário,
+dividam uma página ou tenham a entrada fora de código executável. Depois,
+`src/user.rs` faz o trabalho: para cada página de cada segmento, pega um
+frame físico, zera, copia os bytes e mapeia com as permissões do
+segmento. Uma página de código nasce sem o bit de escrita, e uma página de
+dados ou de pilha nasce com o bit `NO_EXECUTE`: nenhuma página é ao mesmo
+tempo gravável e executável (a regra **W^X**). O kernel escreve nos
+frames pela janela do mapa completo da memória física, e não pelo endereço
+do usuário, para poder preencher uma página que ficará somente-leitura.
+
+### Anéis de proteção e a GDT com segmentos de usuário
+
+O x86 tem quatro *anéis* de privilégio; sistemas modernos só usam dois:
+o **ring 0** (o kernel, que pode tudo) e o **ring 3** (programas, que não
+podem tocar em hardware nem em memória do kernel). O anel atual é o nível
+de privilégio do seletor de código carregado em `CS`. Por isso a GDT
+(capítulo anterior) ganha, no Marco 5, quatro descritores: dados do
+kernel, dados do usuário e código do usuário (além do código do kernel e da
+TSS que já existiam). A ordem é imposta pelo hardware: os dados do usuário
+precisam vir **antes** do código do usuário, e os dados do kernel logo
+**depois** do código do kernel, porque as instruções de entrada e saída
+de syscall calculam o seletor de um a partir do outro (`STAR + 8`,
+`STAR + 16`). A crate `x86_64` confere essa disposição quando o kernel
+grava o registrador `STAR`.
+
+### A instrução `syscall`
+
+Um programa de usuário não pode chamar uma função do kernel: o kernel está
+em outro anel. A forma de pedir um serviço é a instrução `syscall`: a CPU
+sobe para ring 0 e salta para um endereço que o kernel registrou antes,
+no registrador `LSTAR`. Quatro registradores configuram o mecanismo
+(`src/syscall.rs`):
+
+- `EFER.SCE`: liga a instrução;
+- `STAR`: os seletores de segmento de kernel e de usuário;
+- `LSTAR`: o endereço do stub de entrada (`syscall_entry`);
+- `SFMASK`: as flags que a CPU desliga sozinha ao entrar (interrupções,
+  direção, *trace*).
+
+A convenção (documentada em `SYSCALLS.md`) é: número da syscall em `rax`,
+argumentos em `rdi`, `rsi`, `rdx`, resultado em `rax`. A instrução destrói
+`rcx` (onde a CPU guarda o endereço de retorno) e `r11` (onde guarda as
+flags); o kernel preserva todo o resto.
+
+Há uma pegadinha: a instrução `syscall`, diferente de uma exceção, **não
+troca de pilha**. Ao chegar ao kernel, `rsp` ainda aponta para a pilha do
+programa, que o kernel nunca deve usar (o programa poderia ter posto lá
+qualquer valor). Por isso o stub de assembly guarda o `rsp` do programa
+num lugar seguro e troca à mão para a pilha do kernel (a mesma que a TSS
+declara em `rsp0`, usada pelo processador quando uma *exceção* chega em
+ring 3), empilha os registradores que o contrato promete preservar, chama
+o despachante em Rust e volta com `sysretq`.
+
+### Como o programa volta ao prompt
+
+O comando `run` é uma função comum do kernel, chamada pelo laço do prompt.
+Como ela "espera" um programa que roda em outro anel? Com o mesmo truque de
+`setjmp`/`longjmp`, do C. `enter_user` (assembly) empilha os registradores
+que o kernel precisa preservar, guarda o `rsp` do kernel, zera todos os
+outros registradores (nada do kernel pode vazar para o programa) e desce
+para ring 3. Quando o programa chama `exit`, ou faz algo errado, o
+kernel está numa pilha de entrada, dentro de um handler; `leave_user` então
+restaura o `rsp` guardado, desempilha os registradores e executa `ret`,
+que retorna a quem chamou `enter_user`, como se ele tivesse terminado
+normalmente. Depois disso, `run_image` desmapeia todas as páginas do
+programa e devolve os frames ao alocador: rodar `hello` mil vezes não
+esgota a memória. Quem mostra o resultado na tela é o comando `run`, num
+único lugar.
+
+### Por que o kernel não confia no ponteiro de `write`
+
+`write(ptr, len)` recebe um endereço e um tamanho que **o programa**
+escolheu. Se o kernel lesse `ptr` sem olhar, um programa poderia pedir
+para "escrever" um endereço do próprio kernel e enxergar (ou provocar) o
+que quisesse. Por isso `sys_write` confere, antes de ler qualquer byte,
+que o intervalo inteiro está dentro da região do usuário e que **cada
+página** dele está mapeada e marcada como acessível ao usuário; se não, a
+chamada devolve `ERR_FAULT` (`-1`) sem escrever nada, e o programa
+continua rodando. Esse é o ponto exato em que o kernel se protege do
+programa.
+
+### Por que `#DE`, `#SS` e `#NP` precisaram de handler
+
+Uma exceção de CPU num programa de usuário não pode derrubar o kernel.
+Os handlers do Marco 4 (`#UD`, `#GP`, `#PF`) passam a olhar de qual anel a
+exceção veio (o seletor de código empilhado pela CPU): em ring 3, só o
+programa é encerrado, com uma mensagem legível; em ring 0 continuam
+fatais, como antes. Mas não bastava isso. Um gate ausente na IDT não
+vira um erro comum: o processador levanta outra exceção, sem handler,
+e escala para **double fault**. Foi confirmado no teste: com o gate de
+divisão por zero (`#DE`) removido de propósito, o teste da divisão por
+zero terminou em `Double Fault (#DF)`, que é fatal para o kernel. Por isso
+`#DE`, `#SS` e `#NP` também ganharam handler. (Uma curiosidade do QEMU: um
+`push` com o `rsp` não canônico chega como `#PF`, e não como `#SS`, que é
+o que um processador real levantaria; o teste aceita os dois.)
+
+### Um detalhe sobre o bit `USER_ACCESSIBLE`
+
+Para uma página ser acessível em ring 3, o bit `USER_ACCESSIBLE` precisa
+estar ligado em **todos** os níveis da tabela de páginas, não só na
+página final. A região do usuário fica dentro da mesma entrada de nível 4
+(a de número 0) que o kernel usa, então mapear a primeira página do
+usuário liga esse bit também nessa entrada. Isso não expõe o kernel: as
+páginas do kernel ficam sob outra entrada de nível 3 (o kernel vive nos
+primeiros MiB, o programa a partir de 1 GiB) e as suas entradas de página
+não têm o bit, então o processador continua barrando qualquer acesso de
+ring 3 a elas. É a combinação de todos os níveis que decide.

@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "os-rust"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "bootloader",
  "lazy_static",
@@ -81,6 +81,10 @@ checksum = "62d9a86c292b165f757e47e7fd66855def189b2564609bc4203727b27c33db22"
 dependencies = [
  "x86_64",
 ]
+
+[[package]]
+name = "programs"
+version = "0.1.0"
 
 [[package]]
 name = "raw-cpuid"

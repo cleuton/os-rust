@@ -7,8 +7,10 @@ use spin::Mutex;
 use x86_64::instructions::port::Port;
 use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
+use x86_64::PrivilegeLevel;
 
 use crate::panic::halt_loop;
+use crate::user::Termination;
 use crate::vga_buffer::WRITER;
 use crate::{gdt, println, serial_println, VERSION};
 
@@ -22,8 +24,11 @@ const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 const KEYBOARD_INTERRUPT_VECTOR: u8 = PIC_1_OFFSET + 1;
 
 /// Máscara do PIC mestre: todas as linhas desabilitadas (bit 1), exceto a
-/// IRQ1 (bit 0 em zero = habilitada) — mantém o timer (IRQ0) e as demais
-/// linhas caladas (só IRQ1 fica habilitada).
+/// IRQ1 (bit 0 em zero = habilitada) — mantém o timer (IRQ0) calado, já
+/// que ele dispara imediatamente depois que as interrupções são
+/// habilitadas globalmente e o kernel ainda não tem nenhum handler para
+/// ele; as demais linhas ficam caladas pelo mesmo motivo (sem driver
+/// ainda).
 const MASTER_PIC_MASK: u8 = 0b1111_1101;
 /// Máscara do PIC escravo: todas as linhas desabilitadas.
 const SLAVE_PIC_MASK: u8 = 0b1111_1111;
@@ -39,15 +44,19 @@ static PICS: Mutex<ChainedPics> = Mutex::new(unsafe {
     ChainedPics::new(PIC_1_OFFSET, PIC_2_OFFSET)
 });
 
-// Invariante do projeto, desde o Marco 3 (`research.md` do Marco 3,
-// seção 9; ampliado no Marco 4, `research.md` seção 5): nenhum handler
-// registrado nesta IDT aloca ou libera memória do heap.
-// `breakpoint_handler`, `invalid_opcode_handler`,
-// `general_protection_fault_handler`, `page_fault_handler` e
+// Invariante do projeto, desde o Marco 3 (memória) e ampliado no Marco 4
+// (proteção): nenhum handler registrado nesta IDT aloca ou libera memória
+// do heap.
+// `breakpoint_handler`, `divide_error_handler`, `invalid_opcode_handler`,
+// `general_protection_fault_handler`, `stack_segment_fault_handler`,
+// `segment_not_present_handler`, `page_fault_handler` e
 // `double_fault_handler` só usam `println!`/`serial_println!` (os
-// quatro últimos, através de `fatal_exception`, que só formata em
-// variáveis de pilha); `keyboard_interrupt_handler` só empilha um byte
-// numa fila de tamanho fixo (`ScancodeQueue`, array `[u8; 16]`). É isso
+// demais, através de `fatal_exception`, que só formata em variáveis de
+// pilha) ou, quando a exceção veio de um programa de usuário (ring 3),
+// `terminate_user`, que só grava o motivo num estático sem heap
+// (`user::TERMINATION`) e volta ao prompt; `keyboard_interrupt_handler` só
+// empilha um byte numa fila de tamanho fixo (`ScancodeQueue`, array
+// `[u8; 16]`). É isso
 // que garante que o `spin::Mutex` interno do alocador global
 // (`src/allocator.rs`) nunca pode ser disputado entre o fluxo principal
 // e uma interrupção — um handler novo que precise alocar violaria este
@@ -56,7 +65,12 @@ lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
         let mut idt = InterruptDescriptorTable::new();
         idt.breakpoint.set_handler_fn(breakpoint_handler);
+        idt.divide_error.set_handler_fn(divide_error_handler);
         idt.invalid_opcode.set_handler_fn(invalid_opcode_handler);
+        idt.stack_segment_fault
+            .set_handler_fn(stack_segment_fault_handler);
+        idt.segment_not_present
+            .set_handler_fn(segment_not_present_handler);
         idt.general_protection_fault
             .set_handler_fn(general_protection_fault_handler);
         idt.page_fault.set_handler_fn(page_fault_handler);
@@ -86,18 +100,121 @@ extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
     );
 }
 
-/// Handler de instrução inválida (`#UD`): fatal, mostra a tela de
-/// exceção e para o kernel.
+/// Verdadeiro se a exceção aconteceu enquanto um programa de usuário
+/// (ring 3) rodava: o seletor de código empilhado pela CPU tem RPL 3. Um
+/// erro em ring 3 encerra só o programa; um erro em ring 0 continua sendo
+/// fatal para o kernel (`fatal_exception`), exatamente como no Marco 4.
+fn came_from_user(stack_frame: &InterruptStackFrame) -> bool {
+    stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3
+}
+
+/// Encerra o programa de usuário que causou a exceção e devolve o controle
+/// ao prompt (via `user::terminate`). Só formata nada: o texto da mensagem
+/// é montado depois, pelo shell, já fora do handler. Nunca chama
+/// `panic::enter_fatal_handler`: aquela guarda é permanente e travaria o
+/// kernel no segundo erro de programa.
+fn terminate_user(
+    mnemonic: &'static str,
+    name: &'static str,
+    stack_frame: &InterruptStackFrame,
+    error_code: Option<u64>,
+    fault_address: Option<u64>,
+) -> ! {
+    crate::user::terminate(Termination::Fault {
+        mnemonic,
+        name,
+        rip: stack_frame.instruction_pointer.as_u64(),
+        error_code,
+        fault_address,
+    })
+}
+
+/// Handler de divisão por zero (`#DE`): em ring 3 encerra o programa; em
+/// ring 0 é fatal, mostra a tela de exceção e para o kernel.
+extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
+    if came_from_user(&stack_frame) {
+        terminate_user("#DE", "Divide Error", &stack_frame, None, None);
+    }
+    fatal_exception("Divide Error", "#DE", &stack_frame, None, None);
+}
+
+/// Handler de instrução inválida (`#UD`): em ring 3 encerra o programa; em
+/// ring 0 é fatal, mostra a tela de exceção e para o kernel.
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    if came_from_user(&stack_frame) {
+        terminate_user("#UD", "Invalid Opcode", &stack_frame, None, None);
+    }
     fatal_exception("Invalid Opcode", "#UD", &stack_frame, None, None);
 }
 
-/// Handler de proteção geral (`#GP`): fatal, mostra a tela de exceção
-/// (com o código de erro) e para o kernel.
+/// Handler de falha de segmento de pilha (`#SS`): acontece, por exemplo,
+/// quando um programa usa um `rsp` não canônico. Sem este gate, a CPU
+/// escalaria para double fault, que é fatal para o kernel. Em ring 3
+/// encerra o programa; em ring 0 é fatal.
+extern "x86-interrupt" fn stack_segment_fault_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    if came_from_user(&stack_frame) {
+        terminate_user(
+            "#SS",
+            "Stack-Segment Fault",
+            &stack_frame,
+            Some(error_code),
+            None,
+        );
+    }
+    fatal_exception(
+        "Stack-Segment Fault",
+        "#SS",
+        &stack_frame,
+        Some(error_code),
+        None,
+    );
+}
+
+/// Handler de segmento ausente (`#NP`): completa o conjunto de exceções
+/// que um programa de usuário pode provocar, para nenhuma delas escalar
+/// para double fault. Em ring 3 encerra o programa; em ring 0 é fatal.
+extern "x86-interrupt" fn segment_not_present_handler(
+    stack_frame: InterruptStackFrame,
+    error_code: u64,
+) {
+    if came_from_user(&stack_frame) {
+        terminate_user(
+            "#NP",
+            "Segment Not Present",
+            &stack_frame,
+            Some(error_code),
+            None,
+        );
+    }
+    fatal_exception(
+        "Segment Not Present",
+        "#NP",
+        &stack_frame,
+        Some(error_code),
+        None,
+    );
+}
+
+/// Handler de proteção geral (`#GP`): em ring 3 encerra o programa (é o que
+/// acontece com uma instrução privilegiada, como `hlt`, ou um `int` sem
+/// gate); em ring 0 é fatal, mostra a tela de exceção (com o código de
+/// erro) e para o kernel.
 extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    if came_from_user(&stack_frame) {
+        terminate_user(
+            "#GP",
+            "General Protection Fault",
+            &stack_frame,
+            Some(error_code),
+            None,
+        );
+    }
     fatal_exception(
         "General Protection Fault",
         "#GP",
@@ -107,14 +224,23 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     );
 }
 
-/// Handler de page fault (`#PF`): fatal, mostra a tela de exceção com o
-/// endereço de falha (lido de CR2) e a interpretação do código de erro
-/// em palavras, e para o kernel.
+/// Handler de page fault (`#PF`): em ring 3 encerra o programa; em ring 0
+/// é fatal, mostra a tela de exceção com o endereço de falha (lido de CR2)
+/// e a interpretação do código de erro em palavras, e para o kernel.
 extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
     let fault_address = Cr2::read_raw();
+    if came_from_user(&stack_frame) {
+        terminate_user(
+            "#PF",
+            "Page Fault",
+            &stack_frame,
+            Some(error_code.bits()),
+            Some(fault_address),
+        );
+    }
     fatal_exception(
         "Page Fault",
         "#PF",
@@ -135,16 +261,18 @@ extern "x86-interrupt" fn double_fault_handler(
     fatal_exception("Double Fault", "#DF", &stack_frame, None, None);
 }
 
-/// Mostra a tela de exceção fatal (tela + serial, FR-009) compartilhada
-/// pelas quatro exceções fatais (`#UD`, `#GP`, `#PF`, `#DF`), no mesmo
-/// estilo visual da tela de panic, com o cabeçalho `[EXCEPTION]` para
-/// distinguir as duas. Contém sempre nome/sigla,
-/// endereço da instrução e a versão do os-rust (FR-007); `error_code`
-/// aparece quando a exceção tem um (`#GP`, `#PF`); `page_fault_info`
-/// aparece só para `#PF`, com o endereço de falha e a interpretação em
-/// palavras do código de erro (FR-008). Nunca aloca memória do heap
-/// (FR-011) — só formata em variáveis de pilha. Nunca retorna: termina
-/// sempre parando a CPU de forma controlada (FR-007).
+/// Mostra a tela de exceção fatal (tela + serial) compartilhada pelas
+/// exceções fatais do kernel (`#DE`, `#UD`, `#GP`, `#SS`, `#NP`, `#PF`,
+/// `#DF`), no mesmo estilo
+/// visual da tela de panic, com o cabeçalho `[EXCEPTION]` em vez de
+/// `[PANIC]` para distinguir as duas. Contém sempre nome/sigla, endereço
+/// da instrução e a versão do os-rust; `error_code` aparece quando a
+/// exceção tem um (`#GP`, `#PF`); `page_fault_info` aparece só para `#PF`,
+/// com o endereço de falha e a interpretação em palavras do código de
+/// erro. Nunca aloca memória do heap — só formata em variáveis de pilha,
+/// então não há caminho realista para esta função provocar, ela mesma,
+/// uma nova exceção de CPU. Nunca retorna: termina sempre parando a CPU
+/// de forma controlada.
 fn fatal_exception(
     name: &str,
     mnemonic: &str,
@@ -169,7 +297,9 @@ fn fatal_exception(
 
     let address = stack_frame.instruction_pointer.as_u64();
 
-    // Interpretação em palavras do código de erro de page fault (FR-008),
+    // Interpretação em palavras do código de erro de page fault (o bit
+    // PROTECTION_VIOLATION indica se a página existe mas o acesso foi
+    // negado, e o bit CAUSED_BY_WRITE se foi leitura ou escrita),
     // calculada uma única vez e reaproveitada na tela e na serial.
     let page_fault_words = page_fault_info.map(|(fault_address, code)| {
         let acesso = if code.contains(PageFaultErrorCode::CAUSED_BY_WRITE) {
@@ -244,7 +374,9 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 
 /// Fila circular de tamanho fixo que separa a captura do scancode (handler
 /// de IRQ1, produtor) do processamento no fluxo principal do kernel
-/// (consumidor) — ver `research.md`, seção 4.
+/// (consumidor), sem tocar no `Writer` VGA dentro do handler — evita que a
+/// interrupção do teclado tente travar um lock que o fluxo principal já
+/// segura ao escrever na tela.
 struct ScancodeQueue {
     buffer: [u8; SCANCODE_QUEUE_CAPACITY],
     head: usize,

@@ -1,9 +1,11 @@
-//! Teste de integração de double fault (User Story 2, FR-018).
+//! Teste de integração de double fault.
 //!
 //! Como `page_fault.rs`, este teste NÃO usa `custom_test_frameworks`: é
 //! um único evento dirigido (estourar a pilha do kernel e provocar um
-//! `#DF`), não uma suíte de `#[test_case]`s — ver `research.md`, seção
-//! 9. `os_rust::init(boot_info)` já carrega a GDT/TSS/IST e a IDT de
+//! `#DF`), não uma suíte de `#[test_case]`s — o próprio double fault, se
+//! não for tratado na pilha certa, derruba o processador antes que
+//! qualquer suíte normal pudesse continuar rodando outros testes.
+//! `os_rust::init(boot_info)` já carrega a GDT/TSS/IST e a IDT de
 //! produção; este arquivo sobrepõe só a entrada `double_fault` com um
 //! handler de teste que sinaliza sucesso ao host assim que é alcançado
 //! — a prova de sucesso é justamente ele ter sido alcançado (rodando na
