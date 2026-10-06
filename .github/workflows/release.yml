@@ -60,8 +60,10 @@ jobs:
         id: cache-bootimage
         uses: actions/cache@v4
         with:
-          path: ~/.cargo/bin/bootimage
-          key: bootimage-0.10.5-${{ matrix.platform }}-${{ hashFiles('rust-toolchain.toml') }}
+          path: |
+            ~/.cargo/bin/bootimage
+            ~/.cargo/bin/cargo-bootimage
+          key: bootimage-0.10.5-v2-${{ matrix.platform }}-${{ hashFiles('rust-toolchain.toml') }}
 
       - name: Instalar bootimage
         if: steps.cache-bootimage.outputs.cache-hit != 'true'
