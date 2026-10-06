@@ -5,6 +5,74 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.7.0] - 2026-10-06
+
+Marco 7: multitarefa. O os-rust passa a rodar **vários programas de usuário
+ao mesmo tempo**, com o kernel alternando a CPU entre eles: primeiro de forma
+cooperativa (o programa cede a CPU por uma syscall nova) e depois de forma
+preemptiva (um timer de hardware tira a CPU de quem não a cede). Cada programa
+roda na sua própria memória. `run ping pong` mostra as linhas dos dois
+alternadas; `run contador_a contador_b` mostra a saída dos dois intercalada
+sem que nenhum peça a vez; `run falha_memoria contador_a` encerra só o que
+falhou; `run eco eco2` entrega cada linha digitada ao programa que pediu
+primeiro.
+
+### Adicionado
+
+- Syscall `SYS_YIELD` (5: cede a CPU ao próximo programa pronto) e o contrato
+  de syscalls versão 3 (`SYSCALLS.md`): a syscall nova, as regras de execução
+  simultânea (o que o programa pode e não pode assumir), a fatia de tempo, o
+  máximo de 4 programas ao mesmo tempo e a regra do teclado com vários
+  programas. Programas das versões 1 e 2 continuam funcionando.
+- Uma tarefa por programa carregado (`src/task.rs`): o estado dele em ring 3
+  (`TaskContext`, os 15 registradores gerais mais o frame de `iretq`), seu
+  estado de execução e o pedido de teclado em andamento.
+- Escalonador em rodízio (`src/scheduler.rs`): toda troca acontece na
+  fronteira ring 3 → ring 0, com a pilha de entrada do kernel vazia, então não
+  há pilha de kernel por tarefa; o kernel nunca é trocado.
+- Espaço de endereçamento próprio para cada programa (`memory::AddressSpace`):
+  tabela P4 e P3 próprias, copiadas das do kernel, com a região do usuário
+  vazia; trocar de tarefa troca o `CR3`. Ao terminar, todos os frames do
+  programa, inclusive os das tabelas de página, voltam ao alocador.
+- Timer (`src/timer.rs`): PIT a 100 Hz pela IRQ0 do PIC 8259, fatia de 5 ticks
+  (50 ms) e preempção. Um tick que interrompe ring 0 só envia o EOI e volta.
+- `keyboard::LineEditor`: o montador de linha extraído de `read_line`, usado
+  pelo escalonador para montar a linha de quem pediu primeiro.
+- `run <nome> [<nome>...]`: carrega até 4 programas, tudo ou nada, e devolve o
+  prompt quando o último termina. O mesmo nome pode se repetir.
+- Biblioteca de runtime: `yield_now()`. Cada `print!`/`println!` passa a sair
+  numa única chamada `write` (até 256 bytes), então uma linha não é partida
+  pela saída de outro programa.
+- Programas de exemplo `ping` e `pong` (se alternam com `yield_now`),
+  `contador_a` e `contador_b` (contam em laço longo sem nunca ceder a CPU) e
+  `eco2` (o irmão do `eco`, para `run eco eco2`).
+- Seção "Multitarefa" no `GUIA_DO_PROGRAMADOR.md`, com o código completo dos
+  cinco programas novos, e um capítulo no `WALKTHROUGH.md`.
+- Testes: `tests/multitarefa.rs` (contexto cooperativo, alternância,
+  preempção, isolamento de memória e de falhas, teclado com vários programas,
+  vazamento em 100 execuções, recusas do `run`) e `tests/artefatos.rs`
+  (higiene dos arquivos entregues, com a lista embutida pelo `build.rs`).
+  Também `memory::frames_outstanding` e `scheduler::set_poll_hook`, que
+  existem só para os testes.
+- Crate `abi`: `SYS_YIELD`, `MAX_TASKS`, `TIMER_HZ` e `SLICE_TICKS`.
+
+### Alterado
+
+- O stub de `syscall` monta um `TaskContext` na pilha do kernel e volta ao
+  programa por `iretq` (antes, por `sysretq`): `rcx` e `r11` voltam intactos,
+  embora o contrato continue dizendo que são destruídos.
+- `SYS_READ_LINE` bloqueia a tarefa em vez de esperar dentro da syscall: quem
+  espera não gasta CPU, e com todos esperando o kernel dorme em `hlt`.
+- A máscara do PIC libera a IRQ0 junto com a IRQ1.
+- A mensagem de término de um programa aparece na hora em que ele termina, e
+  o prompt volta quando o último termina.
+- `run eco xyz` agora trata `xyz` como o nome de um segundo programa (antes, os
+  argumentos depois do primeiro nome eram ignorados).
+- A lista `disponiveis:` das mensagens de `run` quebra de linha entre os nomes,
+  porque com mais programas ela passou de uma linha da tela.
+- O alocador de frames só avança o contador quando entrega um frame.
+- Versão do projeto: `0.6.0` → `0.7.0`.
+
 ## [0.6.0] - 2026-09-28
 
 Marco 6: interface de programação. Escrever, compilar e rodar um programa

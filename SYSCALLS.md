@@ -1,8 +1,8 @@
 # Contrato de syscalls do os-rust
 
-**Versão do contrato**: 2
+**Versão do contrato**: 3
 
-**Válido a partir de**: os-rust 0.6.0 (Marco 6)
+**Válido a partir de**: os-rust 0.7.0 (Marco 7)
 
 Este documento é tudo que um programa precisa saber para rodar no os-rust.
 O kernel e os programas nunca dependem de nada que não esteja aqui. Uma
@@ -24,7 +24,8 @@ usa a biblioteca (ver `GUIA_DO_PROGRAMADOR.md`).
   se tem `PF_X` (W^X). A pilha e o heap são graváveis e nunca executáveis.
 - `e_entry` deve estar dentro de um segmento executável.
 - O executável é embutido na imagem de boot em tempo de compilação
-  (não há sistema de arquivos) e executado com `run <nome>`.
+  (não há sistema de arquivos) e executado com `run <nome> [<nome>...]`:
+  vários programas podem rodar ao mesmo tempo (seção 8).
 
 ## 2. Onde o programa vive
 
@@ -46,8 +47,8 @@ code model padrão do Rust (`R_X86_64_32S` cabe).
 | `rip` | `e_entry` |
 | `rsp` | **`0x7FFF_FFF8`** (topo da região − 8): alinhamento de entrada de função da ABI System V, como se `_start` tivesse sido chamada; `[rsp]` **não** contém endereço de retorno válido. |
 | `rflags` | `0x202` (`IF = 1`, resto zero) |
-| `rcx` | `e_entry` (efeito colateral de `sysretq`, que deixa `rcx` como estava) |
-| `r11` | `0x202` (idem: é onde `sysretq` lê as flags) |
+| `rcx` | `e_entry` (o kernel o coloca no contexto inicial, como se o programa tivesse acabado de voltar de um `syscall` em `e_entry`) |
+| `r11` | `0x202` (idem: o `rflags` desse retorno) |
 | Todos os demais (`rax`, `rbx`, `rdx`, `rsi`, `rdi`, `rbp`, `r8`–`r10`, `r12`–`r15`) | `0` |
 | Segmentos | Código de usuário `0x23`, dados/pilha de usuário `0x1B` (definidos pelo kernel). |
 
@@ -73,8 +74,10 @@ Instrução `syscall`. Convenção de registradores:
 
 Durante a syscall o kernel roda numa pilha própria; a pilha do programa
 nunca é usada nem confiada. As interrupções ficam desligadas durante a
-syscall, com uma única exceção: `SYS_READ_LINE` as liga enquanto espera
-uma tecla (seção 5) e as desliga de novo antes de voltar ao programa.
+syscall: nenhuma troca de programa acontece no meio dela, e por isso cada
+chamada é atômica em relação aos outros programas. O kernel pode devolver
+`rcx` e `r11` intactos, mas o contrato não promete isso: um programa não
+pode depender do valor deles na volta.
 
 Exemplo, em Rust com `asm!`:
 
@@ -93,7 +96,7 @@ unsafe {
 
 ## 5. Syscalls
 
-Números do contrato v2. **Qualquer outro número** (inclusive `0`)
+Números do contrato v3. **Qualquer outro número** (inclusive `0`)
 encerra o programa (§7).
 
 | Nº | Nome | Argumentos | Resultado |
@@ -102,6 +105,7 @@ encerra o programa (§7).
 | 2 | `SYS_EXIT` | `rdi = code` | não retorna |
 | 3 | `SYS_READ_LINE` | `rdi = ptr`, `rsi = len` | bytes escritos (`≥ 1`), `0` se `len == 0`, ou erro (`< 0`) |
 | 4 | `SYS_ALLOC` | `rdi = size` | endereço do início da área nova (`> 0`) ou erro (`< 0`) |
+| 5 | `SYS_YIELD` | nenhum | `0` |
 
 ### `SYS_WRITE` (1)
 
@@ -121,15 +125,18 @@ o quadrado `0xfe`. Não exige UTF-8.
 
 Encerra o programa. `code` é registrado pelo kernel: `0` significa
 sucesso e não mostra nada na tela; qualquer outro valor mostra
-`[run] <nome> terminou com codigo <code>`. O controle volta ao prompt,
-todas as páginas do programa (código, dados, pilha e heap) são liberadas e
-nenhum estado do programa sobrevive à chamada.
+`[run] <nome> terminou com codigo <code>`. Só este programa termina: os
+outros, se houver, continuam, e o prompt volta quando o **último** termina.
+Todas as páginas do programa (código, dados, pilha e heap) são liberadas na
+hora e nenhum estado do programa sobrevive à chamada.
 
 ### `SYS_READ_LINE` (3)
 
 Espera a pessoa digitar uma linha no teclado e a entrega ao programa. O
-programa fica **bloqueado** até o Enter. Enquanto espera, o kernel mostra
-na tela o que é digitado (eco) e trata o Backspace.
+programa fica **bloqueado** até o Enter e, enquanto espera, **não gasta
+CPU**: os outros programas seguem rodando. Enquanto a linha é digitada, o
+kernel mostra na tela o que é digitado (eco) e trata o Backspace. Com mais
+de um programa esperando, a linha vai ao que pediu **primeiro** (seção 8).
 
 - `len == 0`: devolve `0` sem esperar e sem olhar `ptr`.
 - `len > 4096`: devolve `ERR_INVAL`; nenhuma tecla é consumida.
@@ -145,9 +152,8 @@ na tela o que é digitado (eco) e trata o Backspace.
   caracteres digitados **seguidos de `\n`** (`0x0a`). Devolve `n`, o total
   de bytes escritos: `1 ≤ n ≤ len`. Uma linha vazia devolve `1` (só o
   `\n`). Os bytes de `ptr + n` em diante não são tocados.
-- Como o único leitor do teclado durante a execução é o programa, teclas
-  digitadas e ainda não lidas ficam guardadas (até 16) e vão para o prompt
-  quando o programa termina (seção 8).
+- Teclas digitadas que nenhum programa pediu ficam guardadas (até 16) e
+  vão para o prompt quando o último programa termina (seção 8).
 
 ### `SYS_ALLOC` (4)
 
@@ -167,6 +173,18 @@ Dá memória ao programa: amplia o heap dele em `size` bytes.
   termina. Reaproveitar blocos dentro do heap é trabalho do programa (a
   biblioteca de runtime faz isso).
 
+### `SYS_YIELD` (5)
+
+Cede a CPU voluntariamente. O kernel guarda o estado do programa e passa a
+CPU ao próximo programa pronto, em rodízio; o programa volta a rodar, na
+instrução seguinte ao `syscall`, quando chegar a vez dele. Se nenhum outro
+programa está pronto, volta imediatamente ao próprio programa. Nunca falha e
+não tem código de erro. Todos os registradores, exceto `rax` (que vale `0`
+na volta), voltam com o valor que tinham.
+
+Na biblioteca de runtime: `yield_now()`. Um programa não precisa chamá-la
+para os outros rodarem: o timer interrompe quem não cede (seção 8).
+
 ## 6. Resultado e códigos de erro
 
 O resultado em `rax` é um inteiro com sinal de 64 bits: `≥ 0` é sucesso
@@ -184,28 +202,72 @@ Não há errno: o programa recebe só o valor em `rax`.
 
 | Motivo | Mensagem em tela e serial | Depois |
 |--------|---------------------------|--------|
-| `SYS_EXIT(0)` | nada na tela (a serial registra) | volta ao prompt |
-| `SYS_EXIT(n)`, `n ≠ 0` | `[run] <nome> terminou com codigo <n>` | volta ao prompt |
-| Acesso inválido à memória (`#PF`) em ring 3 | `[run] <nome> encerrado por erro de memoria: #PF (Page Fault) em <rip>` + `codigo de erro: <código>` + `endereco de falha: <endereço>` | volta ao prompt |
-| Outra exceção de CPU em ring 3 (`#DE`, `#UD`, `#GP`, `#SS`, `#NP`) | `[run] <nome> encerrado por erro: <sigla> (<nome da exceção>) em <rip>` (+ código de erro, quando houver) | volta ao prompt |
-| Número de syscall inexistente | `[run] <nome> encerrado: syscall inexistente (<n>)` | volta ao prompt |
+| `SYS_EXIT(0)` | nada na tela (a serial registra) | o prompt volta quando o último programa termina |
+| `SYS_EXIT(n)`, `n ≠ 0` | `[run] <nome> terminou com codigo <n>` | idem |
+| Acesso inválido à memória (`#PF`) em ring 3 | `[run] <nome> encerrado por erro de memoria: #PF (Page Fault) em <rip>` + `codigo de erro: <código>` + `endereco de falha: <endereço>` | idem |
+| Outra exceção de CPU em ring 3 (`#DE`, `#UD`, `#GP`, `#SS`, `#NP`) | `[run] <nome> encerrado por erro: <sigla> (<nome da exceção>) em <rip>` (+ código de erro, quando houver) | idem |
+| Número de syscall inexistente | `[run] <nome> encerrado: syscall inexistente (<n>)` | idem |
 
-Uma falha do programa **nunca** derruba o kernel: o
-programa é encerrado, suas páginas são liberadas e o prompt volta a
-responder; o programa seguinte roda normalmente. Tudo que não seja uma das
-linhas acima (por exemplo, um laço infinito) fica fora do contrato: não há
-limite de tempo (Marco 7 em diante).
+A mensagem aparece **na hora** em que aquele programa termina, em tela e
+serial, mesmo que outros continuem rodando. Uma falha do programa **nunca**
+derruba o kernel nem os outros programas: só ele é encerrado e suas páginas
+são liberadas; o prompt volta a responder quando o último termina, e o
+programa seguinte roda normalmente. Tudo que não seja uma das linhas acima
+(por exemplo, um laço infinito) fica fora do contrato: não há limite de
+tempo total, só a fatia de cada vez (seção 8).
 
-## 8. Teclado enquanto o programa roda
+## 8. Vários programas ao mesmo tempo
 
-Só um programa roda por vez e o prompt não lê o teclado enquanto ele roda:
-o programa é o único leitor, através de `SYS_READ_LINE`. O que o programa
-não leu não é perdido: fica na fila do teclado (16 posições; se encher, a
-tecla mais antiga é descartada) e o prompt o recebe quando o programa
-termina, por `exit` ou por erro. Um programa não termina no meio de uma
-linha (fica bloqueado em `SYS_READ_LINE` até o Enter); o que sobra é
-digitação antecipada, que o prompt recebe intacta, e o que for digitado
-depois aparece nele sem perdas.
+`run <nome> [<nome>...]` carrega todos os programas pedidos antes de começar
+qualquer um e só devolve o prompt quando o último termina. Os programas
+começam na ordem dada. O mesmo programa pode aparecer mais de uma vez:
+cada ocorrência é uma instância independente.
+
+O que o programa **pode** assumir:
+
+- Tem a memória só dele: o mesmo mapa de endereços da seção 2, mas ninguém
+  mais enxerga nem altera essas páginas, e ele não enxerga as dos outros.
+- Retoma exatamente de onde parou, com todos os registradores, a pilha e a
+  memória intactos, depois de qualquer troca (por `SYS_YIELD`, por timer ou
+  por espera de teclado).
+- Cada `SYS_WRITE` é entregue inteiro na tela, sem ser partido por saída de
+  outro programa. (A biblioteca de runtime junta cada `print!`/`println!`
+  numa única chamada de até 256 bytes, então uma linha curta nunca é
+  partida.)
+- `SYS_YIELD`, com mais programas prontos, passa a vez em rodízio, na ordem
+  em que foram dados a `run`.
+
+O que o programa **não** pode assumir:
+
+- Nenhuma ordem de execução entre programas além do rodízio de
+  `SYS_YIELD`. Um programa que cede a CPU logo (escreve uma linha e cede,
+  como `ping`) só é interrompido pelo timer se calcular por 40 ms ou mais, e
+  então a ordem dele é a do rodízio. Um programa que nunca cede a CPU é
+  interrompido pelo timer em qualquer instrução e retomado depois.
+- Nenhum tempo exato: a fatia é de **5 ticks** e o timer roda a **100 Hz**
+  (um tick a cada 10 ms). O timer só tira a CPU de um programa depois que
+  cinco ticks foram contados desde que ele foi colocado na CPU, isto é,
+  depois de 40 a 50 ms seguidos de computação. Os dois valores podem mudar
+  em marcos futuros.
+- Nenhum meio de comunicação entre programas (não existe nesta versão).
+
+Limite: no máximo **4** programas ao mesmo tempo. Pedir mais, ou um nome
+que não existe, recusa o `run` inteiro e **nenhum** programa é iniciado.
+
+### Teclado
+
+O teclado é entregue ao programa que está esperando uma linha em
+`SYS_READ_LINE`. Se mais de um espera, recebe o que pediu **primeiro**; os
+demais continuam esperando e só começam a receber depois. Uma tecla nunca vai
+a dois programas nem se perde. Um programa esperando não consome CPU.
+
+O prompt não lê o teclado enquanto há algum programa vivo. O que nenhum
+programa pediu não é perdido: fica na fila do teclado (16 posições; se
+encher, a tecla mais antiga é descartada) e o prompt o recebe quando o
+último programa termina, por `exit` ou por erro. Um programa não termina no
+meio de uma linha (fica bloqueado em `SYS_READ_LINE` até o Enter); o que
+sobra é digitação antecipada, que o prompt recebe intacta, e o que for
+digitado depois aparece nele sem perdas.
 
 ## 9. Histórico
 
@@ -213,3 +275,4 @@ depois aparece nele sem perdas.
 |--------|-------|---------|
 | 1 | 5 (os-rust 0.5.0) | Primeira versão: `SYS_WRITE`, `SYS_EXIT`, `syscall`/`sysret`, ELF64 estático. |
 | 2 | 6 (os-rust 0.6.0) | `SYS_READ_LINE` (3) e `SYS_ALLOC` (4); `ERR_NOMEM` (`-3`); janela do heap `[0x6000_0000, 0x6010_0000)`; segmentos do ELF limitados a `[0x4000_0000, 0x6000_0000)`; mensagem de `#PF` mostra "erro de memoria"; seção sobre o teclado. Programas v1 continuam funcionando. |
+| 3 | 7 (os-rust 0.7.0) | `SYS_YIELD` (5); vários programas ao mesmo tempo (até 4, cada um na sua memória, fatia de 5 ticks, timer a 100 Hz); mensagem de término na hora em que o programa termina; teclado para o programa que pediu primeiro. Programas v1 e v2 continuam funcionando. |

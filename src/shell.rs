@@ -4,8 +4,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+use abi::MAX_TASKS;
+
 use crate::keyboard::LINE_CAPACITY;
-use crate::user::{self, RunError, Termination};
+use crate::user::{self, Finished, RunError, Termination};
 use crate::{
     allocator, interrupts, keyboard, memory, print, println, serial_println, vga_buffer, NAME,
     VERSION,
@@ -34,7 +36,10 @@ const COMMANDS: &[(&str, &str)] = &[
         "falha",
         "provoca uma excecao de CPU para demonstracao (pagina, pilha, opcode, protecao, breakpoint)",
     ),
-    ("run", "executa um programa de usuario embutido (ex.: run hello)"),
+    (
+        "run",
+        "executa programas de usuario embutidos, juntos (ex.: run hello, run ping pong)",
+    ),
 ];
 
 /// Acumulador de tamanho fixo dos caracteres digitados até o próximo
@@ -297,20 +302,35 @@ fn cmd_falha_breakpoint() {
     x86_64::instructions::interrupts::int3();
 }
 
-/// Os nomes dos programas embutidos, separados por vírgula, para as
-/// mensagens de `run` (mesmo estilo da lista de tipos de `falha`).
-struct ProgramList;
+/// Colunas de uma linha da tela de texto VGA.
+const SCREEN_COLUMNS: usize = 80;
 
-impl core::fmt::Display for ProgramList {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        for (index, name) in user::program_names().enumerate() {
-            if index > 0 {
-                f.write_str(", ")?;
-            }
-            f.write_str(name)?;
+/// Mostra `disponiveis: a, b, c`, com os nomes dos programas embutidos, em uma
+/// ou mais linhas. A linha quebra **entre** os nomes: a tela tem 80 colunas e,
+/// com vários programas, a lista não cabe em uma linha só; deixar o `Writer`
+/// quebrar sozinho partiria um nome ao meio (`falha_` na linha de cima e
+/// `memoria` na de baixo).
+fn print_available_programs() {
+    let label = "disponiveis: ";
+    print!("{}", label);
+    let mut column = label.len();
+    let names: Vec<&str> = user::program_names().collect();
+    for (index, name) in names.iter().enumerate() {
+        let separator = if index + 1 < names.len() { "," } else { "" };
+        let width = name.len() + separator.len();
+        // O que não cabe no resto da linha começa uma linha nova.
+        if column + width > SCREEN_COLUMNS - 1 {
+            println!();
+            column = 0;
         }
-        Ok(())
+        print!("{}{}", name, separator);
+        column += width;
+        if !separator.is_empty() {
+            print!(" ");
+            column += 1;
+        }
     }
+    println!();
 }
 
 /// Escreve a mesma linha na tela e na serial: a serial é o canal que o
@@ -367,22 +387,51 @@ fn report(name: &str, termination: &Termination) {
     }
 }
 
-/// Executa um programa de usuário embutido (`run <nome>`) em modo usuário e
-/// volta ao prompt quando ele termina. Sem nome, ou com um nome que não
-/// existe, lista os programas disponíveis em vez de adivinhar um deles.
-/// Argumentos depois do nome são ignorados: o contrato v1 não tem `argv`.
+/// Chamado pelo escalonador no instante em que cada programa termina: mostra
+/// a mensagem na hora, antes de os outros programas acabarem.
+fn report_finished(finished: &Finished) {
+    report(finished.name, &finished.termination);
+}
+
+/// Executa programas de usuário embutidos (`run <nome> [<nome>...]`) ao mesmo
+/// tempo, cada um em modo usuário e na sua própria memória, e volta ao prompt
+/// quando o **último** terminar. Tudo ou nada: sem nome, com nome que não
+/// existe ou com mais programas que o máximo, lista o problema (e os programas
+/// disponíveis) e não inicia nenhum. O mesmo nome pode se repetir: são
+/// instâncias independentes.
 fn cmd_run(rest: &str) {
-    let Some(name) = rest.split_whitespace().next() else {
-        println!("run: informe o programa. disponiveis: {}", ProgramList);
+    let names: Vec<&str> = rest.split_whitespace().collect();
+    if names.is_empty() {
+        println!("run: informe o programa.");
+        print_available_programs();
         return;
-    };
-    match user::run(name) {
-        Ok(termination) => report(name, &termination),
-        Err(RunError::UnknownProgram) => {
-            println!("programa desconhecido: {}. disponiveis: {}", name, ProgramList);
+    }
+    if names.len() > MAX_TASKS {
+        println!("run: no maximo {} programas ao mesmo tempo", MAX_TASKS);
+        return;
+    }
+    if let Some(unknown) = names
+        .iter()
+        .find(|name| !user::program_names().any(|known| known == **name))
+    {
+        println!("programa desconhecido: {}", unknown);
+        print_available_programs();
+        return;
+    }
+    match user::run_all(&names, Some(report_finished)) {
+        Ok(_) => {}
+        Err(RunError::LoadFailed { index, error }) => {
+            say(format_args!("[run] erro ao carregar {}: {}", names[index], error));
         }
         Err(RunError::Load(error)) => {
-            say(format_args!("[run] erro ao carregar {}: {}", name, error));
+            say(format_args!("[run] erro ao carregar {}: {}", names[0], error));
+        }
+        Err(RunError::UnknownProgram) => {
+            println!("programa desconhecido");
+            print_available_programs();
+        }
+        Err(RunError::TooManyPrograms { max }) => {
+            println!("run: no maximo {} programas ao mesmo tempo", max);
         }
     }
 }

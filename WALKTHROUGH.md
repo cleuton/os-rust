@@ -898,7 +898,8 @@ no registrador `LSTAR`. Quatro registradores configuram o mecanismo
 A convenção (documentada em `SYSCALLS.md`) é: número da syscall em `rax`,
 argumentos em `rdi`, `rsi`, `rdx`, resultado em `rax`. A instrução destrói
 `rcx` (onde a CPU guarda o endereço de retorno) e `r11` (onde guarda as
-flags); o kernel preserva todo o resto.
+flags), e o contrato manda o programa tratar os dois como destruídos; o
+kernel preserva todo o resto.
 
 Há uma pegadinha: a instrução `syscall`, diferente de uma exceção, **não
 troca de pilha**. Ao chegar ao kernel, `rsp` ainda aponta para a pilha do
@@ -906,24 +907,29 @@ programa, que o kernel nunca deve usar (o programa poderia ter posto lá
 qualquer valor). Por isso o stub de assembly guarda o `rsp` do programa
 num lugar seguro e troca à mão para a pilha do kernel (a mesma que a TSS
 declara em `rsp0`, usada pelo processador quando uma *exceção* chega em
-ring 3), empilha os registradores que o contrato promete preservar, chama
-o despachante em Rust e volta com `sysretq`.
+ring 3), empilha o estado do programa (desde o Marco 7, um `TaskContext`
+inteiro, com os 15 registradores e o frame de retorno), chama o despachante em
+Rust e volta com `iretq`. (Até o Marco 6 o stub empilhava só os registradores
+que o contrato promete preservar e voltava com `sysretq`; o `iretq` permite
+devolver também um programa que foi tirado da CPU no meio, ver o capítulo do
+Marco 7.)
 
 ### Como o programa volta ao prompt
 
 O comando `run` é uma função comum do kernel, chamada pelo laço do prompt.
 Como ela "espera" um programa que roda em outro anel? Com o mesmo truque de
 `setjmp`/`longjmp`, do C. `enter_user` (assembly) empilha os registradores
-que o kernel precisa preservar, guarda o `rsp` do kernel, zera todos os
-outros registradores (nada do kernel pode vazar para o programa) e desce
-para ring 3. Quando o programa chama `exit`, ou faz algo errado, o
-kernel está numa pilha de entrada, dentro de um handler; `leave_user` então
-restaura o `rsp` guardado, desempilha os registradores e executa `ret`,
-que retorna a quem chamou `enter_user`, como se ele tivesse terminado
-normalmente. Depois disso, `run_image` desmapeia todas as páginas do
-programa e devolve os frames ao alocador: rodar `hello` mil vezes não
-esgota a memória. Quem mostra o resultado na tela é o comando `run`, num
-único lugar.
+que o kernel precisa preservar, guarda o `rsp` do kernel e entra no
+escalonador, que coloca o programa em ring 3 (o contexto inicial zera todos os
+registradores: nada do kernel pode vazar para o programa). Quando o programa
+chama `exit`, ou faz algo errado, o kernel está numa pilha de entrada, dentro
+de um handler; ao terminar o último programa, `leave_user` restaura o `rsp`
+guardado, desempilha os registradores e executa `ret`, que retorna a quem
+chamou `enter_user`, como se ele tivesse terminado normalmente. Antes disso, o
+escalonador destruiu o espaço de endereçamento do programa e devolveu os frames
+ao alocador: rodar `hello` mil vezes não esgota a memória. Quem mostra o
+resultado na tela é o comando `run`, num único lugar (no Marco 7, na hora em
+que cada programa termina).
 
 ### Por que o kernel não confia no ponteiro de `write`
 
@@ -1008,10 +1014,14 @@ sempre `exit` (é a regra do contrato, seção 3 do `SYSCALLS.md`).
 
 ### `print!` e o que cada `println!` faz
 
-`print!` escreve com `core::fmt::Write` sobre a syscall `write`. Cada trecho
-de texto que o `format_args!` produz vira uma chamada: `println!("a {}", 1)`
-faz três syscalls (`a `, `1` e `\n`). É simples de propósito, e o custo de
-uma syscall é irrelevante aqui.
+`print!` escreve com `core::fmt::Write` sobre a syscall `write`. O
+`format_args!` produz o texto em vários trechos (`println!("a {}", 1)` gera
+`a `, `1` e `\n`); a biblioteca os junta num buffer de 256 bytes na pilha do
+programa e entrega tudo ao kernel numa **única** chamada `write`. No Marco 6
+cada trecho era uma chamada, e isso era simples e bastava; com vários
+programas ao mesmo tempo (Marco 7), três chamadas por linha deixavam uma troca
+de tarefa partir a linha no meio (`ping ` de um programa, `pong 1` de outro).
+Uma chamada por linha resolve: cada `write` chega inteiro à tela.
 
 ### `read_line`: esperar uma tecla dentro de uma syscall
 
@@ -1020,29 +1030,23 @@ programa até a pessoa apertar Enter. Enquanto espera, o kernel mostra na
 tela o que é digitado e apaga com Backspace (o `write` não sabe apagar, então
 essa edição tem de ser do kernel). A parte curiosa é como o kernel espera.
 
-A instrução `syscall` entra no kernel com as interrupções **desligadas** (é o
-`SFMASK`). Mas o teclado avisa que há uma tecla por uma interrupção (a
-IRQ1); com elas desligadas, a fila de teclas nunca ganharia nada e o
-programa esperaria para sempre. Por isso `keyboard::read_line` faz o que o
-laço ocioso do kernel já faz: quando a fila está vazia, executa `sti; hlt`
-(`enable_and_hlt`, como uma única instrução atômica: uma tecla que chegue
-entre olhar a fila e dormir acorda a CPU). Quando a tecla chega, a IRQ1
-roda em ring 0, na mesma pilha, só empilha o scancode e volta.
+Como o kernel espera mudou no Marco 7. No Marco 6, a espera acontecia
+**dentro** da syscall: a instrução `syscall` entra com as interrupções
+desligadas (é o `SFMASK`), então o kernel executava `sti; hlt` até a IRQ1
+trazer uma tecla, a única exceção à regra "syscall roda com interrupções
+desligadas". Isso só funciona com um programa de cada vez: enquanto um
+programa dorme dentro da syscall, nenhum outro roda. Agora a tarefa é
+**bloqueada** e o escalonador passa a CPU a outra (ver "O teclado com vários
+programas", no capítulo do Marco 7), e nenhuma syscall liga as interrupções.
+`keyboard::read_line` continua existindo como a leitura bloqueante de um
+leitor só (os testes a usam); o que ela e o escalonador compartilham é o
+montador de linha, `LineEditor`.
 
-Essa é a **única** exceção à regra "syscall roda com interrupções
-desligadas", e ela tem de ser fechada com cuidado: antes de voltar ao
-programa o kernel troca `rsp` de volta para a pilha do programa e só então
-executa `sysretq`; se uma interrupção chegasse entre as duas coisas, o
-handler rodaria em cima de uma pilha em que o kernel não pode confiar. Por
-isso `read_line` e `sys_read_line` terminam sempre com `disable()`, e um
-teste confere que as interrupções voltam desligadas.
-
-De quem é o teclado enquanto o programa roda? Do programa, e sem nenhum
-mecanismo novo. O laço que lê o teclado e alimenta o prompt
-(`shell::poll_keyboard`) está **parado dentro** de `run`, esperando o
-programa terminar; o único leitor da fila é a syscall. Quando o programa
-termina, o laço continua, e o que sobrou na fila (digitação antecipada) vai
-para o prompt, sem perder nada.
+De quem é o teclado enquanto o programa roda? Do programa. O laço que lê o
+teclado e alimenta o prompt (`shell::poll_keyboard`) está **parado dentro** de
+`run`, esperando o último programa terminar; quem lê a fila é o escalonador,
+a pedido de um programa. Quando o último termina, o laço continua, e o que
+sobrou na fila (digitação antecipada) vai para o prompt, sem perder nada.
 
 ### O heap que só cresce: `SYS_ALLOC`
 
@@ -1092,3 +1096,225 @@ syscall ficava esperando com interrupções chegando em cima dessa pilha.
 Declarar as duas pilhas com `#[repr(align(16))]` resolveu, e há um teste que
 confere o alinhamento. Os testes automatizados não pegam tudo: o QEMU
 com teclado de verdade continua sendo parte da validação.
+
+## Marco 7: multitarefa
+
+Até o Marco 6, o kernel rodava um programa de usuário por vez: `run` ocupava o
+prompt até o programa terminar. O Marco 7 carrega **vários** ao mesmo tempo e
+alterna a CPU entre eles, primeiro quando o programa pede (a troca
+**cooperativa**, a syscall `SYS_YIELD`) e depois quando o timer manda (a troca
+**preemptiva**). A ideia central cabe numa frase: toda troca acontece quando um
+programa entra no kernel, e nesse momento o kernel não está no meio de nada.
+
+### O que é um contexto de execução
+
+Para tirar um programa da CPU e devolvê-la depois "exatamente de onde parou",
+o kernel precisa guardar tudo que define o estado dele em ring 3: os 15
+registradores de uso geral, o ponteiro de instrução (`rip`), a pilha (`rsp`),
+as flags (`rflags`) e os seletores de segmento (`cs`, `ss`). Isso é um
+`TaskContext` (`src/task.rs`): 20 palavras de 64 bits, numa ordem escolhida de
+propósito. Os cinco últimos campos (`rip, cs, rflags, rsp, ss`) são
+**exatamente** o frame que a instrução `iretq` consome; os 15 primeiros
+(`r15` no menor endereço, `rax` no maior) são os registradores, na ordem em que
+o assembly os empilha, `rax` primeiro e `r15` por último.
+
+Isso faz do contexto um bloco que pode ser montado em dois lugares sem cópia
+alguma. O stub de `syscall` (`syscall.rs`) empilha os cinco campos do frame e
+depois os 15 registradores, e quando a CPU entra por uma interrupção do timer
+ela mesma empilha o frame, e o stub (`timer.rs`) empilha os 15. Nos dois casos a
+pilha de entrada do kernel passa a conter um `TaskContext`, e o código em Rust
+recebe um `&mut TaskContext` apontando direto para ela. Retomar um programa é o
+caminho inverso, em `resume_task` (`user.rs`): apontar `rsp` para um
+`TaskContext`, desempilhar os 15 registradores e executar `iretq`, que carrega
+`rip, cs, rflags, rsp, ss` de uma vez e entra em ring 3. A primeira entrada de
+um programa usa o mesmo caminho: o contexto inicial (`TaskContext::initial`)
+tem `rip` na entrada do ELF, `rsp` no topo da pilha, `IF` ligado, e `rcx` e
+`r11` com o `rip` e as flags iniciais (era um efeito de `sysretq`; agora é o
+kernel que os coloca).
+
+### Por que não há pilha de kernel por tarefa
+
+O desenho clássico dá a cada tarefa uma pilha de kernel e uma rotina
+`switch_to` que troca de pilha no meio de código Rust. Aqui não precisa: toda
+troca acontece numa fronteira ring 3 → ring 0 (uma syscall, uma exceção ou o
+timer), quando a pilha de entrada do kernel acabou de ser carregada e **está
+vazia**, e o estado do programa está inteiro no topo dela. O kernel é
+"corre até o fim" a cada entrada: não existe nada dele para guardar entre duas
+trocas. Trocar é copiar esse `TaskContext` para a `Task` que sai e carregar o
+de outra. É a razão de o escalonador inteiro caber em ~270 linhas.
+
+Uma consequência: a volta de uma syscall passou de `sysretq` para `iretq`. O
+`sysretq` só devolve `rip` e `rflags` por `rcx` e `r11`, e não sabe restaurar
+um programa preemptado por inteiro; o `iretq` sabe. O contrato continua
+dizendo que `rcx` e `r11` são destruídos por uma syscall, mas o kernel
+agora os devolve intactos.
+
+### A troca cooperativa: `SYS_YIELD`, passo a passo
+
+1. O programa executa `syscall` com `rax = 5`. O stub (`syscall_entry`) troca
+   para a pilha de entrada do kernel e monta o `TaskContext`.
+2. `syscall_dispatch` recebe o contexto e chama `scheduler::yield_now`, que
+   grava `0` em `rax` (o resultado de `yield`).
+3. Se não há outra tarefa pronta, `yield_now` simplesmente retorna: o stub
+   desempilha o contexto e volta ao mesmo programa. Se há, copia o contexto para
+   a `Task` atual, marca-a `Ready` e chama `run_next`.
+4. `run_next` é o ponto único por onde toda tarefa começa ou volta a rodar. Ele
+   escolhe o **primeiro `Ready` depois do que rodou por último**, em ordem
+   circular (um rodízio: `ping`, `pong`, `ping`, ...), ativa o espaço de
+   endereçamento dela (`CR3`) e chama `resume_task`.
+5. `resume_task` desempilha o contexto da outra tarefa e executa `iretq`: o
+   outro programa continua na instrução seguinte ao `syscall` dele.
+
+O primeiro `run_next` de uma execução não vem de uma syscall: `enter_user`
+guarda o estado do kernel (como `setjmp`), desliga as interrupções e salta para
+o escalonador; quando a última tarefa termina, `leave_user` restaura esse estado
+e "retorna" de `enter_user`, como se ele tivesse terminado normalmente.
+
+### Um espaço de endereçamento por programa
+
+Os programas são todos ligados em `0x4000_0000`. Se dividissem uma tabela de
+páginas, qualquer um leria a memória do outro (e dois não poderiam nem
+coexistir no mesmo endereço). Por isso cada tarefa ganha a **própria tabela
+P4** (`memory::AddressSpace`).
+
+Criar um espaço é alocar dois frames, um para a P4 e outro para uma P3, e
+copiar para eles as tabelas do kernel. As entradas da P4 copiada apontam para as
+**mesmas** tabelas de nível mais baixo, então o kernel, a janela de memória
+física e a pilha de entrada continuam visíveis com qualquer `CR3`; só a entrada
+da região do usuário aponta para a P3 própria, que é cópia da do kernel com a
+entrada da região do usuário **vazia**. As páginas do programa são mapeadas
+depois, enquanto o espaço está ativo, e `map_to` cria as tabelas P2 e P1, que só
+ele usa. Trocar de tarefa é escrever o `CR3` (o que também descarta o TLB).
+
+Isso resolveu um vazamento que existia por construção: `Mapper::unmap` não
+libera tabelas de página. Destruir um espaço (`AddressSpace::destroy`)
+**percorre** a região do usuário (`P3[1] → P2 → P1`) e devolve ao alocador cada
+frame de página e cada frame de tabela, mais a P3 e a P4 próprias. Nada do que
+é do kernel é tocado. Um teste roda dois programas 100 vezes e confere que a
+conta de frames em uso volta ao mesmo valor.
+
+### O timer: PIT e IRQ0 pelo PIC
+
+O PIT (Programmable Interval Timer) conta a partir de um divisor e gera uma
+interrupção a cada volta da contagem. O oscilador dele roda a 1.193.182 Hz;
+com o divisor `11932` (a divisão arredondada, `1.193.182 / 100`), saem 100
+interrupções por segundo, um *tick* a cada 10 ms. `timer::init` escreve o
+comando `0x36` (canal 0, modo 3) na porta `0x43` e o divisor, byte baixo e
+byte alto, na porta `0x40`. A interrupção chega pela linha **IRQ0** do PIC 8259,
+o vetor 32; a máscara do PIC, que só deixava passar a IRQ1 (teclado), passa a
+liberar também a IRQ0.
+
+Todo handler de interrupção de hardware precisa terminar com o **fim de
+interrupção** (EOI, escrever `0x20` na porta `0x20` do PIC mestre); sem isso o
+PIC nunca entrega o tick seguinte. O stub do timer envia o EOI **antes** de
+qualquer troca de tarefa, em todos os caminhos: a CPU não volta ao ponto onde o
+handler estava se o escalonador trocar de tarefa, e um EOI deixado para depois
+silenciaria a IRQ0 para sempre. Um teste confere que, depois de muitas trocas,
+o contador de ticks continua avançando.
+
+### Por que e onde a troca preemptiva é segura
+
+O kernel **nunca** é trocado. O stub do timer (`timer_entry`) olha o seletor de
+código que a CPU empilhou, e o RPL dele diz de onde veio a interrupção:
+
+- de **ring 0** (o kernel estava rodando: o laço ocioso, o prompt, um teste):
+  conta o tick, envia o EOI e volta com `iretq`. Não troca de tarefa, não aloca,
+  não pega nenhum lock;
+- de **ring 3** (um programa estava rodando): empilha os 15 registradores
+  (nasce um `TaskContext`), envia o EOI e chama o escalonador, que decide se
+  passa a CPU a outro programa.
+
+Isso responde à pergunta "em que ponto é seguro trocar de tarefa?". Todo o
+resto do kernel (syscalls, exceções, a carga de programas, o alocador de frames,
+a tela) roda com as interrupções **desligadas** (o `SFMASK` do `syscall` e as
+portas de interrupção da IDT fazem isso), e portanto nunca é interrompido pelo
+timer. O único trecho com `IF = 1` é a espera ociosa (`hlt`), que não segura
+nenhum lock. Não há regiões críticas a marcar: o ponto seguro é a fronteira
+ring 3 → ring 0, e ela é também o único lugar onde se troca. Um tick que chega
+enquanto o kernel trata uma syscall fica **pendente** na CPU e é entregue assim
+que o `iretq` devolve o programa a ring 3 com `IF = 1`.
+
+Uma consequência dessa regra vale registrar: o código que roda depois de uma
+entrada vinda de ring 3 (o escalonador, o término de uma tarefa) **pode** alocar
+e liberar memória, porque nenhum código do kernel estava no meio de uma
+operação, então nenhum lock está preso. Handlers disparados em ring 0 continuam
+proibidos de alocar.
+
+### A fatia de tempo, e o que aprendemos com ela
+
+A primeira versão trocava de tarefa em todo tick vindo de ring 3 ("fatia de 1
+tick"), e quebrou uma garantia simples: `ping` e `pong` deixaram de se alternar
+sempre na mesma ordem (às vezes `pong 1` saía antes de `ping 1`). A causa é a
+combinação de duas coisas: o kernel roda com interrupções desligadas, então um
+tick que chega durante uma syscall fica pendente e é entregue no instante em
+que o programa volta a rodar; e o PIC guarda **no máximo um** tick pendente. Um
+tick caía entre a escrita e o `yield` de um programa, e ele perdia a vez.
+
+A correção é contar a fatia. Ao colocar uma tarefa na CPU, o escalonador guarda
+o valor do contador de ticks (`slice_start`); um tick vindo de ring 3 só tira a
+CPU da tarefa se `ticks - slice_start >= SLICE_TICKS`, e `SLICE_TICKS` é **5**
+(50 ms). Cada retorno de uma syscall pode somar um tick sem o programa ter
+computado nada, mas um programa que escreve uma linha e cede a CPU faz duas ou
+três syscalls por vez, menos que 5: nunca acumula uma fatia só com isso. Só é
+interrompido quem calcula em ring 3 por 40 ms ou mais, que é exatamente o que
+`contador_a` e `contador_b` fazem. Com 2 ticks o problema diminuiu mas não
+sumiu: `run ping trio` ainda saiu fora de ordem em 2 de 3 execuções no QEMU; com
+5, saiu em ordem em 6 de 6.
+
+### O teclado com vários programas
+
+`SYS_READ_LINE` valida o ponteiro como antes e, em vez de esperar dentro da
+syscall, **bloqueia a tarefa** (`WaitingKeyboard`) com um número de ordem (o
+`ticket`): o menor número é o que pediu primeiro. O escalonador passa a CPU a
+outra tarefa.
+
+Quem olha o teclado é `scheduler::poll_keyboard`, e só enquanto há alguém
+esperando: o que ninguém pediu fica na fila, como no Marco 6. Ela monta a linha
+com o `LineEditor` para a tarefa de menor `ticket` (eco e Backspace incluídos);
+quando o Enter completa a linha, ela fica guardada na tarefa, que passa a
+`Ready`, e as teclas seguintes valem para o próximo da espera. Uma tecla nunca
+vai a dois programas, e uma linha pela metade continua sendo de quem pediu
+primeiro, mesmo que outro programa peça depois. A **cópia** da linha para a
+memória do programa só acontece quando ele volta a rodar (`deliver_line`), já
+com o espaço de endereçamento dele ativo: o ponteiro foi validado antes de
+bloquear, e nada desmapeia páginas de uma tarefa que espera.
+
+`poll_keyboard` roda quando uma tarefa bloqueia (digitação antecipada), a cada
+`yield`, a cada tick vindo de ring 3 e a cada volta do laço ocioso. O tick
+importa: com um programa esperando o teclado e outro só calculando, a única
+chance de o kernel olhar a fila é o tick; se `preempt` não chamasse
+`poll_keyboard` **antes** de decidir se há outro programa pronto, a linha só
+chegaria depois que o outro terminasse. Um teste cobre exatamente isso.
+
+Quando nenhuma tarefa está pronta mas alguma espera, o kernel **dorme**: o laço
+ocioso de `run_next` executa `sti; hlt` (como uma instrução atômica: uma tecla
+ou um tick que chegue entre olhar e dormir acorda a CPU), e cada volta do laço
+é causada por uma interrupção. Não há laço ocupado. Os testes provam isso
+contando as voltas ociosas contra os ticks, e para "digitar" no meio da
+execução usam um gancho que o escalonador chama a cada `poll_keyboard`.
+
+### O ciclo de vida de uma tarefa
+
+1. `run_images` carrega **todos** os programas pedidos (cada um num espaço novo)
+   antes de iniciar qualquer um; se um falha, os já carregados são destruídos e
+   nada roda. Mais de 4 programas, ou um nome que não existe, recusa o pedido
+   inteiro.
+2. As tarefas nascem `Ready`, na ordem em que foram pedidas.
+3. Uma tarefa termina por `exit`, por uma exceção em ring 3 ou por uma syscall
+   inexistente. Em todos os casos o caminho é `terminate_current`: volta ao
+   espaço de endereçamento do kernel, registra o motivo, **avisa o shell** (que
+   mostra a mensagem na hora, antes de os outros acabarem), destrói o espaço
+   (todos os frames voltam ao alocador) e passa a CPU adiante.
+4. Quando não resta nenhuma tarefa, `leave_user` devolve o controle ao prompt.
+
+Por isso uma falha em um programa não derruba nem os outros: o kernel só
+descarta a tarefa que falhou. Os testes montam os programas de apoio à mão
+(ELFs de poucos bytes, com um mini-assembler no arquivo de teste), e um deles
+confere que cada registrador, a pilha e o heap de dois programas que se
+alternam voltam exatamente como estavam.
+
+### O que ficou de fora
+
+Prioridades, `sleep`, criar programas a partir de outros programas,
+comunicação entre programas e sincronização (mutex, semáforo) continuam
+fora do escopo. O kernel segue com um único processador e sem APIC.

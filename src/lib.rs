@@ -20,7 +20,10 @@ pub mod panic;
 pub mod logo;
 pub mod elf;
 pub mod programs;
+pub mod scheduler;
 pub mod syscall;
+pub mod task;
+pub mod timer;
 pub mod user;
 
 /// Nome do projeto, derivado literalmente do campo `name` de
@@ -53,7 +56,8 @@ pub fn print_welcome() {
 /// dela, e elas só vão para a serial, nunca para a tela); GDT/TSS antes
 /// da IDT, porque o handler de double fault na IDT referencia o índice
 /// de pilha que só a TSS reserva; interrupções antes de memória, porque
-/// nada em memória depende delas; memória depois; `syscall` por último,
+/// nada em memória depende delas; o timer logo depois das interrupções (só
+/// programa o PIT; a IRQ0 já foi liberada no PIC); memória depois; `syscall` por último,
 /// porque lê os seletores de segmento da GDT já carregada. Uma mensagem de
 /// diagnóstico na serial depois de cada etapa ajuda a localizar em qual
 /// delas o boot parou, se parar. Chamada tanto pelo binário de produção
@@ -66,6 +70,8 @@ pub fn init(boot_info: &'static bootloader::BootInfo) {
     serial_println!("[boot] gdt/tss ativos");
     interrupts::init();
     serial_println!("[boot] interrupcoes ativas");
+    timer::init();
+    serial_println!("[boot] timer ativo");
     memory::init(boot_info);
     let info = memory::info();
     serial_println!(

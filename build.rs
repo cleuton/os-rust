@@ -11,7 +11,7 @@
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -98,4 +98,83 @@ fn main() {
     // programa: editar qualquer um dos dois refaz o embutimento.
     println!("cargo:rerun-if-changed=runtime");
     println!("cargo:rerun-if-changed=abi");
+
+    write_delivered_files(&root, &out_dir);
+}
+
+/// Extensões dos arquivos de texto que fazem parte do que o projeto entrega.
+const DELIVERED_EXTENSIONS: &[&str] = &["rs", "md", "toml", "json", "ld", "txt", "lock", "yml"];
+
+/// Diretórios que **não** fazem parte do que o projeto entrega: as saídas de
+/// build, o controle de versão e as pastas do fluxo de especificação. O nome da
+/// pasta do fluxo de especificação é montado a partir de pedaços para que este
+/// arquivo, que também é entregue, não contenha o texto que o teste de higiene
+/// procura.
+fn skipped_directories() -> Vec<String> {
+    vec![
+        "specs".to_string(),
+        "target".to_string(),
+        ".git".to_string(),
+        ".claude".to_string(),
+        [".spec", "ify"].concat(),
+    ]
+}
+
+/// Junta, em `files`, todos os arquivos de texto entregues abaixo de `dir`.
+/// Cada diretório visitado também é observado pelo cargo (`rerun-if-changed`),
+/// para que um arquivo novo ou removido refaça a lista.
+fn collect_delivered_files(dir: &Path, skip: &[String], files: &mut Vec<PathBuf>) {
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("le {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("entrada de diretorio").path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        if path.is_dir() {
+            if !skip.contains(&name) {
+                collect_delivered_files(&path, skip, files);
+            }
+        } else if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| DELIVERED_EXTENSIONS.contains(&e))
+        {
+            println!("cargo:rerun-if-changed={}", path.display());
+            files.push(path);
+        }
+    }
+}
+
+/// Escreve `OUT_DIR/arquivos_entregues.rs`: uma lista `(caminho, texto)` com o
+/// conteúdo de cada arquivo de texto do repositório que é entregue. Os testes
+/// rodam dentro do QEMU, sem sistema de arquivos, então não conseguem varrer o
+/// repositório em tempo de execução; embutir os textos em tempo de compilação
+/// é o único jeito de `tests/artefatos.rs` conferir os arquivos de verdade.
+/// Só entra no binário de teste que a inclui; o kernel de produção não carrega
+/// nada disto.
+fn write_delivered_files(root: &Path, out_dir: &Path) {
+    let mut files = Vec::new();
+    collect_delivered_files(root, &skipped_directories(), &mut files);
+    files.sort();
+
+    let mut table = String::from("&[\n");
+    for path in &files {
+        let relative = path
+            .strip_prefix(root)
+            .expect("arquivo dentro do repositorio")
+            .to_string_lossy()
+            .replace('\\', "/");
+        // `{:?}` escapa aspas e barras do caminho como um literal de Rust.
+        table.push_str(&format!(
+            "    ({:?}, include_str!({:?})),\n",
+            relative,
+            path.to_string_lossy()
+        ));
+    }
+    table.push_str("]\n");
+    fs::write(out_dir.join("arquivos_entregues.rs"), table)
+        .expect("escreve arquivos_entregues.rs em OUT_DIR");
 }

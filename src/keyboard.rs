@@ -142,28 +142,93 @@ fn ascii_for_make_code(code: u8, shift: bool) -> Option<u8> {
     Some(if shift { upper } else { lower })
 }
 
+/// O montador de uma linha digitada: recebe um scancode por vez, faz o eco na
+/// tela, trata o Backspace e avisa quando o Enter completa a linha. É a parte
+/// de `SYS_READ_LINE` que traduz teclas em texto, separada de **quem espera**:
+/// o escalonador usa um `LineEditor` para montar a linha do programa que pediu
+/// primeiro (`scheduler.rs`), e `read_line` o usa para um leitor só.
+///
+/// Aceita bytes ASCII imprimíveis (`0x20`–`0x7e`), no máximo `max_chars`
+/// (sobra lugar para o `\n`); o que passar disso é ignorado, sem eco, como o
+/// prompt faz no limite de linha.
+pub struct LineEditor {
+    buffer: [u8; LINE_CAPACITY],
+    len: usize,
+    max_chars: usize,
+}
+
+impl LineEditor {
+    /// Um editor vazio. É `const` porque mora dentro de uma `static`.
+    pub const fn new() -> LineEditor {
+        LineEditor {
+            buffer: [0; LINE_CAPACITY],
+            len: 0,
+            max_chars: 0,
+        }
+    }
+
+    /// Começa uma linha nova, com no máximo `max_chars` caracteres (limitado a
+    /// `LINE_CAPACITY - 1`, para caber o `\n`).
+    pub fn reset(&mut self, max_chars: usize) {
+        self.len = 0;
+        self.max_chars = max_chars.min(LINE_CAPACITY - 1);
+    }
+
+    /// Processa um scancode. Devolve `Some(n)` quando o Enter completou a
+    /// linha: `n` é o total de bytes de [`LineEditor::line`], incluindo o `\n`
+    /// final (`1 ≤ n ≤ max_chars + 1`). Devolve `None` para qualquer outra
+    /// tecla.
+    pub fn feed(&mut self, scancode: u8) -> Option<usize> {
+        match translate(scancode) {
+            Some(b'\n') => {
+                crate::println!();
+                self.buffer[self.len] = b'\n';
+                Some(self.len + 1)
+            }
+            Some(0x08) => {
+                if self.len > 0 {
+                    self.len -= 1;
+                    crate::vga_buffer::backspace();
+                }
+                None
+            }
+            Some(byte) if (0x20..=0x7e).contains(&byte) && self.len < self.max_chars => {
+                self.buffer[self.len] = byte;
+                self.len += 1;
+                crate::print!("{}", byte as char);
+                None
+            }
+            // Byte fora da faixa, linha cheia ou tecla sem tradução: ignora.
+            _ => None,
+        }
+    }
+
+    /// Os primeiros `written` bytes da linha completa (o valor que `feed`
+    /// devolveu).
+    pub fn line(&self, written: usize) -> &[u8] {
+        &self.buffer[..written]
+    }
+}
+
 /// Lê uma linha do teclado para `out`, **bloqueando** até o Enter, com eco na
 /// tela e Backspace. Devolve quantos bytes escreveu, incluindo o `\n` final
 /// (sempre `1 ≤ n ≤ out.len()`; `0` só se `out` for vazio).
 ///
-/// Aceita bytes ASCII imprimíveis (`0x20`–`0x7e`), no máximo `out.len() - 1`
-/// (sobra lugar para o `\n`); o que passar disso é ignorado, sem eco, como o
-/// prompt faz no limite de linha. É a parte do kernel de `SYS_READ_LINE`.
+/// É a leitura de **um** leitor só, que fica esperando na própria CPU: usada
+/// pelos testes. Os programas de usuário não passam por aqui: o escalonador
+/// bloqueia a tarefa e monta a linha com um [`LineEditor`], de modo que quem
+/// espera não gasta CPU e vários programas podem esperar ao mesmo tempo.
 ///
-/// Espera com `sti; hlt` dentro da syscall, e é a única parte do kernel que
-/// liga as interrupções durante uma syscall: sem isso a IRQ1 nunca chegaria e a
-/// fila de scancodes nunca ganharia uma tecla. **Sempre volta com as
-/// interrupções desligadas**: uma interrupção depois de o stub de `syscall`
-/// trocar `rsp` de volta para a pilha do programa, e antes do `sysretq`,
-/// rodaria no kernel em cima de uma pilha em que ele não pode confiar.
+/// Espera com `sti; hlt`, e **sempre volta com as interrupções desligadas**:
+/// quem chama é um trecho do kernel que roda com `IF` desligado.
 pub fn read_line(out: &mut [u8]) -> usize {
     use x86_64::instructions::interrupts;
 
     if out.is_empty() {
         return 0;
     }
-    let max_chars = out.len() - 1;
-    let mut len = 0;
+    let mut editor = LineEditor::new();
+    editor.reset(out.len() - 1);
     loop {
         // A fila só é tocada com as interrupções desligadas (invariante de
         // `next_scancode`): a IRQ1 nunca disputa o `Mutex` dela.
@@ -177,26 +242,10 @@ pub fn read_line(out: &mut [u8]) -> usize {
             interrupts::enable_and_hlt();
             continue;
         };
-        match translate(scancode) {
-            Some(b'\n') => {
-                crate::println!();
-                out[len] = b'\n';
-                interrupts::disable();
-                return len + 1;
-            }
-            Some(0x08) => {
-                if len > 0 {
-                    len -= 1;
-                    crate::vga_buffer::backspace();
-                }
-            }
-            Some(byte) if (0x20..=0x7e).contains(&byte) && len < max_chars => {
-                out[len] = byte;
-                len += 1;
-                crate::print!("{}", byte as char);
-            }
-            // Byte fora da faixa, linha cheia ou tecla sem tradução: ignora.
-            _ => {}
+        if let Some(written) = editor.feed(scancode) {
+            out[..written].copy_from_slice(editor.line(written));
+            interrupts::disable();
+            return written;
         }
     }
 }
@@ -354,8 +403,9 @@ mod tests {
         reset_teclado();
         digitar(&[KEY_H, ENTER]);
         // Liga as interrupções antes: `read_line` precisa devolvê-las
-        // desligadas, senão o `sysretq` de `SYS_READ_LINE` abriria uma janela
-        // com a pilha do programa em uso pelo kernel.
+        // desligadas, porque quem a chama é um trecho do kernel que roda com
+        // `IF` desligado (o retorno a ring 3 por `iretq` é que religa o `IF`,
+        // junto com a pilha do programa).
         interrupts::enable();
         let mut out = [0u8; 8];
         read_line(&mut out);

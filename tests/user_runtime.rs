@@ -13,7 +13,8 @@
 //!   sintéticos;
 //! - `SYS_READ_LINE` inválida, e o prompt retomando o teclado;
 //! - isolamento com `falha_memoria`;
-//! - o guia bate com o código.
+//! - o guia bate com o código (inclusive os programas do Marco 7: `ping`,
+//!   `pong`, `contador_a`, `contador_b` e `eco2`).
 
 #![no_std]
 #![no_main]
@@ -518,6 +519,11 @@ fn crash_continua_igual_ao_marco_5() {
 const GUIA: &str = include_str!("../GUIA_DO_PROGRAMADOR.md");
 const ECO_RS: &str = include_str!("../programs/src/bin/eco.rs");
 const FALHA_MEMORIA_RS: &str = include_str!("../programs/src/bin/falha_memoria.rs");
+const PING_RS: &str = include_str!("../programs/src/bin/ping.rs");
+const PONG_RS: &str = include_str!("../programs/src/bin/pong.rs");
+const CONTADOR_A_RS: &str = include_str!("../programs/src/bin/contador_a.rs");
+const CONTADOR_B_RS: &str = include_str!("../programs/src/bin/contador_b.rs");
+const ECO2_RS: &str = include_str!("../programs/src/bin/eco2.rs");
 
 #[test_case]
 fn guia_contem_o_codigo_dos_programas_de_exemplo() {
@@ -531,6 +537,20 @@ fn guia_contem_o_codigo_dos_programas_de_exemplo() {
         GUIA.contains(FALHA_MEMORIA_RS),
         "o codigo de programs/src/bin/falha_memoria.rs nao aparece no guia"
     );
+    // Os programas do Marco 7 também aparecem, literalmente.
+    for (arquivo, codigo) in [
+        ("ping.rs", PING_RS),
+        ("pong.rs", PONG_RS),
+        ("contador_a.rs", CONTADOR_A_RS),
+        ("contador_b.rs", CONTADOR_B_RS),
+        ("eco2.rs", ECO2_RS),
+    ] {
+        assert!(
+            GUIA.contains(codigo),
+            "o codigo de programs/src/bin/{} nao aparece no guia",
+            arquivo
+        );
+    }
 }
 
 #[test_case]
@@ -545,6 +565,9 @@ fn guia_cita_o_contrato_e_a_biblioteca() {
         "programs/src/bin/",
         "read_line",
         "println!",
+        "SYS_YIELD",
+        "yield_now",
+        "run ping pong",
     ] {
         assert!(GUIA.contains(termo), "o guia nao cita `{}`", termo);
     }
@@ -553,7 +576,17 @@ fn guia_cita_o_contrato_e_a_biblioteca() {
 #[test_case]
 fn nomes_de_programas_sao_unicos_e_ordenados() {
     let nomes: Vec<&str> = user::program_names().collect();
-    for esperado in ["crash", "eco", "falha_memoria", "hello"] {
+    for esperado in [
+        "contador_a",
+        "contador_b",
+        "crash",
+        "eco",
+        "eco2",
+        "falha_memoria",
+        "hello",
+        "ping",
+        "pong",
+    ] {
         assert!(nomes.contains(&esperado), "programa ausente: {}", esperado);
     }
     // Sem repetição, nem comparando sem diferenciar maiúsculas de minúsculas

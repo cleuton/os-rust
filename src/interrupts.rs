@@ -7,7 +7,7 @@ use spin::Mutex;
 use x86_64::instructions::port::Port;
 use x86_64::registers::control::Cr2;
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, PageFaultErrorCode};
-use x86_64::PrivilegeLevel;
+use x86_64::{PrivilegeLevel, VirtAddr};
 
 use crate::panic::halt_loop;
 use crate::user::Termination;
@@ -20,16 +20,17 @@ const PIC_1_OFFSET: u8 = 32;
 /// Offset de vetor do PIC escravo, encadeado logo depois do mestre.
 const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
+/// Vetor de interrupção da IRQ0 (timer): offset do PIC mestre + linha 0.
+const TIMER_INTERRUPT_VECTOR: u8 = PIC_1_OFFSET;
+
 /// Vetor de interrupção da IRQ1 (teclado): offset do PIC mestre + linha 1.
 const KEYBOARD_INTERRUPT_VECTOR: u8 = PIC_1_OFFSET + 1;
 
 /// Máscara do PIC mestre: todas as linhas desabilitadas (bit 1), exceto a
-/// IRQ1 (bit 0 em zero = habilitada) — mantém o timer (IRQ0) calado, já
-/// que ele dispara imediatamente depois que as interrupções são
-/// habilitadas globalmente e o kernel ainda não tem nenhum handler para
-/// ele; as demais linhas ficam caladas pelo mesmo motivo (sem driver
-/// ainda).
-const MASTER_PIC_MASK: u8 = 0b1111_1101;
+/// IRQ0 (timer) e a IRQ1 (teclado), com o bit em zero = habilitada. O timer
+/// ganhou handler no Marco 7 (`timer.rs`); as demais linhas continuam caladas
+/// (sem driver ainda).
+const MASTER_PIC_MASK: u8 = 0b1111_1100;
 /// Máscara do PIC escravo: todas as linhas desabilitadas.
 const SLAVE_PIC_MASK: u8 = 0b1111_1111;
 
@@ -45,22 +46,24 @@ static PICS: Mutex<ChainedPics> = Mutex::new(unsafe {
 });
 
 // Invariante do projeto, desde o Marco 3 (memória) e ampliado no Marco 4
-// (proteção): nenhum handler registrado nesta IDT aloca ou libera memória
-// do heap.
-// `breakpoint_handler`, `divide_error_handler`, `invalid_opcode_handler`,
+// (proteção): nenhum handler disparado em ring 0 aloca ou libera memória do
+// heap. `breakpoint_handler`, `divide_error_handler`, `invalid_opcode_handler`,
 // `general_protection_fault_handler`, `stack_segment_fault_handler`,
 // `segment_not_present_handler`, `page_fault_handler` e
-// `double_fault_handler` só usam `println!`/`serial_println!` (os
-// demais, através de `fatal_exception`, que só formata em variáveis de
-// pilha) ou, quando a exceção veio de um programa de usuário (ring 3),
-// `terminate_user`, que só grava o motivo num estático sem heap
-// (`user::TERMINATION`) e volta ao prompt; `keyboard_interrupt_handler` só
-// empilha um byte numa fila de tamanho fixo (`ScancodeQueue`, array
-// `[u8; 16]`). É isso
-// que garante que o `spin::Mutex` interno do alocador global
-// (`src/allocator.rs`) nunca pode ser disputado entre o fluxo principal
-// e uma interrupção — um handler novo que precise alocar violaria este
-// invariante e exige revisão explícita antes de ser aceito.
+// `double_fault_handler` só usam `println!`/`serial_println!` (os demais,
+// através de `fatal_exception`, que só formata em variáveis de pilha) quando
+// a exceção veio do kernel; `keyboard_interrupt_handler` só empilha um byte
+// numa fila de tamanho fixo (`ScancodeQueue`, array `[u8; 16]`). É isso que
+// garante que o `spin::Mutex` interno do alocador global (`src/allocator.rs`)
+// nunca pode ser disputado entre o fluxo principal e uma interrupção, e um
+// handler novo de ring 0 que precise alocar violaria este invariante.
+//
+// Quando a exceção veio de um programa de usuário (ring 3), o caminho é outro:
+// `terminate_user` chama o escalonador, que registra o término, libera os
+// recursos do programa (inclusive `Box` e frames) e passa a CPU adiante. Isso
+// **pode** alocar e liberar, porque vindo de ring 3 nenhum código do kernel
+// estava no meio de uma operação: nenhum lock (heap, alocador de frames, tela)
+// está preso.
 lazy_static! {
     static ref IDT: InterruptDescriptorTable = {
         let mut idt = InterruptDescriptorTable::new();
@@ -84,6 +87,13 @@ lazy_static! {
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
         }
         idt[KEYBOARD_INTERRUPT_VECTOR].set_handler_fn(keyboard_interrupt_handler);
+        // SAFETY: `timer_entry` é um stub em assembly que preserva o frame da
+        // interrupção e termina em `iretq` (ver `timer.rs`); o endereço dele é
+        // o de um handler válido para a IRQ0, sem código de erro.
+        unsafe {
+            idt[TIMER_INTERRUPT_VECTOR]
+                .set_handler_addr(VirtAddr::new(crate::timer::timer_entry as *const () as usize as u64));
+        }
         idt
     };
 }
@@ -108,9 +118,10 @@ fn came_from_user(stack_frame: &InterruptStackFrame) -> bool {
     stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3
 }
 
-/// Encerra o programa de usuário que causou a exceção e devolve o controle
-/// ao prompt (via `user::terminate`). Só formata nada: o texto da mensagem
-/// é montado depois, pelo shell, já fora do handler. Nunca chama
+/// Encerra o programa de usuário que causou a exceção e passa a CPU ao
+/// próximo (via `scheduler::terminate_current`); quando era o último, o
+/// controle volta ao prompt. Não formata nada aqui: o texto da mensagem é
+/// montado pelo shell, no aviso de término. Nunca chama
 /// `panic::enter_fatal_handler`: aquela guarda é permanente e travaria o
 /// kernel no segundo erro de programa.
 fn terminate_user(
@@ -120,7 +131,7 @@ fn terminate_user(
     error_code: Option<u64>,
     fault_address: Option<u64>,
 ) -> ! {
-    crate::user::terminate(Termination::Fault {
+    crate::scheduler::terminate_current(Termination::Fault {
         mnemonic,
         name,
         rip: stack_frame.instruction_pointer.as_u64(),

@@ -124,6 +124,15 @@ lazy_static! {
     };
 }
 
+/// Seletor do segmento de dados/pilha do usuário com RPL 3 (`0x1B`), como
+/// número, para os trechos de assembly (`syscall.rs`, `timer.rs`) montarem o
+/// frame de retorno a ring 3. Um teste confere que é igual ao seletor da GDT.
+pub const USER_DATA_SELECTOR_BITS: u64 = 0x1B;
+
+/// Seletor do segmento de código do usuário com RPL 3 (`0x23`); ver
+/// `USER_DATA_SELECTOR_BITS`.
+pub const USER_CODE_SELECTOR_BITS: u64 = 0x23;
+
 /// Seletor do segmento de código do kernel (`0x08`).
 pub fn kernel_code_selector() -> SegmentSelector {
     GDT.1.kernel_code
@@ -176,5 +185,13 @@ mod tests {
         // podia cair em qualquer byte (o que quebrava a espera de tecla numa
         // `SYS_READ_LINE` de verdade).
         assert_eq!(kernel_entry_stack_top().as_u64() % 16, 0);
+    }
+
+    #[test_case]
+    fn as_constantes_dos_seletores_de_usuario_batem_com_a_gdt() {
+        // O assembly de `syscall` e do timer empilha estes números à mão; se a
+        // GDT mudar de layout e eles não, um `iretq` para ring 3 daria #GP.
+        assert_eq!(user_code_selector().0 as u64, USER_CODE_SELECTOR_BITS);
+        assert_eq!(user_data_selector().0 as u64, USER_DATA_SELECTOR_BITS);
     }
 }

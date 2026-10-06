@@ -6,19 +6,56 @@ use abi::IO_MAX_LEN;
 
 use crate::sys;
 
-/// A tela, vista como algo em que se pode escrever texto formatado. Cada
-/// trecho de texto que o `format_args!` produz vira uma chamada `write`
-/// (`println!("a {}", 1)` faz três): simples de propósito, e o custo de uma
-/// syscall é irrelevante aqui.
-pub struct Out;
+/// Tamanho do buffer de uma chamada `print!`/`println!`, em bytes. Uma linha
+/// de até este tamanho sai em **uma** chamada `write`.
+const BUFFER_SIZE: usize = 256;
+
+// Uma chamada `write` aceita no máximo `IO_MAX_LEN` bytes: o buffer cabe numa só.
+const _: () = assert!(BUFFER_SIZE <= IO_MAX_LEN as usize);
+
+/// A tela, vista como algo em que se pode escrever texto formatado. O
+/// `format_args!` produz o texto em vários trechos (`println!("a {}", 1)` gera
+/// `"a "`, `"1"` e `"\n"`); aqui eles se juntam num buffer na pilha e saem
+/// numa única chamada `write`. Com vários programas rodando ao mesmo tempo,
+/// isso importa: cada `write` chega inteiro à tela (`SYSCALLS.md`, seção 8),
+/// então uma linha escrita por uma chamada nunca é partida pela saída de
+/// outro programa. Se o texto passar do buffer, ele sai em mais de uma chamada.
+pub struct Out {
+    buffer: [u8; BUFFER_SIZE],
+    len: usize,
+}
+
+impl Out {
+    fn new() -> Out {
+        Out { buffer: [0; BUFFER_SIZE], len: 0 }
+    }
+
+    /// Entrega ao kernel o que está no buffer.
+    fn flush(&mut self) -> fmt::Result {
+        if self.len > 0 {
+            let result = sys::write(&self.buffer[..self.len]);
+            self.len = 0;
+            if result < 0 {
+                return Err(fmt::Error);
+            }
+        }
+        Ok(())
+    }
+}
 
 impl fmt::Write for Out {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        // `write` aceita no máximo `IO_MAX_LEN` bytes por chamada.
-        for chunk in s.as_bytes().chunks(IO_MAX_LEN as usize) {
-            if sys::write(chunk) < 0 {
-                return Err(fmt::Error);
+        let mut bytes = s.as_bytes();
+        while !bytes.is_empty() {
+            // Buffer cheio: manda o que tem e continua com o resto.
+            if self.len == BUFFER_SIZE {
+                self.flush()?;
             }
+            let room = BUFFER_SIZE - self.len;
+            let take = bytes.len().min(room);
+            self.buffer[self.len..self.len + take].copy_from_slice(&bytes[..take]);
+            self.len += take;
+            bytes = &bytes[take..];
         }
         Ok(())
     }
@@ -28,7 +65,9 @@ impl fmt::Write for Out {
 /// como no `print!` do kernel: não há o que fazer se a tela não aceita.
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
-    let _ = fmt::Write::write_fmt(&mut Out, args);
+    let mut out = Out::new();
+    let _ = fmt::Write::write_fmt(&mut out, args);
+    let _ = out.flush();
 }
 
 /// Escreve na tela, sem quebra de linha no fim. Mesma sintaxe de `format!`.

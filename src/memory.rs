@@ -5,7 +5,8 @@
 //! A superfície pública deste módulo (`BootInfoFrameAllocator`,
 //! `translate_addr`, `map_page`, `init`, `info`, e as funções de usuário
 //! `claim_user_region`, `map_user_page`, `unmap_user_range`,
-//! `user_page_flags`, `zero_frame`, `fill_frame`) é a única forma, no
+//! `user_page_flags`, `zero_frame`, `fill_frame`, e o `AddressSpace` de cada
+//! programa de usuário) é a única forma, no
 //! projeto, de ler o mapa de memória do bootloader e de criar ou
 //! traduzir mapeamentos na tabela de páginas ativa.
 
@@ -14,6 +15,7 @@ use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 use x86_64::{
+    registers::control::Cr3,
     structures::paging::{
         mapper::{MapToError, TranslateResult, UnmapError},
         FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, PhysFrame,
@@ -63,6 +65,14 @@ impl BootInfoFrameAllocator {
         self.recycled.push(frame);
     }
 
+    /// Quantos frames este alocador entregou e ainda não recebeu de volta:
+    /// os entregues pela via "nova" (`next`) menos os que esperam, em
+    /// `recycled`, para serem entregues de novo. Os testes de vazamento
+    /// comparam este número antes e depois de rodar programas.
+    fn outstanding(&self) -> usize {
+        self.next - self.recycled.len()
+    }
+
     /// Itera todos os frames de 4 KiB de todas as regiões `Usable` do
     /// mapa, na ordem em que aparecem.
     fn usable_frames(&self) -> impl Iterator<Item = PhysFrame<Size4KiB>> {
@@ -90,7 +100,11 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
             return Some(frame);
         }
         let frame = self.usable_frames().nth(self.next);
-        self.next += 1;
+        // Só avança quando entregou um frame: assim `outstanding` não conta
+        // tentativas que falharam por falta de memória.
+        if frame.is_some() {
+            self.next += 1;
+        }
         frame
     }
 }
@@ -182,6 +196,10 @@ pub unsafe fn map_page(
 struct FrameState {
     allocator: BootInfoFrameAllocator,
     physical_memory_offset: VirtAddr,
+    /// Raiz (P4) da tabela de páginas do kernel, a que o `CR3` apontava no
+    /// boot. É a que vale sempre que nenhum programa de usuário está rodando
+    /// e a que cada `AddressSpace` copia ao nascer.
+    kernel_p4: PhysFrame<Size4KiB>,
 }
 
 static FRAME_STATE: Mutex<Option<FrameState>> = Mutex::new(None);
@@ -354,6 +372,154 @@ pub fn fill_frame(frame: PhysFrame<Size4KiB>, offset: usize, bytes: &[u8]) {
     });
 }
 
+/// Quantos frames físicos o alocador entregou e ainda não recebeu de volta
+/// (ver `BootInfoFrameAllocator::outstanding`). Só existe para os testes de
+/// vazamento: depois de rodar programas e todos terminarem, o número volta ao
+/// que era antes.
+pub fn frames_outstanding() -> usize {
+    with_frame_state(|state| state.allocator.outstanding())
+}
+
+/// O espaço de endereçamento de um programa de usuário: uma tabela P4 própria
+/// e a P3 própria dela, de modo que cada programa enxerga a **sua** região do
+/// usuário (`[0x4000_0000, 0x8000_0000)`) e nenhuma outra.
+///
+/// Como nasce: a P4 é cópia da P4 do kernel (as entradas apontam para as
+/// mesmas tabelas de nível mais baixo, então o kernel, a janela de memória
+/// física e a pilha de entrada continuam visíveis com qualquer `CR3`); só a
+/// entrada que cobre a região do usuário aponta para uma P3 própria, também
+/// cópia da do kernel, com a entrada da região do usuário **vazia**. As
+/// páginas do programa são mapeadas depois, com `map_user_page`, enquanto o
+/// espaço está ativo, e criam tabelas P2 e P1 que só ele usa.
+///
+/// Premissa: as cópias só enxergam o que já existia no momento da cópia. O
+/// kernel não cria mapeamentos sob entradas **novas** da P4 depois do boot,
+/// então nada que ele mapeie fica de fora.
+pub struct AddressSpace {
+    p4: PhysFrame<Size4KiB>,
+    p3: PhysFrame<Size4KiB>,
+}
+
+impl AddressSpace {
+    /// Cria um espaço novo, ainda sem nenhuma página de usuário. Se faltar
+    /// frame, não sobra nada alocado.
+    pub fn new() -> Result<AddressSpace, MapToError<Size4KiB>> {
+        with_frame_state(|state| {
+            let p4 = state
+                .allocator
+                .allocate_frame()
+                .ok_or(MapToError::FrameAllocationFailed)?;
+            let Some(p3) = state.allocator.allocate_frame() else {
+                state.allocator.recycle(p4);
+                return Err(MapToError::FrameAllocationFailed);
+            };
+
+            let offset = state.physical_memory_offset;
+            let user_start = VirtAddr::new(crate::user::USER_REGION_START);
+            let p4_index = user_start.p4_index();
+            let p3_index = user_start.p3_index();
+
+            let kernel_p4: *const PageTable =
+                (offset + state.kernel_p4.start_address().as_u64()).as_ptr();
+            let new_p4: *mut PageTable = (offset + p4.start_address().as_u64()).as_mut_ptr();
+            let new_p3: *mut PageTable = (offset + p3.start_address().as_u64()).as_mut_ptr();
+
+            // SAFETY: os três ponteiros apontam, pela janela de memória física,
+            // para tabelas de 4 KiB: a P4 do kernel (só lida) e os dois frames
+            // que acabaram de sair do alocador (de mais ninguém, então a
+            // escrita não disputa com nada). Os intervalos nunca se sobrepõem.
+            // Se a entrada do kernel para a região do usuário está em uso, ela
+            // aponta para uma P3 real, que também só é lida.
+            unsafe {
+                core::ptr::copy_nonoverlapping(kernel_p4, new_p4, 1);
+                let kernel_p4 = &*kernel_p4;
+                let new_p4 = &mut *new_p4;
+                let new_p3 = &mut *new_p3;
+                let kernel_entry = &kernel_p4[p4_index];
+                if kernel_entry.is_unused() {
+                    new_p3.zero();
+                } else {
+                    let kernel_p3: *const PageTable =
+                        (offset + kernel_entry.addr().as_u64()).as_ptr();
+                    core::ptr::copy_nonoverlapping(kernel_p3, new_p3, 1);
+                }
+                // A região do usuário começa vazia em todo espaço novo.
+                new_p3[p3_index].set_unused();
+                new_p4[p4_index].set_frame(p3, PageTableFlags::PRESENT | PageTableFlags::WRITABLE);
+            }
+            Ok(AddressSpace { p4, p3 })
+        })
+    }
+
+    /// Passa a usar este espaço: escreve o `CR3`. Todo o kernel continua
+    /// visível; só a região do usuário muda.
+    pub fn activate(&self) {
+        let (_, flags) = Cr3::read();
+        // SAFETY: `p4` é uma P4 completa e válida (cópia da do kernel, ver
+        // `new`): troca só o que se enxerga na região do usuário. O código e a
+        // pilha em uso são do kernel, mapeados igualmente nos dois espaços.
+        unsafe { Cr3::write(self.p4, flags) };
+    }
+
+    /// Devolve os frames de todas as páginas do usuário e de todas as tabelas
+    /// deste espaço ao alocador. O espaço **não pode** estar ativo (o chamador
+    /// volta antes ao do kernel, com `activate_kernel`). Só percorre a região
+    /// do usuário (`P3[1]`): o resto da árvore é compartilhado com o kernel e
+    /// nunca é liberado.
+    pub fn destroy(self) {
+        with_frame_state(|state| {
+            debug_assert!(
+                Cr3::read().0 != self.p4,
+                "destroy de um espaco que ainda esta ativo"
+            );
+            let offset = state.physical_memory_offset;
+            let user_start = VirtAddr::new(crate::user::USER_REGION_START);
+            let table = |frame: PhysFrame<Size4KiB>| -> *const PageTable {
+                (offset + frame.start_address().as_u64()).as_ptr()
+            };
+
+            // SAFETY: cada ponteiro vem de um frame que este espaço possui (a P3
+            // e as P2/P1 criadas por `map_to` enquanto ele esteve ativo), lido
+            // pela janela de memória física; nada altera essas tabelas enquanto
+            // elas são percorridas (uma CPU só, o espaço não está ativo).
+            unsafe {
+                let p3 = &*table(self.p3);
+                let p2_entry = &p3[user_start.p3_index()];
+                if !p2_entry.is_unused() {
+                    let p2_frame = PhysFrame::containing_address(p2_entry.addr());
+                    let p2 = &*table(p2_frame);
+                    for p1_entry in p2.iter().filter(|e| !e.is_unused()) {
+                        let p1_frame = PhysFrame::containing_address(p1_entry.addr());
+                        let p1 = &*table(p1_frame);
+                        for page in p1.iter().filter(|e| !e.is_unused()) {
+                            state
+                                .allocator
+                                .recycle(PhysFrame::containing_address(page.addr()));
+                        }
+                        state.allocator.recycle(p1_frame);
+                    }
+                    state.allocator.recycle(p2_frame);
+                }
+            }
+            state.allocator.recycle(self.p3);
+            state.allocator.recycle(self.p4);
+        });
+    }
+}
+
+/// Volta a usar a tabela de páginas do kernel (a do boot). Chamada sempre que
+/// nenhum programa de usuário deve estar mapeado: antes de destruir o espaço
+/// de um programa e quando a última tarefa termina.
+pub fn activate_kernel() {
+    let (p4, flags) = {
+        let kernel_p4 = with_frame_state(|state| state.kernel_p4);
+        (kernel_p4, Cr3::read().1)
+    };
+    // SAFETY: `p4` é a P4 que o `CR3` tinha no boot, válida enquanto o kernel
+    // existir; voltar a ela só esconde a região do usuário.
+    unsafe { Cr3::write(p4, flags) };
+}
+
 /// Resumo somente-leitura de memória, calculado uma única vez no boot e
 /// usado pelo comando `mem` do prompt para mostrar memória utilizável,
 /// endereço e tamanho do heap na tela.
@@ -410,6 +576,7 @@ pub(crate) fn init(boot_info: &'static bootloader::BootInfo) {
     *FRAME_STATE.lock() = Some(FrameState {
         allocator: frame_allocator,
         physical_memory_offset,
+        kernel_p4: Cr3::read().0,
     });
 
     let usable_bytes: u64 = boot_info
@@ -424,4 +591,87 @@ pub(crate) fn init(boot_info: &'static bootloader::BootInfo) {
         heap_start: crate::allocator::HEAP_START,
         heap_size: crate::allocator::HEAP_SIZE,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::user::USER_REGION_START;
+
+    /// Flags de uma página de dados do usuário: legível, gravável, não executável.
+    fn flags_de_dados() -> PageTableFlags {
+        PageTableFlags::PRESENT
+            | PageTableFlags::USER_ACCESSIBLE
+            | PageTableFlags::WRITABLE
+            | PageTableFlags::NO_EXECUTE
+    }
+
+    /// Mapeia uma página do usuário em `USER_REGION_START + deslocamento`, no
+    /// espaço que estiver ativo.
+    fn mapear(deslocamento: u64) {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(
+            USER_REGION_START + deslocamento,
+        ));
+        map_user_page(page, flags_de_dados()).expect("falta de frame no teste");
+    }
+
+    fn mapeada(deslocamento: u64) -> bool {
+        user_page_flags(VirtAddr::new(USER_REGION_START + deslocamento)).is_some()
+    }
+
+    #[test_case]
+    fn espaco_novo_e_destruido_devolve_todos_os_frames() {
+        let antes = frames_outstanding();
+        let espaco = AddressSpace::new().expect("falta de frame no teste");
+        // P4 e P3 próprias: dois frames em uso enquanto o espaço existe.
+        assert_eq!(frames_outstanding(), antes + 2);
+        espaco.destroy();
+        assert_eq!(frames_outstanding(), antes);
+    }
+
+    #[test_case]
+    fn dois_espacos_tem_tabelas_diferentes() {
+        let a = AddressSpace::new().expect("falta de frame no teste");
+        let b = AddressSpace::new().expect("falta de frame no teste");
+        assert_ne!(a.p4, b.p4);
+        assert_ne!(a.p3, b.p3);
+        a.destroy();
+        b.destroy();
+    }
+
+    #[test_case]
+    fn pagina_mapeada_em_um_espaco_nao_aparece_nos_outros() {
+        let a = AddressSpace::new().expect("falta de frame no teste");
+        let b = AddressSpace::new().expect("falta de frame no teste");
+
+        a.activate();
+        mapear(0);
+        assert!(mapeada(0), "a pagina mapeada precisa aparecer no espaco A");
+
+        activate_kernel();
+        assert!(!mapeada(0), "o kernel nao pode enxergar a pagina de A");
+
+        b.activate();
+        assert!(!mapeada(0), "o espaco B nao pode enxergar a pagina de A");
+
+        activate_kernel();
+        a.destroy();
+        b.destroy();
+    }
+
+    #[test_case]
+    fn destruir_um_espaco_com_paginas_devolve_tudo() {
+        let antes = frames_outstanding();
+        let espaco = AddressSpace::new().expect("falta de frame no teste");
+        espaco.activate();
+        // Três páginas em duas tabelas P1 diferentes (cada P1 cobre 2 MiB):
+        // exercita o percurso P3 -> P2 -> P1 por inteiro.
+        mapear(0);
+        mapear(4096);
+        mapear(2 * 1024 * 1024);
+        assert!(frames_outstanding() > antes + 2);
+        activate_kernel();
+        espaco.destroy();
+        assert_eq!(frames_outstanding(), antes);
+    }
 }

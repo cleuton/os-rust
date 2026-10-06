@@ -1,0 +1,152 @@
+name: release
+
+# Dispara ao empurrar uma tag de versao (ex.: v0.7.0).
+# "Run workflow" manual (workflow_dispatch) so compila e testa, sem publicar.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-latest
+          - platform: macos-arm64
+            runner: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versao do projeto e conferencia com a tag
+        id: ver
+        shell: bash
+        run: |
+          # Le a versao da secao [package] de Cargo.toml (fonte unica da versao).
+          VERSION="$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' Cargo.toml | head -n 1)"
+          if [ -z "${VERSION}" ]; then
+            echo "Nao consegui ler a versao em Cargo.toml" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "${VERSION}" ]; then
+            echo "A tag ${GITHUB_REF_NAME} nao bate com a versao ${VERSION} de Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Instalar QEMU (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86
+
+      - name: Instalar QEMU (macOS)
+        if: runner.os == 'macOS'
+        run: brew install qemu
+
+      - name: Toolchain pinada em rust-toolchain.toml
+        shell: bash
+        run: |
+          rustup show
+          rustup component add rust-src llvm-tools-preview
+
+      - name: Cache do bootimage
+        id: cache-bootimage
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/bootimage
+          key: bootimage-0.10.5-${{ matrix.platform }}-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Instalar bootimage
+        if: steps.cache-bootimage.outputs.cache-hit != 'true'
+        run: cargo install bootimage --version 0.10.5 --locked
+
+      - name: Testes
+        run: cargo test
+
+      - name: Gerar a imagem de boot
+        run: cargo bootimage --release
+
+      - name: Empacotar
+        shell: bash
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          IMG="$(find target -path '*release/bootimage-*.bin' | head -n 1)"
+          test -n "${IMG}" || { echo "imagem de boot nao encontrada" >&2; exit 1; }
+
+          DIR="os-rust-${VERSION}-${PLATFORM}"
+          mkdir -p "${DIR}"
+          cp "${IMG}" "${DIR}/os-rust.bin"
+          cp README.md CHANGELOG.md SYSCALLS.md GUIA_DO_PROGRAMADOR.md "${DIR}/"
+
+          cat > "${DIR}/run.sh" <<'EOF'
+          #!/bin/sh
+          # Da boot no os-rust no QEMU. Requer qemu-system-x86_64 no PATH.
+          cd "$(dirname "$0")" || exit 1
+          exec qemu-system-x86_64 \
+            -drive format=raw,file=os-rust.bin \
+            -serial stdio
+          EOF
+          chmod +x "${DIR}/run.sh"
+
+          tar -czf "${DIR}.tar.gz" "${DIR}"
+          shasum -a 256 "${DIR}.tar.gz" > "${DIR}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: os-rust-${{ matrix.platform }}
+          path: |
+            os-rust-*.tar.gz
+            os-rust-*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: publicar release
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Notas da versao a partir do CHANGELOG
+        shell: bash
+        run: |
+          VERSION="$(sed -n '/^\[package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' Cargo.toml | head -n 1)"
+          if [ -z "${VERSION}" ]; then
+            echo "Nao consegui ler a versao em Cargo.toml" >&2
+            exit 1
+          fi
+          awk -v v="${VERSION}" '/^## \[/ { p = (index($0, "[" v "]") > 0); next } p' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "os-rust ${VERSION}" > notes.md
+          fi
+
+      - name: Criar o release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "os-rust ${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            --verify-tag

@@ -10,6 +10,7 @@
 //! - um alocador global, que permite usar `Box`, `Vec` e `String` (com
 //!   `extern crate alloc;` no programa);
 //! - [`exit`]: encerra o programa mais cedo;
+//! - [`yield_now`]: cede a CPU a outro programa (multitarefa);
 //! - um tratador de `panic!` que escreve `[panic] <mensagem>` e sai com o
 //!   código 101.
 //!
@@ -24,7 +25,7 @@ pub mod io;
 pub mod sys;
 
 pub use io::read_line;
-pub use sys::exit;
+pub use sys::{exit, yield_now};
 
 /// Gera o ponto de entrada (`_start`) do programa e o liga à função `main`.
 ///

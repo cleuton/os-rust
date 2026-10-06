@@ -49,7 +49,7 @@ sistema de arquivos ou multitarefa completa.
 
 ## Status
 
-**Versão atual: 0.6.0.** Os Marcos 0 (boot em modo texto VGA, com
+**Versão atual: 0.7.0.** Os Marcos 0 (boot em modo texto VGA, com
 mensagem de boas-vindas, rolagem e tratamento de panic legível), 1
 (interrupções, teclado e prompt de comandos), 2 (infraestrutura de
 depuração: saída serial e testes automatizados dentro do QEMU), 3
@@ -58,11 +58,13 @@ depuração: saída serial e testes automatizados dentro do QEMU), 3
 double fault com pilha dedicada), 4.1 (nova identidade: o projeto passa
 a se chamar os-rust, com o logo acima aparecendo na tela a cada boot) e
 5 (primeiro programa de usuário: ring 3, syscalls `write` e `exit`,
-carregador de ELF64 estático e o comando `run hello`) e 6 (interface de
+carregador de ELF64 estático e o comando `run hello`), 6 (interface de
 programação: leitura de teclado e memória para os programas, biblioteca de
 runtime, e o isolamento de falhas demonstrado com `run eco` e `run
-falha_memoria`) estão concluídos e são o que este repositório executa hoje.
-Os Marcos 7 em diante continuam planejados. A demonstração original de palestra, no
+falha_memoria`) e 7 (multitarefa: vários programas ao mesmo tempo, cada um na
+sua memória, com troca de contexto cooperativa e preemptiva, demonstrada com
+`run ping pong` e `run contador_a contador_b`) estão concluídos e são o que
+este repositório executa hoje. Os Marcos 8 em diante continuam planejados. A demonstração original de palestra, no
 formato usado em aula, está preservada na tag git `v1.0-demo` e continua
 podendo ser usada como está.
 
@@ -82,7 +84,7 @@ detalhes de cada um vêm na sequência.
 | 4.1. Nova identidade | Renomear o projeto para os-rust em todo lugar (pacote, crate, target, pastas, prompt, mensagens, documentação) e acrescentar o logo na tela de boot e no README. | `cargo run` mostra o logo, depois `os-rust v0.4.1` e o prompt `os-rust> `. | Concluído |
 | **5. Primeiro programa de usuário (marco central)** | Rodar o primeiro programa de usuário em modo protegido (ring 3), usando um mecanismo de syscall e um carregador de executáveis ELF64 embutidos na imagem de boot. | Comando `run hello` no prompt executa um programa em modo usuário que imprime na tela e retorna ao prompt. | Concluído |
 | 6. Interface de programação | Ampliar o contrato de syscalls (teclado, memória, código de saída) e oferecer uma biblioteca de runtime para quem escreve programas. | Um programa escrito por um aluno lê entrada do teclado e responde (`run eco`); um programa com acesso inválido à memória é encerrado sem derrubar o kernel (`run falha_memoria`). | Concluído |
-| 7. Multitarefa | Trocar de contexto entre mais de um programa carregado, primeiro de forma cooperativa e depois preemptiva. | Dois programas intercalando saída na tela. | Planejado |
+| 7. Multitarefa | Trocar de contexto entre mais de um programa carregado, primeiro de forma cooperativa e depois preemptiva. | Dois programas intercalando saída na tela (`run ping pong`, `run contador_a contador_b`). | Concluído |
 | 8. Sistema de arquivos | Ler arquivos de um sistema de arquivos, primeiro um ramdisk embutido e depois um driver de disco com leitura somente. | Listar arquivos e executar um programa lido do disco. | Planejado |
 | 9. Drivers | Acrescentar suporte a periféricos adicionais dentro do escopo do projeto, um por marco. | Um novo periférico demonstrado funcionando no QEMU. | Planejado |
 
@@ -151,9 +153,17 @@ com o prompt respondendo logo depois. Quem quiser escrever o próprio
 programa segue o [`GUIA_DO_PROGRAMADOR.md`](GUIA_DO_PROGRAMADOR.md).
 Depende do Marco 5.
 
-**Marco 7. Multitarefa.** Timer, troca de contexto, primeiro cooperativa e
-depois preemptiva, com mais de um programa carregado. Demonstrável: dois
-programas intercalando saída na tela. Depende do Marco 5.
+**Marco 7. Multitarefa.** Concluído. Mais de um programa carregado ao mesmo
+tempo, cada um na sua própria memória (uma tabela de páginas por programa),
+com troca de contexto primeiro cooperativa (a syscall `SYS_YIELD`, contrato
+versão 3 do [`SYSCALLS.md`](SYSCALLS.md)) e depois preemptiva (o timer PIT, a
+100 Hz, pela IRQ0 do PIC 8259, tira a CPU de quem não a cede depois de uma
+fatia de 50 ms). O escalonador é um rodízio, o kernel nunca é trocado, e o
+teclado vai ao programa que pediu primeiro. Demonstrável: `run ping pong`
+mostra as linhas dos dois alternadas (cada um cede a CPU ao outro);
+`run contador_a contador_b` mostra a saída dos dois intercalada sem que nenhum
+peça a vez; `run falha_memoria contador_a` encerra só quem falhou.
+Depende do Marco 5.
 
 **Marco 8. Sistema de arquivos.** Primeiro um ramdisk somente leitura
 embutido na imagem, depois um driver de disco (ATA) com um sistema de
@@ -293,7 +303,7 @@ projeto (`x86_64-os_rust.json`), gerar uma imagem de boot com `bootimage`,
 e abrir uma janela do QEMU que dá boot via BIOS direto nesse binário. Em
 poucos segundos você deve ver o logo do os-rust (as 20 linhas do símbolo
 e do nome, no topo da tela), seguido da linha de identificação
-`os-rust v0.6.0` — a versão atual do projeto — e do prompt `os-rust> `
+`os-rust v0.7.0` — a versão atual do projeto — e do prompt `os-rust> `
 pronto para digitação, não um terminal comum.
 
 O mesmo `cargo run` também compila a biblioteca de runtime (`runtime/`) e
@@ -327,9 +337,9 @@ Não é preciso nenhum passo manual adicional para isso: é o mesmo
 | `panic` | Dispara um panic proposital (mesma tela de erro do tratamento de panic) |
 | `mem` | Mostra memória física utilizável, posição/tamanho do heap, um `Box` e um `Vec` |
 | `falha <tipo>` | Provoca uma exceção de CPU de propósito: `pagina` (`#PF`), `pilha` (`#DF`), `opcode` (`#UD`), `protecao` (`#GP`) ou `breakpoint` (`#BP`); sem argumento ou com um tipo desconhecido, lista os tipos disponíveis |
-| `run <nome>` | Executa um programa de usuário embutido na imagem, em modo usuário (ring 3), e volta ao prompt quando ele termina; sem argumento, ou com um nome desconhecido, lista os programas disponíveis |
+| `run <nome> [<nome>...]` | Executa programas de usuário embutidos na imagem, em modo usuário (ring 3), até 4 ao mesmo tempo (o mesmo nome pode se repetir), e volta ao prompt quando o último termina; sem argumento, com um nome desconhecido ou com mais de 4 nomes, não inicia nenhum e lista os programas disponíveis |
 
-### Programas de usuário: `hello`, `crash`, `eco` e `falha_memoria`
+### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b` e `eco2`
 
 O comando `run` executa programas escritos fora do kernel. Cada um vive em
 `programs/src/bin/` e é compilado como um executável ELF64 estático:
@@ -356,6 +366,22 @@ O comando `run` executa programas escritos fora do kernel. Cada um vive em
   erro de memoria: #PF (Page Fault) em <endereço>`, o código de erro e o
   `endereco de falha`, encerra só o programa, e o prompt continua
   funcionando (`run hello` e `run eco` logo depois).
+- **`ping`** e **`pong`** (`run ping pong`): cada um escreve quatro linhas
+  (`ping 1`, `pong 1`, ...) e **cede a CPU** (`yield_now`, a syscall
+  `SYS_YIELD`) ao outro depois de cada linha, então as linhas aparecem
+  alternadas. Demonstram a troca de contexto cooperativa.
+- **`contador_a`** e **`contador_b`** (`run contador_a contador_b`): contam em
+  um laço longo e escrevem oito linhas cada (`A: 1`, `B: 1`, ...) **sem nunca
+  ceder a CPU**. As linhas dos dois aparecem intercaladas mesmo assim, porque o
+  timer interrompe cada programa depois de uma fatia de tempo. Demonstram a
+  preempção.
+- **`eco2`** (`run eco eco2`): o irmão do `eco`, com o prefixo `eco2:` na
+  resposta. Digite uma linha e Enter, e depois outra: a primeira vai ao `eco`,
+  que pediu primeiro, e a segunda ao `eco2`.
+
+Para ver a multitarefa à mão, rode `cargo run` e digite `run ping pong`,
+`run contador_a contador_b`, `run eco eco2` e `run falha_memoria contador_a`
+(a mensagem de erro aparece na hora e o contador completa a saída).
 
 Como um programa pede serviços ao kernel (números das syscalls,
 registradores, códigos de erro, onde ele é carregado) está em
@@ -473,6 +499,47 @@ suíte automatizada (`cargo test`) cobre, além dos testes anteriores:
   16. `src/shell.rs`: `run` lista `eco` e `falha_memoria`, e `#PF` de
   programa mostra `erro de memoria`.
 
+### O que os testes do Marco 7 cobrem
+
+Para conferir à mão, rode `cargo run` e digite `run ping pong`, `run contador_a
+contador_b`, `run falha_memoria contador_a` e `run eco eco2`. A suíte
+automatizada (`cargo test`) cobre, além dos testes anteriores:
+
+- `tests/multitarefa.rs` (vários programas em ring 3 ao mesmo tempo, dentro do
+  QEMU; os programas de apoio são ELFs montados à mão):
+  - **cooperativo**: a troca de contexto preserva registradores, pilha e
+    memória de dois programas; `ping` e `pong` alternam a saída; `SYS_YIELD`
+    sem outro programa pronto volta na hora; o que termina antes não impede o
+    outro; programas simultâneos não enxergam a memória um do outro;
+  - **`run`**: um programa só é igual ao Marco 6; nome desconhecido e mais de 4
+    programas recusam o pedido inteiro sem iniciar nenhum (e sem vazar frames);
+    o mesmo nome duas vezes são instâncias independentes; 100 execuções de dois
+    programas devolvem todos os frames; o prompt volta a ler o teclado;
+  - **preemptivo**: `contador_a` e `contador_b` (que não cedem a CPU) se
+    intercalam por causa do timer; um programa curto termina antes de um longo;
+    o tick em ring 0 não troca de contexto; o fim de interrupção nunca fica
+    pendente; cada `write` sai inteiro mesmo sob preempção;
+  - **falhas**: uma falha encerra só quem falhou, com a mensagem na hora, e os
+    frames dele voltam enquanto os outros seguem vivos; `exit` de um programa
+    não encerra os outros;
+  - **teclado**: a linha vai ao programa que pediu primeiro, sem perda nem
+    duplicação; uma linha pela metade é de quem pediu primeiro; programas
+    bloqueados no teclado não consomem CPU (o kernel dorme, e cada volta
+    ociosa vem de uma interrupção); uma tecla digitada enquanto outro programa
+    computa acorda quem espera.
+- `tests/artefatos.rs`: nenhum arquivo entregue do projeto cita a ferramenta
+  usada para escrever as especificações, nem aponta para as pastas de
+  especificação (a lista de arquivos é embutida pelo `build.rs`).
+- `tests/user_runtime.rs`: o `GUIA_DO_PROGRAMADOR.md` contém, literalmente, o
+  código de `ping`, `pong`, `contador_a`, `contador_b` e `eco2`; os nomes dos
+  programas são únicos.
+- `src/syscall.rs`: `SYSCALLS.md` (versão 3) concorda com as constantes
+  (`SYS_YIELD`, máximo de programas, fatia e frequência do timer).
+  `src/memory.rs`: um espaço de endereçamento novo e destruído devolve todos os
+  frames, e uma página de um espaço não aparece nos outros. `src/task.rs`: o
+  layout do contexto é o que o assembly assume. `src/timer.rs`: o divisor do
+  PIT dá 100 Hz.
+
 Para entender por dentro como esse mecanismo funciona (a porta serial, o
 executor de testes sem biblioteca padrão, e como o resultado viaja do
 kernel até o código de saída do `cargo test`), veja o capítulo
@@ -484,7 +551,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   identificação de versão (`VERSION`, os dois derivados de `Cargo.toml`
   em tempo de compilação) e a mensagem de boas-vindas (`print_welcome`),
   inicializa a porta serial, a GDT/TSS, as interrupções, a memória
-  (frames, paginação, heap) e o mecanismo de syscall, e contém a infraestrutura de testes (o
+  (frames, paginação, heap), o timer e o mecanismo de syscall, e contém a infraestrutura de testes (o
   executor de testes, o tratamento de panic em modo de teste e a
   comunicação com o QEMU sobre sucesso ou falha).
 - `src/main.rs`: o binário de produção — ponto de entrada do boot; limpa
@@ -511,24 +578,38 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
 - `src/interrupts.rs`: a IDT, os handlers das exceções (`#BP`, `#DE`,
   `#UD`, `#GP`, `#SS`, `#NP`, `#PF`, `#DF`, este último rodando na pilha
   dedicada da TSS/IST) e a reprogramação do PIC 8259 para o teclado
-  (IRQ1). As exceções fatais compartilham uma única função que monta a
+  (IRQ0 e IRQ1). As exceções fatais compartilham uma única função que monta a
   tela de exceção (tela + serial); quando a exceção vem de um programa de
   usuário (ring 3), o handler encerra só o programa.
 - `src/keyboard.rs`: tradução de scancodes (Scan Code Set 1) para ASCII,
-  layout US QWERTY, e a leitura bloqueante de uma linha (`read_line`, com
-  eco e Backspace) que a syscall `SYS_READ_LINE` usa.
+  layout US QWERTY, o montador de linha (`LineEditor`, com eco e Backspace)
+  que o escalonador usa para a linha de quem pediu primeiro, e `read_line`,
+  a leitura bloqueante de um leitor só.
 - `src/memory.rs`: o alocador de frames físicos a partir do mapa de
   memória do bootloader (global, com reciclagem de frames), e a
   tradução/criação de mapeamentos na tabela de páginas ativa (usando o
   mapeamento completo da física), inclusive as páginas dos programas de
-  usuário.
+  usuário, e o espaço de endereçamento de cada programa (`AddressSpace`:
+  tabela P4 e P3 próprias, criadas, ativadas e destruídas).
 - `src/elf.rs`: o leitor de executáveis ELF64 estáticos (escrito à mão) e
   as regras de validação.
 - `src/user.rs`: o layout de memória do usuário (código e dados, heap e
-  pilha), o carregador, o heap do programa (`grow_heap`), e a entrada e
-  saída de ring 3 (`enter_user`/`leave_user`).
-- `src/syscall.rs`: o mecanismo `syscall`/`sysret`, o despachante e as
-  syscalls `write`, `exit`, `read_line` e `alloc`.
+  pilha), o carregador (um espaço de endereçamento por programa), o heap do
+  programa (`grow_heap`), `run_images`/`run_all` (vários programas ao mesmo
+  tempo) e a entrada e saída de ring 3 (`enter_user`, `resume_task`,
+  `leave_user`).
+- `src/task.rs`: o que o kernel guarda de cada programa carregado: o estado
+  dele em ring 3 (`TaskContext`), em que ponto da vida está e o pedido de
+  teclado em andamento.
+- `src/scheduler.rs`: o escalonador em rodízio: escolhe a próxima tarefa, troca
+  de contexto (por `SYS_YIELD`, pelo timer ou por espera de teclado), entrega a
+  linha digitada a quem pediu primeiro, dorme com `hlt` quando todos esperam, e
+  devolve os recursos de quem termina.
+- `src/timer.rs`: o PIT (100 Hz, IRQ0) e o stub da interrupção do timer, que só
+  troca de tarefa quando interrompe ring 3.
+- `src/syscall.rs`: o mecanismo `syscall` (entrada pela instrução, retorno por
+  `iretq`), o despachante e as syscalls `write`, `exit`, `read_line`, `alloc`
+  e `yield`.
 - `src/programs.rs`: a tabela dos programas embutidos, gerada pelo
   `build.rs`.
 - `src/allocator.rs`: a faixa fixa de endereços virtuais do heap, o
@@ -539,23 +620,28 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
 - `abi/`: as constantes do contrato de syscalls (números, erros, limites),
   compartilhadas pelo kernel e pela biblioteca de runtime.
 - `runtime/`: a biblioteca de runtime dos programas de usuário (`entry!`,
-  `print!`/`println!`, `read_line`, alocador global, tratador de `panic`).
+  `print!`/`println!`, `read_line`, `yield_now`, alocador global, tratador de
+  `panic`).
 - `programs/`: a crate dos programas de usuário (`hello`, `crash`, `eco`,
-  `falha_memoria`, um arquivo por programa em `src/bin/`), com o linker
+  `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, um
+  arquivo por programa em `src/bin/`), com o linker
   script (`link.ld`); compilada para o target de usuário pelo `build.rs` da
   raiz, nunca diretamente.
 - `GUIA_DO_PROGRAMADOR.md`: o guia de quem escreve programas para o os-rust.
-- `build.rs`: compila `programs/` (com um `cargo` aninhado) e embute os
-  ELFs no kernel.
-- `SYSCALLS.md`: o contrato de syscalls (versão 2).
+- `build.rs`: compila `programs/` (com um `cargo` aninhado), embute os ELFs no
+  kernel e gera a lista de arquivos entregues que `tests/artefatos.rs` confere.
+- `SYSCALLS.md`: o contrato de syscalls (versão 3).
 - `tests/`: os testes de integração, cada um iniciando o kernel do zero
   em seu próprio binário — um teste de boot (que também confere a versão
   na mensagem de boas-vindas), um teste cujo resultado esperado é um
   panic, testes do alocador de frames, da paginação e do heap, e dois
   testes dedicados de proteção: `double_fault.rs` (prova que o handler
   roda na pilha dedicada da IST) e `page_fault.rs` (prova o endereço de
-  falha esperado), `user_mode.rs` (roda programas de usuário em ring 3) e
-  `user_runtime.rs` (leitura de teclado, memória, isolamento e o guia).
+  falha esperado), `user_mode.rs` (roda programas de usuário em ring 3),
+  `user_runtime.rs` (leitura de teclado, memória, isolamento e o guia),
+  `multitarefa.rs` (vários programas ao mesmo tempo: troca de contexto,
+  preempção, isolamento e teclado) e `artefatos.rs` (higiene dos arquivos
+  entregues).
 - `x86_64-os_rust.json`: a especificação do target bare-metal customizado
   (sem sistema operacional por baixo).
 - `x86_64-os_rust_user.json`: a especificação do target dos programas de

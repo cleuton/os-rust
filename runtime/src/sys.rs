@@ -7,7 +7,7 @@
 
 use core::arch::asm;
 
-use abi::{SYS_ALLOC, SYS_EXIT, SYS_READ_LINE, SYS_WRITE};
+use abi::{SYS_ALLOC, SYS_EXIT, SYS_READ_LINE, SYS_WRITE, SYS_YIELD};
 
 /// Executa `syscall` com o número `nr` e dois argumentos e devolve o
 /// resultado (`rax`). Nenhuma das syscalls deste contrato usa mais de dois
@@ -87,4 +87,28 @@ pub fn alloc(size: usize) -> i64 {
     // SAFETY: `SYS_ALLOC` não recebe ponteiros; qualquer `size` é válido (o
     // kernel devolve erro se não puder atender).
     unsafe { syscall2(SYS_ALLOC, size as u64, 0) }
+}
+
+/// Cede a CPU: o kernel passa a vez ao próximo programa pronto e só volta a
+/// este quando chegar a vez dele, na instrução seguinte. Se nenhum outro
+/// programa está pronto, volta na hora. Nunca falha.
+///
+/// Um programa não precisa chamar isto: o timer do kernel o interrompe de
+/// qualquer jeito depois de uma fatia de tempo. Chamar é só uma gentileza
+/// (e a forma de dois programas se alternarem numa ordem previsível).
+pub fn yield_now() {
+    // SAFETY: `SYS_YIELD` não recebe ponteiros nem argumentos e nunca falha.
+    // O kernel preserva todos os registradores, menos `rax` (resultado, que
+    // vale 0 e é ignorado aqui) e `rcx`/`r11` (que o contrato declara
+    // destruídos; por isso são saídas descartadas), e não mexe na pilha do
+    // programa, então `nostack` é verdade.
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") SYS_YIELD as i64 => _,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
 }
