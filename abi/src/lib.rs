@@ -23,6 +23,18 @@ pub const SYS_ALLOC: u64 = 4;
 /// devolve `0` e nunca falha.
 pub const SYS_YIELD: u64 = 5;
 
+/// `open(path_ptr, path_len)`: abre um arquivo ou diretório, somente para
+/// leitura, e devolve um descritor (`0..MAX_OPEN_FILES`).
+pub const SYS_OPEN: u64 = 6;
+/// `read(fd, ptr, len)`: lê bytes do arquivo aberto, em sequência. Devolve
+/// `0` no fim do arquivo.
+pub const SYS_READ: u64 = 7;
+/// `close(fd)`: fecha o descritor.
+pub const SYS_CLOSE: u64 = 8;
+/// `read_dir(fd, ptr, len)`: escreve em `ptr` a próxima entrada (um
+/// `DirEntryRaw`) do diretório aberto. Devolve `1`, ou `0` no fim.
+pub const SYS_READ_DIR: u64 = 9;
+
 /// Máximo de programas que `run` carrega ao mesmo tempo. Pedir mais que isso
 /// é recusado antes de iniciar qualquer programa.
 pub const MAX_TASKS: usize = 4;
@@ -58,3 +70,54 @@ pub const ERR_NOMEM: i64 = -3;
 
 /// Maior `len` aceito por `SYS_WRITE` e por `SYS_READ_LINE`.
 pub const IO_MAX_LEN: u64 = 4096;
+
+/// O caminho (ou um componente dele) não existe.
+pub const ERR_NOENT: i64 = -4;
+/// Volume desconhecido, ou conhecido mas indisponível (sem disco, volume
+/// inválido, erro ao montar).
+pub const ERR_NODEV: i64 = -5;
+/// Tipo errado: ler como arquivo um diretório, listar como diretório um
+/// arquivo, ou usar um arquivo como componente intermediário do caminho.
+pub const ERR_TYPE: i64 = -6;
+/// Descritor inválido: fora de `0..MAX_OPEN_FILES`, não aberto ou já fechado.
+pub const ERR_BADF: i64 = -7;
+/// O programa já tem `MAX_OPEN_FILES` arquivos abertos.
+pub const ERR_MFILE: i64 = -8;
+/// Caminho com mais de `MAX_PATH_LEN` bytes (ou profundidade demais).
+pub const ERR_NAMETOOLONG: i64 = -9;
+/// Erro ao ler o volume: disco que não responde, erro do disco ou estrutura
+/// FAT corrompida.
+pub const ERR_IO: i64 = -10;
+
+/// Maior caminho aceito por `SYS_OPEN`, em bytes.
+pub const MAX_PATH_LEN: usize = 64;
+/// Arquivos abertos ao mesmo tempo por programa.
+pub const MAX_OPEN_FILES: usize = 4;
+/// Maior executável que `run` carrega de um arquivo, em bytes (64 KiB). O
+/// arquivo é lido inteiro para o heap do kernel, então o limite protege o heap.
+pub const MAX_EXEC_SIZE: usize = 65536;
+
+/// Tamanho, em bytes, de um `DirEntryRaw`.
+pub const DIR_ENTRY_SIZE: usize = 20;
+/// `DirEntryRaw::kind` de um arquivo.
+pub const KIND_FILE: u8 = 1;
+/// `DirEntryRaw::kind` de um diretório.
+pub const KIND_DIR: u8 = 2;
+
+/// Uma entrada de diretório como `SYS_READ_DIR` a entrega ao programa:
+/// 20 bytes, `size` em little-endian.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirEntryRaw {
+    /// Nome em minúsculas (`nome.ext`), terminado e preenchido com zeros.
+    pub name: [u8; 12],
+    /// `KIND_FILE` ou `KIND_DIR`.
+    pub kind: u8,
+    /// Zeros (alinhamento de `size`).
+    pub _pad: [u8; 3],
+    /// Tamanho em bytes; `0` para diretório.
+    pub size: u32,
+}
+
+// O layout é parte do contrato: kernel e runtime compartilham este tipo.
+const _: () = assert!(core::mem::size_of::<DirEntryRaw>() == DIR_ENTRY_SIZE);

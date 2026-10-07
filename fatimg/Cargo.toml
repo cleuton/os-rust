@@ -1,0 +1,10 @@
+# Gerador de imagens FAT16 do os-rust. Escreve o volume inteiro em memória
+# (`Vec<u8>`), sem depender de nenhuma ferramenta do sistema. É usada em dois
+# lugares: no `build.rs` do kernel (roda no host, gera o ramdisk e o disco) e
+# nos testes do kernel (roda no target `no_std`, fabrica imagens válidas e as
+# adultera para provar que o leitor recusa imagens corrompidas). Por isso é
+# `no_std` + `alloc` e não tem nenhuma dependência.
+[package]
+name = "fatimg"
+version = "0.1.0"
+edition = "2021"

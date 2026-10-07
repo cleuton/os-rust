@@ -13,7 +13,8 @@
 //!   sintéticos;
 //! - `SYS_READ_LINE` inválida, e o prompt retomando o teclado;
 //! - isolamento com `falha_memoria`;
-//! - o guia bate com o código (inclusive os programas do Marco 7: `ping`,
+//! - o guia bate com o código (inclusive os programas do Marco 8, `leitor` e
+//!   `listador`, e os do Marco 7: `ping`,
 //!   `pong`, `contador_a`, `contador_b` e `eco2`).
 
 #![no_std]
@@ -524,6 +525,8 @@ const PONG_RS: &str = include_str!("../programs/src/bin/pong.rs");
 const CONTADOR_A_RS: &str = include_str!("../programs/src/bin/contador_a.rs");
 const CONTADOR_B_RS: &str = include_str!("../programs/src/bin/contador_b.rs");
 const ECO2_RS: &str = include_str!("../programs/src/bin/eco2.rs");
+const LEITOR_RS: &str = include_str!("../programs/src/bin/leitor.rs");
+const LISTADOR_RS: &str = include_str!("../programs/src/bin/listador.rs");
 
 #[test_case]
 fn guia_contem_o_codigo_dos_programas_de_exemplo() {
@@ -544,6 +547,9 @@ fn guia_contem_o_codigo_dos_programas_de_exemplo() {
         ("contador_a.rs", CONTADOR_A_RS),
         ("contador_b.rs", CONTADOR_B_RS),
         ("eco2.rs", ECO2_RS),
+        // E os do Marco 8, os que leem arquivos.
+        ("leitor.rs", LEITOR_RS),
+        ("listador.rs", LISTADOR_RS),
     ] {
         assert!(
             GUIA.contains(codigo),
@@ -568,6 +574,14 @@ fn guia_cita_o_contrato_e_a_biblioteca() {
         "SYS_YIELD",
         "yield_now",
         "run ping pong",
+        "SYS_OPEN",
+        "SYS_READ_DIR",
+        "File::open",
+        "Dir::open",
+        "/disco",
+        "/ram",
+        "run leitor",
+        "run listador",
     ] {
         assert!(GUIA.contains(termo), "o guia nao cita `{}`", termo);
     }
@@ -584,11 +598,15 @@ fn nomes_de_programas_sao_unicos_e_ordenados() {
         "eco2",
         "falha_memoria",
         "hello",
+        "leitor",
+        "listador",
         "ping",
         "pong",
     ] {
         assert!(nomes.contains(&esperado), "programa ausente: {}", esperado);
     }
+    // `visita` existe só no disco: não é um programa embutido.
+    assert!(!nomes.contains(&"visita"), "visita nao pode estar embutido no kernel");
     // Sem repetição, nem comparando sem diferenciar maiúsculas de minúsculas
     // (um sistema de arquivos que ignora a caixa juntaria os dois).
     for (i, a) in nomes.iter().enumerate() {

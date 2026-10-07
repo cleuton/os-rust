@@ -99,7 +99,86 @@ fn main() {
     println!("cargo:rerun-if-changed=runtime");
     println!("cargo:rerun-if-changed=abi");
 
+    // As imagens de volume (ramdisk e disco) dependem do conteúdo de `discos/`
+    // e do ELF de `visita`, que acabou de ser compilado.
+    generate_images(&root, &out_dir, &built_dir);
+    println!("cargo:rerun-if-changed=discos");
+    println!("cargo:rerun-if-changed=fatimg");
+
     write_delivered_files(&root, &out_dir);
+}
+
+/// Maior executável que `run` carrega de um arquivo, em bytes. É o mesmo valor
+/// de `abi::MAX_EXEC_SIZE` (este script não depende de `abi`): serve aqui só
+/// para fabricar `docs/grande.bin`, um byte maior que o limite, com o qual os
+/// testes provam a recusa de um executável grande demais.
+const MAX_EXEC_SIZE: usize = 65536;
+
+/// Gera as imagens FAT16 com a crate `fatimg`, sem nenhuma ferramenta do
+/// sistema:
+///
+/// - `OUT_DIR/ramdisk.img`: `discos/ram/` mais `bin/hello` (cópia do ELF
+///   `hello`); o kernel a embute com `include_bytes!`;
+/// - `target/imagens/disco.img`: `discos/disco/` mais `bin/visita` (o programa
+///   que só existe no disco) e `docs/grande.bin`; o QEMU a recebe como
+///   disco de dados (ver `Cargo.toml`, `[package.metadata.bootimage]`);
+/// - `target/imagens/corrompido.img`: o disco com o setor de boot zerado, para
+///   os testes provarem que um volume inválido é recusado.
+///
+/// Todas as imagens são montadas em memória **antes** de qualquer arquivo ser
+/// escrito, e qualquer erro termina o script com `panic!`: nunca sai uma
+/// imagem parcial, ausente ou desatualizada.
+fn generate_images(root: &Path, out_dir: &Path, built_dir: &Path) {
+    let mut ram = fatimg::Builder::new();
+    add_tree(&mut ram, &root.join("discos/ram"), "");
+    ram.dir("bin").unwrap_or_else(|e| panic!("ramdisk: cria bin: {e:?}"));
+    let hello = fs::read(out_dir.join("hello.elf")).expect("le o ELF de hello");
+    ram.file("bin/hello", &hello).unwrap_or_else(|e| panic!("ramdisk: grava bin/hello: {e:?}"));
+    let ram_image = ram.build().unwrap_or_else(|e| panic!("ramdisk: monta a imagem: {e:?}"));
+
+    let mut disco = fatimg::Builder::new();
+    add_tree(&mut disco, &root.join("discos/disco"), "");
+    disco.dir("bin").unwrap_or_else(|e| panic!("disco: cria bin: {e:?}"));
+    let visita = fs::read(built_dir.join("visita")).expect("le o ELF de visita");
+    disco.file("bin/visita", &visita).unwrap_or_else(|e| panic!("disco: grava bin/visita: {e:?}"));
+    disco
+        .file("docs/grande.bin", &vec![0u8; MAX_EXEC_SIZE + 1])
+        .unwrap_or_else(|e| panic!("disco: grava docs/grande.bin: {e:?}"));
+    let disco_image = disco.build().unwrap_or_else(|e| panic!("disco: monta a imagem: {e:?}"));
+
+    let mut corrupt_image = disco_image.clone();
+    corrupt_image[..512].fill(0);
+
+    let images_dir = root.join("target/imagens");
+    fs::create_dir_all(&images_dir).unwrap_or_else(|e| panic!("cria {}: {e}", images_dir.display()));
+    fs::write(out_dir.join("ramdisk.img"), &ram_image).expect("escreve ramdisk.img em OUT_DIR");
+    fs::write(images_dir.join("disco.img"), &disco_image).expect("escreve target/imagens/disco.img");
+    fs::write(images_dir.join("corrompido.img"), &corrupt_image).expect("escreve target/imagens/corrompido.img");
+}
+
+/// Copia para o construtor tudo que está em `dir`, recursivamente, em ordem
+/// alfabética (a imagem é a mesma em toda compilação). `prefix` é o caminho
+/// de `dir` dentro do volume (vazio na raiz). Arquivos ocultos são ignorados.
+fn add_tree(builder: &mut fatimg::Builder, dir: &Path, prefix: &str) {
+    let mut entries: Vec<PathBuf> = fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("le {}: {e}", dir.display()))
+        .map(|entry| entry.expect("entrada de diretorio").path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        let name = path.file_name().and_then(|n| n.to_str()).expect("nome de arquivo UTF-8").to_string();
+        if name.starts_with('.') {
+            continue;
+        }
+        let inside = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
+        if path.is_dir() {
+            builder.dir(&inside).unwrap_or_else(|e| panic!("cria o diretorio {inside}: {e:?}"));
+            add_tree(builder, &path, &inside);
+        } else {
+            let bytes = fs::read(&path).unwrap_or_else(|e| panic!("le {}: {e}", path.display()));
+            builder.file(&inside, &bytes).unwrap_or_else(|e| panic!("grava {inside} ({}): {e:?}", path.display()));
+        }
+    }
 }
 
 /// Extensões dos arquivos de texto que fazem parte do que o projeto entrega.

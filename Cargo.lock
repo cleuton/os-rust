@@ -37,6 +37,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "413d67b29ef1021b4d60f4aa1e925ca031751e213832b4b1d588fae623c05c60"
 
 [[package]]
+name = "fatimg"
+version = "0.1.0"
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -65,10 +69,11 @@ dependencies = [
 
 [[package]]
 name = "os-rust"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "abi",
  "bootloader",
+ "fatimg",
  "lazy_static",
  "linked_list_allocator",
  "pic8259",

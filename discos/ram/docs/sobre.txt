@@ -1,0 +1,2 @@
+O ramdisk e um volume FAT16 que mora dentro do proprio kernel.
+O mesmo leitor de FAT le o ramdisk e o disco.

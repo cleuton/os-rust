@@ -23,8 +23,12 @@ use x86_64::VirtAddr;
 pub const HEAP_START: usize = 0x_4444_4444_0000;
 
 /// Tamanho fixo do heap, definido em tempo de compilação — este marco não
-/// precisa de um heap que cresça em tempo de execução.
-pub const HEAP_SIZE: usize = 100 * 1024;
+/// precisa de um heap que cresça em tempo de execução. São 16 MiB por dois
+/// motivos: `run` lê para o heap o arquivo executável inteiro (até 64 KiB
+/// cada, até 4 programas ao mesmo tempo) antes de carregá-lo; e os testes do
+/// leitor FAT fabricam, em memória, imagens de volume de ~2 MiB (o mínimo de
+/// um FAT16 de verdade) e as adulteram.
+pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
 
 /// O alocador global: atende `Box`, `Vec`, `String` e qualquer outro
 /// tipo da crate `alloc` em todo o kernel, a partir do momento em que

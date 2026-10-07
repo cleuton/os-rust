@@ -7,11 +7,13 @@
 
 use core::arch::asm;
 
-use abi::{SYS_ALLOC, SYS_EXIT, SYS_READ_LINE, SYS_WRITE, SYS_YIELD};
+use abi::{
+    SYS_ALLOC, SYS_CLOSE, SYS_EXIT, SYS_OPEN, SYS_READ, SYS_READ_DIR, SYS_READ_LINE, SYS_WRITE,
+    SYS_YIELD,
+};
 
 /// Executa `syscall` com o número `nr` e dois argumentos e devolve o
-/// resultado (`rax`). Nenhuma das syscalls deste contrato usa mais de dois
-/// argumentos.
+/// resultado (`rax`).
 ///
 /// # Safety
 ///
@@ -36,6 +38,32 @@ unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
             inlateout("rax") nr as i64 => ret,
             in("rdi") a1,
             in("rsi") a2,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// Como `syscall2`, com um terceiro argumento (`rdx`): `SYS_READ` e
+/// `SYS_READ_DIR`.
+///
+/// # Safety
+///
+/// Os mesmos requisitos de `syscall2`.
+#[inline(always)]
+unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: igual a `syscall2`, com `rdx` = argumento 3 (preservado pelo
+    // kernel, `SYSCALLS.md`, seção 4).
+    unsafe {
+        asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack),
@@ -111,4 +139,39 @@ pub fn yield_now() {
             options(nostack),
         );
     }
+}
+
+/// Abre o arquivo ou diretório `path` (somente leitura). Devolve o descritor
+/// (`≥ 0`) ou um código de erro (`< 0`, ver `abi`). `path` tem no máximo
+/// `abi::MAX_PATH_LEN` bytes.
+pub fn open(path: &[u8]) -> i64 {
+    // SAFETY: o ponteiro e o tamanho vêm de uma fatia viva do programa (memória
+    // mapeada para ele), que é o que `SYS_OPEN` exige do caminho.
+    unsafe { syscall2(SYS_OPEN, path.as_ptr() as u64, path.len() as u64) }
+}
+
+/// Lê bytes do arquivo aberto `fd` para `buf`, a partir da posição dele.
+/// Devolve os bytes lidos (`0` no fim do arquivo) ou um código de erro.
+/// `buf.len()` deve ser no máximo `abi::IO_MAX_LEN`.
+pub fn read(fd: i64, buf: &mut [u8]) -> i64 {
+    // SAFETY: o ponteiro e o tamanho vêm de uma fatia mutável viva do programa
+    // (memória mapeada e gravável), que é o que `SYS_READ` exige do intervalo
+    // em que o kernel vai escrever.
+    unsafe { syscall3(SYS_READ, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) }
+}
+
+/// Fecha o descritor `fd`. Devolve `0` ou um código de erro.
+pub fn close(fd: i64) -> i64 {
+    // SAFETY: `SYS_CLOSE` não recebe ponteiros; qualquer valor de `fd` é
+    // válido (o kernel devolve erro para um descritor que não existe).
+    unsafe { syscall2(SYS_CLOSE, fd as u64, 0) }
+}
+
+/// Lê a próxima entrada do diretório aberto `fd` para `buf` (que precisa ter
+/// pelo menos `abi::DIR_ENTRY_SIZE` bytes). Devolve `1` (uma entrada escrita),
+/// `0` (fim do diretório) ou um código de erro.
+pub fn read_dir(fd: i64, buf: &mut [u8]) -> i64 {
+    // SAFETY: o ponteiro e o tamanho vêm de uma fatia mutável viva do programa
+    // (memória mapeada e gravável), que é o que `SYS_READ_DIR` exige.
+    unsafe { syscall3(SYS_READ_DIR, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) }
 }

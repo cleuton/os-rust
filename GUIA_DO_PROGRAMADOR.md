@@ -21,6 +21,7 @@ A biblioteca de runtime (`runtime/`, na raiz do repositório) existe para que vo
 - `read_line(&mut buffer)`: espera a pessoa digitar uma linha e pressionar Enter, e devolve o que foi digitado (sem o Enter) como texto, através da syscall de leitura de teclado. O sistema mostra na tela o que é digitado e apaga com Backspace; a linha tem no máximo 127 caracteres.
 - Um alocador global: permite usar `Box`, `Vec`, `String` e o restante da crate `alloc` (com `extern crate alloc;` no seu programa), através da syscall de memória. O heap do programa cresce até 1 MiB.
 - `yield_now()`: cede a CPU a outro programa que esteja rodando ao mesmo tempo (veja a seção **Multitarefa**).
+- `File`, `Dir`, `DirEntry` e `FsError`: abrir e ler arquivos e listar diretórios, somente leitura (veja a seção **Arquivos**).
 - `exit(codigo)`: encerra o programa mais cedo, se precisar.
 - Um tratador de `panic!`: escreve `[panic] <mensagem>` na tela e encerra o programa com o código 101.
 
@@ -60,6 +61,10 @@ O documento oficial e versionado do contrato de syscalls é o [`SYSCALLS.md`](SY
 | 3 | `SYS_READ_LINE` | Espera uma linha digitada, até o Enter | `read_line(&mut buffer)` |
 | 4 | `SYS_ALLOC` | Aumenta o heap do programa | o alocador global, usado por `Box`/`Vec`/`String` |
 | 5 | `SYS_YIELD` | Cede a CPU a outro programa | `yield_now()` |
+| 6 | `SYS_OPEN` | Abre um arquivo ou diretório (somente leitura) | `File::open`, `Dir::open` |
+| 7 | `SYS_READ` | Lê bytes de um arquivo aberto | `File::read` |
+| 8 | `SYS_CLOSE` | Fecha um arquivo ou diretório | automático, quando o `File`/`Dir` sai de escopo |
+| 9 | `SYS_READ_DIR` | Lê a próxima entrada de um diretório aberto | `Dir::next` |
 
 Se seu programa precisar chamar uma syscall diretamente (fora do que a biblioteca de runtime já cobre), consulte o `SYSCALLS.md` para o número e a convenção exatos.
 
@@ -439,6 +444,181 @@ A primeira linha vai ao `eco`, que pediu primeiro; a segunda vai ao `eco2`.
 2. Escreva um laço que faz um pouco de trabalho, escreve uma linha com `println!` e chama `yield_now()`.
 3. Rode `cargo run` e, no prompt, `run ping meuprograma`: as linhas do seu programa se alternam com as do `ping`.
 
+## Arquivos
+
+O os-rust lê arquivos, **somente leitura**: nenhum programa cria, altera ou apaga arquivos. Os arquivos moram em dois volumes, ambos no formato FAT16, e o seu programa os enxerga pelo mesmo caminho, sem saber de onde vêm os bytes:
+
+| Volume | O que é |
+|---|---|
+| `/ram` | o ramdisk, embutido na imagem de boot |
+| `/disco` | o disco, anexado ao QEMU pelo `cargo run` (se o QEMU subir sem ele, `/disco` fica indisponível e o `/ram` continua funcionando) |
+
+O conteúdo dos dois vem do diretório `discos/` do repositório (`discos/ram/` e `discos/disco/`), transformado em imagem de volume dentro de `cargo run`/`cargo test`: para dar um arquivo novo ao seu programa, ponha-o ali.
+
+### Caminhos
+
+Um caminho é `/<volume>/<componente>/<componente>...`, por exemplo `/disco/docs/longo.txt`.
+
+- Cada componente é um nome **8.3**: até 8 caracteres, e opcionalmente um ponto e até 3 de extensão (letras, dígitos, `_`, `-`, `~`, `$`). Nomes longos não existem.
+- Maiúsculas e minúsculas não fazem diferença: `/DISCO/DOCS/LONGO.TXT` é o mesmo arquivo. Os nomes que o kernel devolve vêm em minúsculas.
+- `.` e `..` não são aceitos: nenhum caminho sai do volume.
+- No máximo 64 bytes e 8 componentes por caminho, e no máximo 4 arquivos abertos ao mesmo tempo por programa.
+
+### A API
+
+```rust
+use runtime::{Dir, DirEntry, File, FsError};
+
+let mut arquivo = File::open("/disco/docs/longo.txt")?;   // Result<File, FsError>
+let n = arquivo.read(&mut buffer)?;                       // Result<usize, FsError>; 0 = acabou
+
+let mut diretorio = Dir::open("/disco")?;                 // Result<Dir, FsError>
+while let Some(entrada) = diretorio.next()? {             // Result<Option<DirEntry>, FsError>
+    entrada.name();    // &str, ex.: "leiame.txt"
+    entrada.is_dir();  // bool
+    entrada.size();    // u32, em bytes (0 para diretório)
+}
+```
+
+- `File::read` lê **a partir de onde a leitura anterior parou** e avança. Ela devolve quantos bytes leu; só devolve `0` quando o arquivo acabou. Um arquivo vazio devolve `0` na primeira leitura.
+- `Dir::next` entrega uma entrada por vez, na ordem do diretório, sem `.` nem `..`.
+- `File` e `Dir` **fecham sozinhos** quando saem de escopo. Se o seu programa terminar (por `exit`, ou por um erro) com arquivos abertos, o kernel os fecha.
+- Cada programa tem a **sua** lista de arquivos abertos: a posição de leitura de um programa nunca é a de outro, nem quando dois programas leem o mesmo arquivo ao mesmo tempo.
+
+### Os erros
+
+Toda operação devolve `Result<_, FsError>`. `FsError` implementa `Display`, então `println!("{}", erro)` escreve uma frase.
+
+| `FsError` | Quando |
+|---|---|
+| `NotFound` | o caminho (ou um componente dele) não existe |
+| `NoVolume` | o volume não existe ou não está disponível (por exemplo, QEMU sem disco, ou volume com defeito) |
+| `WrongType` | ler um diretório como arquivo, listar um arquivo, ou um arquivo no meio do caminho |
+| `TooManyOpen` | o programa já tem 4 arquivos abertos |
+| `PathTooLong` | mais de 64 bytes ou 8 componentes |
+| `Invalid` | caminho malformado: componente vazio, nome fora de 8.3, `.` ou `..`, ou sem `/` no começo |
+| `Io` | erro ao ler o volume: o disco não respondeu ou a estrutura do volume está corrompida |
+
+Um erro de arquivo **nunca** derruba o seu programa nem o kernel: você recebe o `Err` e decide o que fazer.
+
+### Programa de exemplo 8: leitor
+
+Abre um arquivo do disco e escreve o conteúdo na tela. O arquivo ocupa mais de um cluster do disco, e o programa não sabe nem precisa saber disso. Arquivo: `programs/src/bin/leitor.rs`. Rode com `run leitor`.
+
+```rust
+//! `leitor`: abre um arquivo do disco, lê o conteúdo e o escreve na tela.
+//!
+//! O programa nunca fala com o disco: ele pede ao kernel, por syscalls, e a
+//! biblioteca de runtime esconde as syscalls atrás de `File`. O arquivo é
+//! lido em pedaços de 128 bytes (um buffer na pilha) até `read` devolver `0`,
+//! que quer dizer "o arquivo acabou". O caminho é fixo porque programas não
+//! recebem argumentos de linha de comando neste marco.
+//!
+//! Rode com `run leitor`. Para ler outro arquivo, troque `CAMINHO`.
+
+#![no_std]
+#![no_main]
+
+use runtime::sys::write;
+use runtime::{entry, println, File};
+
+entry!(main);
+
+/// O arquivo que o programa lê: um texto de dois clusters, no disco.
+const CAMINHO: &str = "/disco/docs/longo.txt";
+
+fn main() -> i32 {
+    // `File::open` devolve um erro de Rust se o arquivo não existe, se o disco
+    // não está lá, etc. O arquivo é fechado sozinho quando `arquivo` sai de escopo.
+    let mut arquivo = match File::open(CAMINHO) {
+        Ok(arquivo) => arquivo,
+        Err(erro) => {
+            println!("leitor: nao abriu {}: {}", CAMINHO, erro);
+            return 1;
+        }
+    };
+
+    let mut pedaco = [0u8; 128];
+    loop {
+        match arquivo.read(&mut pedaco) {
+            // 0 bytes: o arquivo acabou.
+            Ok(0) => return 0,
+            // `write` entrega os bytes à tela exatamente como estão.
+            Ok(n) => {
+                write(&pedaco[..n]);
+            }
+            Err(erro) => {
+                println!("leitor: erro de leitura: {}", erro);
+                return 2;
+            }
+        }
+    }
+}
+```
+
+Repare que `Err(erro)` aparece em dois lugares: ao abrir (o arquivo pode não existir, ou o disco pode não estar lá) e ao ler. O programa avisa e sai com um código diferente de zero, e o sistema escreve `[run] leitor terminou com codigo <n>`.
+
+### Programa de exemplo 9: listador
+
+Lista um diretório do disco. Arquivo: `programs/src/bin/listador.rs`. Rode com `run listador`.
+
+```rust
+//! `listador`: lista um diretório do disco e escreve o nome de cada entrada.
+//!
+//! Um diretório é aberto como um arquivo, com `Dir::open`, e lido uma entrada
+//! por vez com `next`, até ela devolver `None`. Cada entrada diz o nome, se é
+//! um diretório e o tamanho. O caminho é fixo porque programas não recebem
+//! argumentos de linha de comando neste marco.
+//!
+//! Rode com `run listador`. Para listar outro diretório, troque `CAMINHO`.
+
+#![no_std]
+#![no_main]
+
+use runtime::{entry, println, Dir};
+
+entry!(main);
+
+/// O diretório que o programa lista: a raiz do disco.
+const CAMINHO: &str = "/disco";
+
+fn main() -> i32 {
+    let mut diretorio = match Dir::open(CAMINHO) {
+        Ok(diretorio) => diretorio,
+        Err(erro) => {
+            println!("listador: nao abriu {}: {}", CAMINHO, erro);
+            return 1;
+        }
+    };
+
+    loop {
+        match diretorio.next() {
+            Ok(Some(entrada)) => {
+                let tipo = if entrada.is_dir() { "dir" } else { "arquivo" };
+                println!("{} {} {}", tipo, entrada.size(), entrada.name());
+            }
+            // Sem mais entradas.
+            Ok(None) => return 0,
+            Err(erro) => {
+                println!("listador: erro de leitura: {}", erro);
+                return 2;
+            }
+        }
+    }
+}
+```
+
+### Rodando um programa que está no disco
+
+`run` também aceita o caminho de um arquivo executável: um argumento que começa com `/` é um caminho, e qualquer outro é o nome de um programa embutido. Experimente `run /disco/bin/visita`: `visita` existe **só** no disco (`programs/src/disco/visita.rs`), o kernel nunca o viu em tempo de compilação, e mesmo assim ele roda. O arquivo precisa ser um ELF64 estático válido e ter no máximo 64 KiB; os dois tipos de alvo se misturam (`run /disco/bin/visita hello`).
+
+### Escrevendo um programa que lê arquivos
+
+1. Ponha o arquivo que você quer ler em `discos/disco/` (por exemplo, `discos/disco/notas.txt`; lembre do nome 8.3).
+2. Crie `programs/src/bin/meuleitor.rs` copiando o `leitor` e troque a constante `CAMINHO` por `"/disco/notas.txt"`.
+3. Rode `cargo run` e, no prompt, `run meuleitor`.
+4. Para só conferir o arquivo sem escrever um programa, o prompt tem `ls <caminho>` e `cat <caminho>` (por exemplo, `ls /disco`, `cat /disco/notas.txt`).
+
 ## Escrevendo e compilando o seu próprio programa
 
 1. Crie um arquivo novo em `programs/src/bin/`, com o nome do seu programa (por exemplo, `programs/src/bin/meuprograma.rs`).
@@ -453,7 +633,7 @@ Não existe nenhum passo de compilação manual separado: se `cargo run` funcion
 
 A forma mais simples de testar é manual: `cargo run`, depois `run <nome do seu programa>`, observando a tela.
 
-Para verificação automatizada, `cargo test` roda a suíte do kernel, que inclui testes cobrindo o carregamento e a execução de programas de usuário (usando `hello`, `eco` e `falha_memoria` como referência) e de vários programas ao mesmo tempo (`tests/multitarefa.rs`: `ping`, `pong`, `contador_a`, `contador_b`, `eco2`). Se você quiser um teste dedicado ao seu próprio programa, o padrão usado pelo projeto é um arquivo em `tests/`, dando boot no kernel, "digitando" a entrada com `interrupts::push_scancode`, e verificando o resultado na tela; `tests/user_runtime.rs` é o modelo.
+Para verificação automatizada, `cargo test` roda a suíte do kernel, que inclui testes cobrindo o carregamento e a execução de programas de usuário (usando `hello`, `eco` e `falha_memoria` como referência), de vários programas ao mesmo tempo (`tests/multitarefa.rs`: `ping`, `pong`, `contador_a`, `contador_b`, `eco2`) e de programas que leem arquivos (`tests/sistema_de_arquivos.rs`: `leitor`, `listador`, `visita`). Se você quiser um teste dedicado ao seu próprio programa, o padrão usado pelo projeto é um arquivo em `tests/`, dando boot no kernel, "digitando" a entrada com `interrupts::push_scancode`, e verificando o resultado na tela; `tests/user_runtime.rs` é o modelo.
 
 ## Erros comuns
 
@@ -464,3 +644,6 @@ Para verificação automatizada, `cargo test` roda a suíte do kernel, que inclu
 - **Meu programa trava e nunca volta ao prompt**: confira se todo caminho de código do seu `main` eventualmente retorna (ou chama `exit`); um programa que nunca sai continua ocupando o prompt. Se ele está em `read_line`, está esperando você apertar Enter.
 - **`memory allocation of N bytes failed` e `terminou com codigo 101`**: o programa pediu mais memória do que o heap de 1 MiB comporta (a mensagem vem depois de uma linha `[panic] panicked at ...`).
 - **Meu programa usa uma syscall que não existe**: o kernel encerra o programa com uma mensagem de erro, do mesmo jeito que trata um acesso inválido à memória; confira o número da syscall no `SYSCALLS.md`.
+- **`File::open` devolve `NoVolume` para `/disco`**: o QEMU subiu sem o disco, ou o volume está com defeito. `cargo run` já anexa o disco sozinho; se você roda o QEMU à mão, anexe `target/imagens/disco.img` como disco IDE (`-drive file=target/imagens/disco.img,format=raw,if=ide,index=1`).
+- **`File::open` devolve `NotFound` para um arquivo que está em `discos/`**: o nome precisa caber em 8.3 (até 8 caracteres, ponto, até 3 de extensão), e `cargo run` precisa ter sido refeito depois de você adicionar o arquivo.
+- **`run /disco/...` diz `arquivo grande demais`**: executáveis lidos de arquivo têm no máximo 64 KiB.

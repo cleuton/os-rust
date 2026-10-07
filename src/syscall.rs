@@ -27,9 +27,14 @@ use crate::{gdt, memory, vga_buffer};
 // programas: os números nunca divergem entre kernel e programas. O texto do
 // contrato é o `SYSCALLS.md`.
 pub use abi::{
-    ERR_FAULT, ERR_INVAL, ERR_NOMEM, IO_MAX_LEN, SYS_ALLOC, SYS_EXIT, SYS_READ_LINE, SYS_WRITE,
-    SYS_YIELD,
+    DirEntryRaw, ERR_BADF, ERR_FAULT, ERR_INVAL, ERR_IO, ERR_MFILE, ERR_NAMETOOLONG, ERR_NODEV,
+    ERR_NOENT, ERR_NOMEM, ERR_TYPE, IO_MAX_LEN, SYS_ALLOC, SYS_CLOSE, SYS_EXIT, SYS_OPEN,
+    SYS_READ, SYS_READ_DIR, SYS_READ_LINE, SYS_WRITE, SYS_YIELD,
 };
+use abi::{DIR_ENTRY_SIZE, KIND_DIR, KIND_FILE, MAX_PATH_LEN};
+
+use crate::fat::Kind;
+use crate::fs::FsError;
 
 /// `rsp` do kernel no momento em que `enter_user` (em `user.rs`) entrou no
 /// escalonador. `leave_user` o restaura para "retornar" de `enter_user` quando
@@ -170,12 +175,12 @@ pub fn init() {
 }
 
 /// Despacha uma syscall: o número está em `ctx.rax` e os argumentos em
-/// `ctx.rdi` e `ctx.rsi`; o resultado volta em `ctx.rax`. Um número que não
+/// `ctx.rdi`, `ctx.rsi` e `ctx.rdx`; o resultado volta em `ctx.rax`. Um número que não
 /// está no contrato encerra o programa, com mensagem legível, e nunca derruba
 /// o kernel. `SYS_EXIT`, `SYS_YIELD` (quando há outro programa pronto) e um
 /// número inexistente **não retornam** aqui: o escalonador retoma outra tarefa.
 extern "C" fn syscall_dispatch(ctx: &mut TaskContext) {
-    let (nr, a1, a2) = (ctx.rax, ctx.rdi, ctx.rsi);
+    let (nr, a1, a2, a3) = (ctx.rax, ctx.rdi, ctx.rsi, ctx.rdx);
     match nr {
         SYS_WRITE => ctx.rax = sys_write(a1, a2) as u64,
         SYS_EXIT => scheduler::terminate_current(Termination::Exit { code: a1 }),
@@ -187,6 +192,10 @@ extern "C" fn syscall_dispatch(ctx: &mut TaskContext) {
             }
         }
         SYS_YIELD => scheduler::yield_now(ctx),
+        SYS_OPEN => ctx.rax = sys_open(a1, a2) as u64,
+        SYS_READ => ctx.rax = sys_read(a1, a2, a3) as u64,
+        SYS_CLOSE => ctx.rax = sys_close(a1) as u64,
+        SYS_READ_DIR => ctx.rax = sys_read_dir(a1, a2, a3) as u64,
         _ => scheduler::terminate_current(Termination::BadSyscall { number: nr }),
     }
 }
@@ -276,6 +285,159 @@ fn sys_write(ptr: u64, len: u64) -> i64 {
     len as i64
 }
 
+/// Traduz um erro de arquivo no código que o programa recebe (`SYSCALLS.md`,
+/// seção "Sistema de arquivos"). Volume desconhecido e volume indisponível são
+/// o mesmo código para o programa: ele só precisa saber que não há volume.
+fn errno(error: FsError) -> i64 {
+    match error {
+        FsError::UnknownVolume | FsError::Unavailable(_) => ERR_NODEV,
+        FsError::NotFound => ERR_NOENT,
+        FsError::NotADirectory | FsError::IsADirectory => ERR_TYPE,
+        FsError::PathTooLong => ERR_NAMETOOLONG,
+        FsError::InvalidPath => ERR_INVAL,
+        FsError::BadDescriptor => ERR_BADF,
+        FsError::TooManyOpen => ERR_MFILE,
+        // `TooBig` só existe em `run`; se algum dia chegasse aqui, é falha de leitura.
+        FsError::Io | FsError::TooBig { .. } => ERR_IO,
+    }
+}
+
+/// O descritor que o programa passou, como índice. Um valor que nem cabe em
+/// `usize` (ou que o programa gerou de um `-1`) nunca é um descritor válido.
+fn descriptor(fd: u64) -> Result<usize, i64> {
+    usize::try_from(fd).map_err(|_| ERR_BADF)
+}
+
+/// `open(path_ptr, path_len)`: abre um arquivo ou diretório, somente para
+/// leitura, e devolve o descritor. O caminho é copiado para um array na pilha
+/// do kernel (sem heap) **antes** de ser interpretado: o programa não pode
+/// mudá-lo no meio da conversa.
+fn sys_open(ptr: u64, len: u64) -> i64 {
+    if len == 0 {
+        return ERR_INVAL;
+    }
+    if len > MAX_PATH_LEN as u64 {
+        return ERR_NAMETOOLONG;
+    }
+    if let Err(code) = validate_user_range(ptr, len, false) {
+        return code;
+    }
+    let mut path = [0u8; MAX_PATH_LEN];
+    let len = len as usize;
+    // SAFETY: `validate_user_range` conferiu que todas as páginas de
+    // `ptr..ptr + len` estão mapeadas e acessíveis ao usuário, dentro da região
+    // do usuário; o kernel roda no espaço de endereçamento do programa, uma
+    // CPU só e interrupções desligadas, então nada muda esses bytes durante a
+    // cópia. `len <= MAX_PATH_LEN` cabe em `path`.
+    path[..len].copy_from_slice(unsafe { core::slice::from_raw_parts(ptr as *const u8, len) });
+    match scheduler::with_current_files(|files| files.open(&path[..len])) {
+        Some(Ok(fd)) => fd as i64,
+        Some(Err(error)) => errno(error),
+        None => ERR_BADF,
+    }
+}
+
+/// `read(fd, ptr, len)`: lê até `len` bytes do arquivo aberto, na posição
+/// dele, e a avança. Devolve os bytes lidos; `0` só no fim do arquivo. O buffer
+/// do programa é validado (e precisa ser gravável) **antes** de qualquer leitura
+/// de disco. A leitura é feita em pedaços de um setor, com um buffer na pilha
+/// do kernel; se um pedaço falha depois de outros terem sido entregues, devolve
+/// o que já foi lido, e a próxima chamada recebe o erro.
+fn sys_read(fd: u64, ptr: u64, len: u64) -> i64 {
+    if len == 0 {
+        return 0;
+    }
+    if len > IO_MAX_LEN {
+        return ERR_INVAL;
+    }
+    let fd = match descriptor(fd) {
+        Ok(fd) => fd,
+        Err(code) => return code,
+    };
+    if let Err(code) = validate_user_range(ptr, len, true) {
+        return code;
+    }
+    let len = len as usize;
+    let result = scheduler::with_current_files(|files| -> Result<usize, FsError> {
+        let file = files.get_mut(fd)?;
+        let mut chunk = [0u8; 512];
+        let mut total = 0usize;
+        while total < len {
+            let want = (len - total).min(chunk.len());
+            let n = match file.read(&mut chunk[..want]) {
+                Ok(n) => n,
+                Err(error) if total == 0 => return Err(error),
+                Err(_) => break,
+            };
+            if n == 0 {
+                break;
+            }
+            // SAFETY: `ptr..ptr + len` foi validado acima (mapeado, do usuário
+            // e gravável) e `total + n <= len`; o kernel roda no espaço de
+            // endereçamento do programa, uma CPU só, interrupções desligadas.
+            unsafe {
+                core::ptr::copy_nonoverlapping(chunk.as_ptr(), (ptr as *mut u8).add(total), n);
+            }
+            total += n;
+        }
+        Ok(total)
+    });
+    match result {
+        Some(Ok(total)) => total as i64,
+        Some(Err(error)) => errno(error),
+        None => ERR_BADF,
+    }
+}
+
+/// `close(fd)`: fecha o descritor.
+fn sys_close(fd: u64) -> i64 {
+    let fd = match descriptor(fd) {
+        Ok(fd) => fd,
+        Err(code) => return code,
+    };
+    match scheduler::with_current_files(|files| files.close(fd)) {
+        Some(Ok(())) => 0,
+        Some(Err(error)) => errno(error),
+        None => ERR_BADF,
+    }
+}
+
+/// `read_dir(fd, ptr, len)`: escreve em `ptr` a próxima entrada do diretório
+/// aberto (um `DirEntryRaw`, `DIR_ENTRY_SIZE` bytes) e devolve `1`; `0` quando
+/// as entradas acabaram, sem escrever nada.
+fn sys_read_dir(fd: u64, ptr: u64, len: u64) -> i64 {
+    if len > IO_MAX_LEN || len < DIR_ENTRY_SIZE as u64 {
+        return ERR_INVAL;
+    }
+    let fd = match descriptor(fd) {
+        Ok(fd) => fd,
+        Err(code) => return code,
+    };
+    if let Err(code) = validate_user_range(ptr, DIR_ENTRY_SIZE as u64, true) {
+        return code;
+    }
+    let result = scheduler::with_current_files(|files| files.get_mut(fd)?.next_entry());
+    let entry = match result {
+        Some(Ok(Some(entry))) => entry,
+        Some(Ok(None)) => return 0,
+        Some(Err(error)) => return errno(error),
+        None => return ERR_BADF,
+    };
+    let mut raw = DirEntryRaw {
+        name: [0; 12],
+        kind: if entry.kind == Kind::Dir { KIND_DIR } else { KIND_FILE },
+        _pad: [0; 3],
+        size: entry.size,
+    };
+    raw.name[..entry.name_len as usize].copy_from_slice(&entry.name[..entry.name_len as usize]);
+    // SAFETY: `ptr..ptr + DIR_ENTRY_SIZE` foi validado acima (mapeado, do
+    // usuário e gravável); `DirEntryRaw` é `repr(C)` de `DIR_ENTRY_SIZE` bytes
+    // (conferido por uma asserção na crate `abi`); a escrita não exige
+    // alinhamento (`write_unaligned`).
+    unsafe { core::ptr::write_unaligned(ptr as *mut DirEntryRaw, raw) };
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +463,35 @@ mod tests {
         assert!(CONTRATO.contains(&format!("| {} | `SYS_READ_LINE` |", SYS_READ_LINE)));
         assert!(CONTRATO.contains(&format!("| {} | `SYS_ALLOC` |", SYS_ALLOC)));
         assert!(CONTRATO.contains(&format!("| {} | `SYS_YIELD` |", SYS_YIELD)));
+        assert!(CONTRATO.contains(&format!("| {} | `SYS_OPEN` |", SYS_OPEN)));
+        assert!(CONTRATO.contains(&format!("| {} | `SYS_READ` |", SYS_READ)));
+        assert!(CONTRATO.contains(&format!("| {} | `SYS_CLOSE` |", SYS_CLOSE)));
+        assert!(CONTRATO.contains(&format!("| {} | `SYS_READ_DIR` |", SYS_READ_DIR)));
+    }
+
+    #[test_case]
+    fn cada_erro_de_arquivo_vira_o_codigo_do_contrato() {
+        use crate::fs::Reason;
+        assert_eq!(errno(FsError::UnknownVolume), ERR_NODEV);
+        assert_eq!(errno(FsError::Unavailable(Reason::NoDisk)), ERR_NODEV);
+        assert_eq!(errno(FsError::Unavailable(Reason::IoError)), ERR_NODEV);
+        assert_eq!(errno(FsError::NotFound), ERR_NOENT);
+        assert_eq!(errno(FsError::NotADirectory), ERR_TYPE);
+        assert_eq!(errno(FsError::IsADirectory), ERR_TYPE);
+        assert_eq!(errno(FsError::PathTooLong), ERR_NAMETOOLONG);
+        assert_eq!(errno(FsError::InvalidPath), ERR_INVAL);
+        assert_eq!(errno(FsError::BadDescriptor), ERR_BADF);
+        assert_eq!(errno(FsError::TooManyOpen), ERR_MFILE);
+        assert_eq!(errno(FsError::Io), ERR_IO);
+        assert_eq!(errno(FsError::TooBig { size: 2, max: 1 }), ERR_IO);
+    }
+
+    #[test_case]
+    fn descritor_que_nao_cabe_em_usize_ou_e_enorme_e_invalido() {
+        assert_eq!(descriptor(0), Ok(0));
+        assert_eq!(descriptor(3), Ok(3));
+        // `-1` visto como `u64`: cabe em `usize` (64 bits) e a tabela o recusa.
+        assert!(descriptor(u64::MAX).map_or(true, |fd| fd >= abi::MAX_OPEN_FILES));
     }
 
     #[test_case]
@@ -308,6 +499,13 @@ mod tests {
         assert!(CONTRATO.contains(&format!("| `ERR_FAULT` | `{}` |", ERR_FAULT)));
         assert!(CONTRATO.contains(&format!("| `ERR_INVAL` | `{}` |", ERR_INVAL)));
         assert!(CONTRATO.contains(&format!("| `ERR_NOMEM` | `{}` |", ERR_NOMEM)));
+        assert!(CONTRATO.contains(&format!("| `ERR_NOENT` | `{}` |", ERR_NOENT)));
+        assert!(CONTRATO.contains(&format!("| `ERR_NODEV` | `{}` |", ERR_NODEV)));
+        assert!(CONTRATO.contains(&format!("| `ERR_TYPE` | `{}` |", ERR_TYPE)));
+        assert!(CONTRATO.contains(&format!("| `ERR_BADF` | `{}` |", ERR_BADF)));
+        assert!(CONTRATO.contains(&format!("| `ERR_MFILE` | `{}` |", ERR_MFILE)));
+        assert!(CONTRATO.contains(&format!("| `ERR_NAMETOOLONG` | `{}` |", ERR_NAMETOOLONG)));
+        assert!(CONTRATO.contains(&format!("| `ERR_IO` | `{}` |", ERR_IO)));
         assert!(CONTRATO.contains(&format!("`len > {}`", IO_MAX_LEN)));
     }
 
@@ -347,8 +545,28 @@ mod tests {
     }
 
     #[test_case]
-    fn contrato_declara_a_versao_3() {
-        assert!(CONTRATO.contains("**Versão do contrato**: 3"));
+    fn contrato_declara_a_versao_4() {
+        assert!(CONTRATO.contains("**Versão do contrato**: 4"));
+        assert!(CONTRATO.contains("os-rust 0.8.0 (Marco 8)"));
+    }
+
+    #[test_case]
+    fn contrato_declara_o_sistema_de_arquivos_somente_leitura() {
+        assert!(CONTRATO.contains("**somente leitura**"));
+        assert!(CONTRATO.contains("| `/ram` |"));
+        assert!(CONTRATO.contains("| `/disco` |"));
+    }
+
+    #[test_case]
+    fn contrato_cita_os_limites_do_sistema_de_arquivos() {
+        // Os limites vêm de `abi`, as mesmas constantes que o kernel e a
+        // biblioteca de runtime usam: o documento precisa dizê-los.
+        assert!(CONTRATO.contains(&format!("| Tamanho do caminho | **{} bytes** |", abi::MAX_PATH_LEN)));
+        assert!(CONTRATO.contains(&format!("| Arquivos abertos por programa | **{}** |", abi::MAX_OPEN_FILES)));
+        assert!(CONTRATO.contains(&format!("| Executável lido de arquivo | **{} bytes** |", abi::MAX_EXEC_SIZE)));
+        assert!(CONTRATO.contains(&format!("| Componentes por caminho | **{}** |", crate::fs::MAX_DEPTH)));
+        assert!(CONTRATO.contains(&format!("| Entradas percorridas por diretório | {} ", crate::fat::MAX_DIR_ENTRIES)));
+        assert!(CONTRATO.contains(&format!("`SYS_READ_DIR` escreve {} bytes", abi::DIR_ENTRY_SIZE)));
     }
 
     #[test_case]

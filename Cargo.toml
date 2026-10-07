@@ -1,6 +1,6 @@
 [package]
 name = "os-rust"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 
 [dependencies]
@@ -33,18 +33,45 @@ name = "double_fault"
 harness = false
 
 [package.metadata.bootimage]
-run-args = ["-serial", "stdio"]
-test-args = ["-serial", "stdio", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-display", "none"]
+# Discos de dados (o disco de boot, que o `bootimage` acrescenta, é o
+# primário-mestre, `index=0`). `index=1` é o primário-escravo: o `/disco` do
+# kernel (`target/imagens/disco.img`, gerada pelo `build.rs`). Só nos testes,
+# `index=2` é o secundário-mestre, com uma imagem de volume corrompido; o
+# secundário-escravo (`index=3`) fica **vazio** de propósito, para os testes
+# provarem que a ausência de disco não trava o kernel. `snapshot=on` manda as
+# escritas para um arquivo temporário do QEMU: a imagem nunca muda (o kernel
+# só lê; `readonly=on` o QEMU recusa em disco IDE). O caminho é relativo à raiz
+# do repositório, de onde `cargo run` e `cargo test` são sempre executados.
+run-args = ["-serial", "stdio", "-drive", "file=target/imagens/disco.img,format=raw,if=ide,index=1,snapshot=on"]
+test-args = [
+    "-serial", "stdio",
+    "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+    "-display", "none",
+    "-drive", "file=target/imagens/disco.img,format=raw,if=ide,index=1,snapshot=on",
+    "-drive", "file=target/imagens/corrompido.img,format=raw,if=ide,index=2,snapshot=on",
+]
 test-success-exit-code = 33
 test-timeout = 60
 
-# O pacote raiz continua sendo o kernel. `programs`, `runtime` e `abi` são
-# membros do workspace só para satisfazer o cargo (um pacote dentro da árvore
-# de outro precisa ser membro ou estar excluído), e `default-members` mantém
+# `fatimg` escreve imagens FAT16 em memória. Roda em dois lugares: no
+# `build.rs` (host, gera o ramdisk e o disco) e nos testes do kernel (target
+# `no_std`, fabrica imagens válidas e adultera cópias para provar que o leitor
+# recusa volumes corrompidos). Por isso é dependência de build **e** de teste.
+[build-dependencies]
+fatimg = { path = "fatimg" }
+
+[dev-dependencies]
+fatimg = { path = "fatimg" }
+
+# O pacote raiz continua sendo o kernel. `programs`, `runtime`, `abi` e
+# `fatimg` são membros do workspace só para satisfazer o cargo (um pacote
+# dentro da árvore de outro precisa ser membro ou estar excluído), e
+# `default-members` mantém
 # `cargo run` e `cargo test` restritos ao kernel: `programs` (e `runtime`, que
 # eles usam) só são compilados pelo `build.rs` do kernel, para o target de
-# usuário. Só `abi` entra no kernel como dependência: são as constantes do
-# contrato de syscalls, compartilhadas com a biblioteca de runtime.
+# usuário. Só `abi` entra no kernel como dependência (as constantes do
+# contrato de syscalls, compartilhadas com a biblioteca de runtime); `fatimg`
+# entra só como dependência de build e de teste.
 [workspace]
-members = ["programs", "runtime", "abi"]
+members = ["programs", "runtime", "abi", "fatimg"]
 default-members = ["."]

@@ -1,0 +1,9 @@
+Arquivo longo do disco do os-rust: ocupa mais de um cluster de 512 bytes.
+O leitor de FAT segue a cadeia da tabela de alocacao, cluster a cluster,
+para entregar o texto inteiro, sem um byte a mais nem a menos.
+Um volume FAT guarda, em ordem: o setor de boot, a tabela de alocacao,
+o diretorio raiz e a area de dados, onde ficam os arquivos.
+A tabela diz qual cluster vem depois de qual, ate o marcador de fim.
+Se a cadeia tiver um ciclo, o kernel detecta e devolve erro de leitura
+em vez de girar para sempre.
+Linha final do arquivo longo: fim.

@@ -14,3 +14,11 @@ edition = "2021"
 
 [dependencies]
 runtime = { path = "../runtime" }
+
+# `visita` é o programa que existe só no disco. Fica em `src/disco/`, e não em
+# `src/bin/`, de propósito: o `build.rs` do kernel monta a tabela de programas
+# embutidos varrendo apenas `src/bin/`, então este NÃO entra no kernel. O mesmo
+# `cargo build` o compila, e o `build.rs` grava o ELF em `/disco/bin/visita`.
+[[bin]]
+name = "visita"
+path = "src/disco/visita.rs"

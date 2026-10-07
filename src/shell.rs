@@ -1,11 +1,14 @@
-//! Buffer de linha e prompt de comandos mínimo (`help`, `clear`, `echo`, `sobre`, `panic`, `mem`, `falha`, `run`).
+//! Buffer de linha e prompt de comandos mínimo (`help`, `clear`, `echo`, `sobre`, `panic`, `mem`, `falha`, `ls`, `cat`, `run`).
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
 use abi::MAX_TASKS;
 
+use crate::fat::Kind;
+use crate::fs::{self, FsError, OpenFile, VolumeId};
 use crate::keyboard::LINE_CAPACITY;
 use crate::user::{self, Finished, RunError, Termination};
 use crate::{
@@ -36,9 +39,11 @@ const COMMANDS: &[(&str, &str)] = &[
         "falha",
         "provoca uma excecao de CPU para demonstracao (pagina, pilha, opcode, protecao, breakpoint)",
     ),
+    ("ls", "lista um diretorio (ex.: ls /ram, ls /disco)"),
+    ("cat", "mostra o conteudo de um arquivo (ex.: cat /ram/ola.txt)"),
     (
         "run",
-        "executa programas de usuario embutidos, juntos (ex.: run hello, run ping pong)",
+        "executa programas embutidos ou arquivos, juntos (ex.: run hello, run ping pong, run /disco/bin/visita)",
     ),
 ];
 
@@ -167,6 +172,8 @@ fn execute(line: &str) {
         "panic" => cmd_panic(),
         "mem" => cmd_mem(),
         "falha" => cmd_falha(rest),
+        "ls" => cmd_ls(rest),
+        "cat" => cmd_cat(rest),
         "run" => cmd_run(rest),
         _ => println!("comando desconhecido: {} (digite help)", name),
     }
@@ -340,6 +347,126 @@ fn say(args: core::fmt::Arguments) {
     serial_println!("{}", args);
 }
 
+/// Escreve `volumes: /ram (ok) /disco (indisponivel)`: o estado de cada volume.
+fn print_volumes() {
+    print!("volumes:");
+    for volume in VolumeId::ALL {
+        let state = if fs::volume_status(volume).is_ok() { "ok" } else { "indisponivel" };
+        print!(" /{} ({})", volume.name(), state);
+    }
+    println!();
+}
+
+/// Mostra o erro de um comando que usa caminhos (`ls`, `cat`, `run`), no
+/// formato de `<comando>: <o que houve>: <caminho>`. Cada erro tem uma
+/// mensagem própria: a pessoa precisa saber se errou o nome, se o volume não
+/// está lá ou se o disco está ruim.
+fn report_fs_error(command: &str, path: &str, error: FsError) {
+    match error {
+        FsError::UnknownVolume => {
+            say(format_args!("{}: volume desconhecido: {}", command, path));
+            print_volumes();
+        }
+        FsError::Unavailable(reason) => {
+            let volume = fs::parse(path.as_bytes()).map(|p| p.volume.name()).unwrap_or("?");
+            say(format_args!("{}: volume indisponivel: /{} ({})", command, volume, reason));
+        }
+        FsError::InvalidPath => say(format_args!("{}: caminho invalido: {}", command, path)),
+        FsError::PathTooLong => say(format_args!(
+            "{}: caminho longo demais (maximo {} bytes, {} niveis)",
+            command,
+            fs::MAX_PATH_LEN,
+            fs::MAX_DEPTH
+        )),
+        FsError::NotFound => say(format_args!("{}: nao encontrado: {}", command, path)),
+        FsError::NotADirectory => say(format_args!("{}: nao e um diretorio: {}", command, path)),
+        FsError::IsADirectory => say(format_args!("{}: e um diretorio: {}", command, path)),
+        FsError::TooBig { size, max } => say(format_args!(
+            "{}: {}: arquivo grande demais ({} bytes; maximo {})",
+            command, path, size, max
+        )),
+        FsError::Io => say(format_args!(
+            "{}: erro de leitura (disco ou volume corrompido): {}",
+            command, path
+        )),
+        FsError::BadDescriptor | FsError::TooManyOpen => {
+            say(format_args!("{}: erro interno de arquivo: {}", command, path))
+        }
+    }
+}
+
+/// O único argumento de `ls` e `cat`; sem ele (ou com mais de um) mostra o
+/// uso e o estado dos volumes.
+fn single_path<'a>(command: &str, rest: &'a str) -> Option<&'a str> {
+    let mut words = rest.split_whitespace();
+    match (words.next(), words.next()) {
+        (Some(path), None) => Some(path),
+        _ => {
+            say(format_args!("uso: {} <caminho>", command));
+            print_volumes();
+            None
+        }
+    }
+}
+
+/// `ls <caminho>`: lista as entradas de um diretório, uma por linha, com o
+/// tipo, o tamanho e o nome. Diretórios não têm tamanho (`-`).
+fn cmd_ls(rest: &str) {
+    let Some(path) = single_path("ls", rest) else { return };
+    let mut dir = match OpenFile::open(path.as_bytes()) {
+        Ok(dir) => dir,
+        Err(error) => return report_fs_error("ls", path, error),
+    };
+    if dir.kind() != Kind::Dir {
+        return report_fs_error("ls", path, FsError::NotADirectory);
+    }
+    loop {
+        match dir.next_entry() {
+            Ok(Some(entry)) => match entry.kind {
+                Kind::Dir => println!("{:<7} {:>8}  {}", "dir", "-", entry.name_str()),
+                Kind::File => println!("{:<7} {:>8}  {}", "arquivo", entry.size, entry.name_str()),
+            },
+            Ok(None) => return,
+            Err(error) => return report_fs_error("ls", path, error),
+        }
+    }
+}
+
+/// `cat <caminho>`: escreve o conteúdo de um arquivo na tela, como está (um
+/// byte fora do ASCII imprimível aparece como o quadrado `0xfe`, a mesma regra
+/// de `SYS_WRITE`). Lê em pedaços de 128 bytes: o arquivo nunca é carregado
+/// inteiro.
+fn cmd_cat(rest: &str) {
+    let Some(path) = single_path("cat", rest) else { return };
+    let mut file = match OpenFile::open(path.as_bytes()) {
+        Ok(file) => file,
+        Err(error) => return report_fs_error("cat", path, error),
+    };
+    if file.kind() == Kind::Dir {
+        return report_fs_error("cat", path, FsError::IsADirectory);
+    }
+    let mut chunk = [0u8; 128];
+    let mut last = b'\n';
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                vga_buffer::WRITER.lock().write_bytes(&chunk[..n]);
+                last = chunk[n - 1];
+            }
+            Err(error) => {
+                // O que já saiu fica na tela; a mensagem começa em linha nova.
+                println!();
+                return report_fs_error("cat", path, error);
+            }
+        }
+    }
+    // Um arquivo que não termina em quebra de linha não pode grudar no prompt.
+    if last != b'\n' {
+        println!();
+    }
+}
+
 /// Único ponto que mostra como um programa terminou (`SYSCALLS.md`,
 /// seção 7): o kernel (`user.rs`, `syscall.rs`, `interrupts.rs`) só
 /// devolve o motivo, e este comando o transforma em texto. Um término com
@@ -390,41 +517,80 @@ fn report(name: &str, termination: &Termination) {
 /// Chamado pelo escalonador no instante em que cada programa termina: mostra
 /// a mensagem na hora, antes de os outros programas acabarem.
 fn report_finished(finished: &Finished) {
-    report(finished.name, &finished.termination);
+    report(&finished.name, &finished.termination);
 }
 
-/// Executa programas de usuário embutidos (`run <nome> [<nome>...]`) ao mesmo
-/// tempo, cada um em modo usuário e na sua própria memória, e volta ao prompt
-/// quando o **último** terminar. Tudo ou nada: sem nome, com nome que não
-/// existe ou com mais programas que o máximo, lista o problema (e os programas
-/// disponíveis) e não inicia nenhum. O mesmo nome pode se repetir: são
+/// De onde vem a imagem de um programa de `run`: embutida no kernel ou lida
+/// de um arquivo (e então dona de um `Vec` no heap, que vive até o fim do `run`).
+enum Source {
+    Builtin(&'static [u8]),
+    File(Vec<u8>),
+}
+
+impl Source {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Source::Builtin(image) => image,
+            Source::File(data) => data,
+        }
+    }
+}
+
+/// O nome mostrado nas mensagens de um programa lido de `path`: o nome do
+/// arquivo em minúsculas (`/disco/bin/VISITA` vira `visita`).
+fn file_name_of(path: &str) -> String {
+    path.rsplit('/').find(|part| !part.is_empty()).unwrap_or(path).to_ascii_lowercase()
+}
+
+/// Executa programas de usuário (`run <alvo> [<alvo>...]`) ao mesmo tempo,
+/// cada um em modo usuário e na sua própria memória, e volta ao prompt quando
+/// o **último** terminar. Um alvo que começa com `/` é o caminho de um
+/// arquivo executável (lido inteiro do volume, até `MAX_EXEC_SIZE` bytes);
+/// qualquer outro é o nome de um programa embutido. Os dois tipos se misturam.
+///
+/// Tudo ou nada: sem alvo, com um alvo que não existe (ou não pôde ser lido) ou
+/// com mais programas que o máximo, o comando mostra o problema e não inicia
+/// nenhum. Um arquivo que não é um ELF64 válido chega ao carregador, que o
+/// recusa antes de mapear qualquer página. O mesmo alvo pode se repetir: são
 /// instâncias independentes.
 fn cmd_run(rest: &str) {
-    let names: Vec<&str> = rest.split_whitespace().collect();
-    if names.is_empty() {
+    let targets: Vec<&str> = rest.split_whitespace().collect();
+    if targets.is_empty() {
         println!("run: informe o programa.");
         print_available_programs();
         return;
     }
-    if names.len() > MAX_TASKS {
+    if targets.len() > MAX_TASKS {
         println!("run: no maximo {} programas ao mesmo tempo", MAX_TASKS);
         return;
     }
-    if let Some(unknown) = names
-        .iter()
-        .find(|name| !user::program_names().any(|known| known == **name))
-    {
-        println!("programa desconhecido: {}", unknown);
-        print_available_programs();
-        return;
+    // Resolve **todos** os alvos antes de iniciar qualquer um.
+    let mut sources: Vec<(String, Source)> = Vec::new();
+    for target in &targets {
+        if target.starts_with('/') {
+            match fs::read_whole(target.as_bytes(), fs::MAX_EXEC_SIZE) {
+                Ok(data) => sources.push((file_name_of(target), Source::File(data))),
+                Err(error) => return report_fs_error("run", target, error),
+            }
+        } else {
+            match user::builtin_image(target) {
+                Some(image) => sources.push((String::from(*target), Source::Builtin(image))),
+                None => {
+                    println!("programa desconhecido: {}", target);
+                    print_available_programs();
+                    return;
+                }
+            }
+        }
     }
-    match user::run_all(&names, Some(report_finished)) {
+    let images: Vec<(&str, &[u8])> = sources.iter().map(|(name, source)| (name.as_str(), source.bytes())).collect();
+    match user::run_images(&images, Some(report_finished)) {
         Ok(_) => {}
         Err(RunError::LoadFailed { index, error }) => {
-            say(format_args!("[run] erro ao carregar {}: {}", names[index], error));
+            say(format_args!("[run] erro ao carregar {}: {}", sources[index].0, error));
         }
         Err(RunError::Load(error)) => {
-            say(format_args!("[run] erro ao carregar {}: {}", names[0], error));
+            say(format_args!("[run] erro ao carregar {}: {}", sources[0].0, error));
         }
         Err(RunError::UnknownProgram) => {
             println!("programa desconhecido");
@@ -619,6 +785,113 @@ mod tests {
         vga_buffer::clear_screen();
         execute("sobre");
         assert!(vga_buffer::screen_contains(NAME));
+    }
+
+    // --- ls e cat (Marco 8) ---
+
+    /// O conteúdo de `discos/ram/ola.txt`, sem o `\n` final: a tela mostra a
+    /// linha, e `screen_contains` procura o texto dentro de uma linha.
+    const OLA: &str = include_str!("../discos/ram/ola.txt");
+
+    #[test_case]
+    fn ls_mostra_tipo_tamanho_e_nome_da_raiz_do_ramdisk() {
+        vga_buffer::clear_screen();
+        execute("ls /ram");
+        assert!(vga_buffer::screen_contains("ola.txt"));
+        assert!(vga_buffer::screen_contains("docs"));
+        assert!(vga_buffer::screen_contains("dir"));
+        assert!(vga_buffer::screen_contains("arquivo"));
+        // O tamanho de `ola.txt` aparece na mesma linha que o nome.
+        assert!(vga_buffer::screen_contains(&alloc::format!("{:>8}  ola.txt", OLA.len())));
+        assert!(vga_buffer::screen_contains(&alloc::format!("{:>8}  docs", "-")));
+    }
+
+    #[test_case]
+    fn ls_de_subdiretorio_mostra_as_entradas_dele() {
+        vga_buffer::clear_screen();
+        execute("ls /ram/docs");
+        assert!(vga_buffer::screen_contains("sobre.txt"));
+        assert!(!vga_buffer::screen_contains("ola.txt"));
+    }
+
+    #[test_case]
+    fn cat_mostra_o_conteudo_exato_do_arquivo() {
+        vga_buffer::clear_screen();
+        execute("cat /ram/ola.txt");
+        assert!(vga_buffer::screen_contains(OLA.trim_end()));
+        vga_buffer::clear_screen();
+        execute("cat /RAM/OLA.TXT");
+        assert!(vga_buffer::screen_contains(OLA.trim_end()));
+    }
+
+    #[test_case]
+    fn cat_de_arquivo_vazio_nao_mostra_nada_e_nao_da_erro() {
+        vga_buffer::clear_screen();
+        execute("cat /ram/vazio.txt");
+        assert!(!vga_buffer::screen_contains("cat:"));
+        assert!(!vga_buffer::screen_contains("erro"));
+    }
+
+    #[test_case]
+    fn ls_e_cat_sem_argumento_mostram_o_uso_e_os_volumes() {
+        vga_buffer::clear_screen();
+        execute("ls");
+        assert!(vga_buffer::screen_contains("uso: ls <caminho>"));
+        assert!(vga_buffer::screen_contains("volumes: /ram (ok)"));
+        vga_buffer::clear_screen();
+        execute("cat");
+        assert!(vga_buffer::screen_contains("uso: cat <caminho>"));
+        assert!(vga_buffer::screen_contains("volumes:"));
+    }
+
+    #[test_case]
+    fn ls_e_cat_mostram_cada_tipo_de_erro() {
+        vga_buffer::clear_screen();
+        execute("ls /ram/nada");
+        assert!(vga_buffer::screen_contains("ls: nao encontrado: /ram/nada"));
+        vga_buffer::clear_screen();
+        execute("ls /ram/ola.txt");
+        assert!(vga_buffer::screen_contains("ls: nao e um diretorio: /ram/ola.txt"));
+        vga_buffer::clear_screen();
+        execute("cat /ram/docs");
+        assert!(vga_buffer::screen_contains("cat: e um diretorio: /ram/docs"));
+        vga_buffer::clear_screen();
+        execute("cat /xyz/a");
+        assert!(vga_buffer::screen_contains("cat: volume desconhecido: /xyz/a"));
+        assert!(vga_buffer::screen_contains("volumes:"));
+        vga_buffer::clear_screen();
+        execute("ls ram");
+        assert!(vga_buffer::screen_contains("ls: caminho invalido: ram"));
+        vga_buffer::clear_screen();
+        execute("ls /ram/..");
+        assert!(vga_buffer::screen_contains("ls: caminho invalido: /ram/.."));
+        vga_buffer::clear_screen();
+        execute("cat /ram/ola.txt/x");
+        assert!(vga_buffer::screen_contains("cat: nao e um diretorio: /ram/ola.txt/x"));
+    }
+
+    #[test_case]
+    fn caminho_longo_demais_e_recusado() {
+        let mut line = alloc::string::String::from("ls /ram/");
+        for _ in 0..70 {
+            line.push('a');
+        }
+        vga_buffer::clear_screen();
+        execute(&line);
+        assert!(vga_buffer::screen_contains("ls: caminho longo demais (maximo 64 bytes, 8 niveis)"));
+    }
+
+    #[test_case]
+    fn help_lista_ls_e_cat_e_o_prompt_segue_respondendo() {
+        vga_buffer::clear_screen();
+        execute("help");
+        assert!(vga_buffer::screen_contains("ls - lista um diretorio"));
+        assert!(vga_buffer::screen_contains("cat - mostra o conteudo"));
+        // Depois de um erro, o próximo comando responde normalmente.
+        execute("cat /ram/nada");
+        vga_buffer::clear_screen();
+        execute("echo oi");
+        assert!(vga_buffer::screen_contains("oi"));
     }
 
     // NÃO testar execute("falha pagina"), execute("falha pilha"),

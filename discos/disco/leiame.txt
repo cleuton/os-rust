@@ -1,0 +1,1 @@
+Este e o disco ATA do os-rust, lido por PIO.

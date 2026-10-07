@@ -187,6 +187,16 @@ pub(crate) fn current_heap_pages() -> u64 {
         .map_or(0, |task| task.heap_pages)
 }
 
+/// Roda `f` com a tabela de arquivos abertos da tarefa atual. `None` se não há
+/// tarefa atual (só aconteceria fora de uma syscall). A trava do escalonador
+/// fica presa durante `f`; é seguro porque a syscall roda com as interrupções
+/// desligadas, e nada que interrompa ring 0 usa o escalonador.
+pub(crate) fn with_current_files<R>(f: impl FnOnce(&mut crate::fs::FileTable) -> R) -> Option<R> {
+    let mut sched = SCHED.lock();
+    let index = sched.current?;
+    sched.tasks[index].as_mut().map(|task| f(&mut task.files))
+}
+
 /// Grava quantas páginas de heap a tarefa atual tem.
 pub(crate) fn set_current_heap_pages(pages: u64) {
     let mut sched = SCHED.lock();

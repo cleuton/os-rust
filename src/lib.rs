@@ -9,6 +9,10 @@
 extern crate alloc;
 
 pub mod allocator;
+pub mod ata;
+pub mod blockdev;
+pub mod fat;
+pub mod fs;
 pub mod vga_buffer;
 pub mod serial;
 pub mod gdt;
@@ -80,6 +84,7 @@ pub fn init(boot_info: &'static bootloader::BootInfo) {
         info.heap_start,
         info.heap_size / 1024
     );
+    fs::init();
     syscall::init();
     serial_println!("[boot] syscall ativo");
 }

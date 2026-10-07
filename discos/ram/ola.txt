@@ -1,0 +1,1 @@
+Ola do ramdisk! Este arquivo foi embutido na imagem de boot do os-rust.

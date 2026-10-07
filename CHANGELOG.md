@@ -5,6 +5,75 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.8.0] - 2026-10-07
+
+Marco 8: sistema de arquivos. O os-rust passa a **ler arquivos**, sempre
+somente para leitura, de dois volumes FAT16: `/ram`, um ramdisk embutido na
+imagem de boot, e `/disco`, um disco ATA lido por PIO. O mesmo leitor de FAT
+lê os dois. `ls /ram` e `cat /ram/ola.txt` mostram o ramdisk; `run
+/disco/bin/visita` executa um programa que existe **só no disco**; `run leitor`
+e `run listador` leem o disco por syscalls. Sem o disco, o kernel dá boot
+normalmente e `ls /disco` diz que o volume está indisponível.
+
+### Adicionado
+
+- Dispositivo de blocos (`src/blockdev.rs`): ler um setor de 512 bytes por
+  endereço de bloco; implementado pelo ramdisk e pelo disco ATA.
+- Leitor de FAT16 somente leitura (`src/fat.rs`): setor de boot validado campo
+  a campo, tabela de alocação, diretório raiz, subdiretórios, cadeias de
+  clusters e nomes 8.3 sem diferenciar maiúsculas de minúsculas. Trata o
+  volume como dado não confiável: números de cluster validados, travessias com
+  limite de passos, tamanho conferido contra a cadeia; cadeia com ciclo, fora
+  do volume ou mais curta que o arquivo é erro de leitura, nunca laço
+  infinito nem pânico.
+- Driver ATA por PIO (`src/ata.rs`): `IDENTIFY`, leitura LBA28, polling com
+  limite de 100 000 leituras de status, detecção de disco ausente, sem DMA e sem
+  IRQ de disco (o PIC não muda). A leitura de um setor é atômica em relação ao
+  escalonador.
+- Volumes e arquivos abertos (`src/fs.rs`): `/ram` e `/disco`, caminhos 8.3 de
+  até 64 bytes e 8 níveis (`.` e `..` recusados), volume indisponível com
+  motivo (o kernel nunca entra em pânico por causa de um volume) e uma tabela
+  de até 4 arquivos abertos por programa, fechada quando o programa termina.
+- Comandos `ls <caminho>` e `cat <caminho>`; `run` aceita o caminho de um
+  executável (argumento que começa com `/`, até 64 KiB), misturado com nomes de
+  programas embutidos.
+- Syscalls `SYS_OPEN` (6), `SYS_READ` (7), `SYS_CLOSE` (8) e `SYS_READ_DIR`
+  (9) e os erros `ERR_NOENT` a `ERR_IO` (`-4` a `-10`): contrato de syscalls
+  versão 4 (`SYSCALLS.md`), com a seção "Sistema de arquivos" (volumes,
+  caminhos, limites, `DirEntryRaw`). Programas das versões 1 a 3 continuam
+  funcionando.
+- Biblioteca de runtime: `File`, `Dir`, `DirEntry` e `FsError`
+  (`runtime/src/fs.rs`); os descritores são fechados sozinhos.
+- Crate `fatimg`: o gerador de imagens FAT16, `no_std` e sem dependências. O
+  `build.rs` gera o ramdisk e o disco (`target/imagens/`) a cada
+  `cargo run`/`cargo test`, e os testes a usam para fabricar e adulterar
+  imagens. O disco é anexado ao QEMU pelos argumentos do `bootimage`, sem
+  nenhum passo manual nem ferramenta nova.
+- Programas de exemplo `leitor` e `listador` (embutidos) e `visita` (só no
+  disco, `programs/src/disco/`). O conteúdo dos volumes está em `discos/`.
+- Seção "Arquivos" no `GUIA_DO_PROGRAMADOR.md`, com o código completo de
+  `leitor` e `listador`, e um capítulo no `WALKTHROUGH.md`.
+- Testes: `tests/disco_ata.rs`, `tests/sistema_de_arquivos.rs`, os testes do
+  leitor em `src/fat.rs` (sobre imagens fabricadas e adulteradas) e do guia em
+  `tests/user_runtime.rs`. Também `fs::replace_volume`, `fs::open_files_in_use`
+  e `fs::mount_state`, que existem só para os testes.
+- Crate `abi`: `SYS_OPEN`, `SYS_READ`, `SYS_CLOSE`, `SYS_READ_DIR`, os sete erros
+  novos, `MAX_PATH_LEN`, `MAX_OPEN_FILES`, `MAX_EXEC_SIZE` e `DirEntryRaw`.
+
+### Alterado
+
+- O heap do kernel passa de 100 KiB para 16 MiB: `run` lê o executável inteiro
+  para o heap (até 4 de 64 KiB) e os testes do leitor fabricam volumes de ~2 MiB.
+- O nome de uma tarefa deixa de ser um `&'static str` e passa a ser um
+  `ProgramName` (até 16 bytes, dentro da própria tarefa), porque o nome de um
+  programa lido de um arquivo nasce de um caminho digitado.
+- `help` lista `ls` e `cat`, e a descrição de `run` cita caminhos. A primeira
+  linha de diagnóstico de cada volume (`[fs] /ram: ...`, `[fs] /disco: ...`)
+  aparece na serial durante o boot.
+- `[package.metadata.bootimage]` em `Cargo.toml` anexa o disco ao QEMU em
+  `cargo run` e `cargo test` (e, nos testes, mais duas posições: uma imagem de
+  volume corrompido e um canal sem disco).
+
 ## [0.7.0] - 2026-10-06
 
 Marco 7: multitarefa. O os-rust passa a rodar **vários programas de usuário

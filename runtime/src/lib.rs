@@ -9,6 +9,8 @@
 //! - [`read_line`]: espera uma linha digitada e a devolve como texto;
 //! - um alocador global, que permite usar `Box`, `Vec` e `String` (com
 //!   `extern crate alloc;` no programa);
+//! - [`File`], [`Dir`] e [`FsError`]: abrir e ler arquivos e listar diretórios
+//!   (somente leitura; volumes `/ram` e `/disco`);
 //! - [`exit`]: encerra o programa mais cedo;
 //! - [`yield_now`]: cede a CPU a outro programa (multitarefa);
 //! - um tratador de `panic!` que escreve `[panic] <mensagem>` e sai com o
@@ -20,10 +22,12 @@
 
 #![no_std]
 
+pub mod fs;
 pub mod heap;
 pub mod io;
 pub mod sys;
 
+pub use fs::{Dir, DirEntry, File, FsError};
 pub use io::read_line;
 pub use sys::{exit, yield_now};
 

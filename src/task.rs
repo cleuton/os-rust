@@ -4,9 +4,72 @@
 //! tarefa (`Task`). Quem decide qual tarefa roda é o `scheduler`; este módulo
 //! só define as estruturas.
 
+use core::fmt;
+use core::ops::Deref;
+
+use crate::fs::FileTable;
 use crate::gdt::{USER_CODE_SELECTOR_BITS, USER_DATA_SELECTOR_BITS};
 use crate::keyboard::LINE_CAPACITY;
 use crate::memory::AddressSpace;
+
+/// Tamanho máximo do nome de um programa, em bytes. O maior nome embutido
+/// (`falha_memoria`) tem 13; nomes de arquivo 8.3 têm no máximo 12.
+pub const PROGRAM_NAME_MAX: usize = 16;
+
+/// O nome de um programa nas mensagens do kernel. Um nome embutido vive para
+/// sempre, mas o de um programa lido de um arquivo (`run /disco/bin/visita`)
+/// nasce de um caminho digitado: guardá-lo num `&'static str` exigiria vazar
+/// memória a cada `run`. Por isso o nome é copiado para um array de tamanho
+/// fixo, que é `Copy` e não usa o heap (o registro de término também é escrito
+/// dentro de handlers, onde o heap nunca é usado).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ProgramName {
+    bytes: [u8; PROGRAM_NAME_MAX],
+    len: u8,
+}
+
+impl ProgramName {
+    /// Copia `name`; um nome com mais de `PROGRAM_NAME_MAX` bytes é cortado
+    /// (nomes de programa são ASCII, então o corte nunca parte um caractere).
+    pub fn new(name: &str) -> ProgramName {
+        let mut bytes = [0u8; PROGRAM_NAME_MAX];
+        let len = name.len().min(PROGRAM_NAME_MAX);
+        bytes[..len].copy_from_slice(&name.as_bytes()[..len]);
+        ProgramName { bytes, len: len as u8 }
+    }
+}
+
+impl Deref for ProgramName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len as usize]).unwrap_or("?")
+    }
+}
+
+impl fmt::Display for ProgramName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self)
+    }
+}
+
+impl fmt::Debug for ProgramName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", &**self)
+    }
+}
+
+impl PartialEq<&str> for ProgramName {
+    fn eq(&self, other: &&str) -> bool {
+        &**self == *other
+    }
+}
+
+impl PartialEq<str> for ProgramName {
+    fn eq(&self, other: &str) -> bool {
+        &**self == other
+    }
+}
 
 /// O estado de uma tarefa em ring 3: tudo que é preciso para retomá-la
 /// exatamente de onde parou. São 20 palavras de 64 bits, na ordem de endereços
@@ -94,7 +157,7 @@ pub struct PendingRead {
 /// Uma instância carregada de um programa de usuário.
 pub struct Task {
     /// Nome do programa embutido, para as mensagens.
-    pub name: &'static str,
+    pub name: ProgramName,
     pub state: TaskState,
     /// O estado em ring 3 enquanto a tarefa não está rodando.
     pub context: TaskContext,
@@ -104,6 +167,8 @@ pub struct Task {
     pub heap_pages: u64,
     /// O pedido de teclado em andamento, se está em `WaitingKeyboard`.
     pub read: Option<PendingRead>,
+    /// Os arquivos abertos desta tarefa; fechados quando ela é destruída.
+    pub files: FileTable,
     /// Quantas vezes foi colocada na CPU (os testes usam para provar que cada
     /// tarefa rodou em mais de uma fatia).
     pub slices: u32,
@@ -111,7 +176,7 @@ pub struct Task {
 
 impl Task {
     /// Uma tarefa pronta para rodar a partir de `context`.
-    pub fn new(name: &'static str, context: TaskContext, space: AddressSpace) -> Task {
+    pub fn new(name: ProgramName, context: TaskContext, space: AddressSpace) -> Task {
         Task {
             name,
             state: TaskState::Ready,
@@ -119,6 +184,7 @@ impl Task {
             space,
             heap_pages: 0,
             read: None,
+            files: FileTable::new(),
             slices: 0,
         }
     }
@@ -128,6 +194,23 @@ impl Task {
 mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
+
+    #[test_case]
+    fn nome_de_programa_guarda_o_texto_sem_cortar_nomes_embutidos() {
+        let name = ProgramName::new("falha_memoria");
+        assert_eq!(&*name, "falha_memoria");
+        assert!(name == "falha_memoria");
+        assert_eq!(alloc::format!("{}", name), "falha_memoria");
+        assert_eq!(alloc::format!("{:?}", ProgramName::new("hello")), "\"hello\"");
+    }
+
+    #[test_case]
+    fn nome_de_programa_muito_longo_e_cortado() {
+        let name = ProgramName::new("abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(&*name, "abcdefghijklmnop");
+        assert_eq!(name.len(), PROGRAM_NAME_MAX);
+        assert_eq!(ProgramName::new("").len(), 0);
+    }
 
     #[test_case]
     fn o_layout_do_contexto_e_o_que_o_assembly_assume() {

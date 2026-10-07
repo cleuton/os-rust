@@ -72,7 +72,7 @@ use crate::memory::{self, AddressSpace};
 use crate::programs::PROGRAMS;
 use crate::scheduler;
 use crate::syscall::SAVED_KERNEL_RSP;
-use crate::task::{Task, TaskContext};
+use crate::task::{ProgramName, Task, TaskContext};
 
 /// Por que o programa deixou de rodar. Guardado pelo escalonador quando a
 /// tarefa termina e entregue ao shell, que o transforma em mensagem. Não
@@ -100,7 +100,7 @@ pub enum Termination {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Finished {
     /// Nome do programa, como foi dado a `run`.
-    pub name: &'static str,
+    pub name: ProgramName,
     /// Por que terminou.
     pub termination: Termination,
     /// Quantas vezes foi colocado na CPU antes de terminar.
@@ -339,7 +339,7 @@ core::arch::global_asm!(
 /// falharam. Não escreve nada na tela nem na serial: quem mostra o resultado
 /// é o shell.
 pub fn run_images(
-    images: &[(&'static str, &[u8])],
+    images: &[(&str, &[u8])],
     on_end: Option<fn(&Finished)>,
 ) -> Result<RunReport, RunError> {
     if images.len() > MAX_TASKS {
@@ -351,7 +351,7 @@ pub fn run_images(
         match loaded {
             Ok((entry, space)) => {
                 let context = TaskContext::initial(entry, USER_INITIAL_RSP);
-                tasks.push(Task::new(name, context, space));
+                tasks.push(Task::new(ProgramName::new(name), context, space));
             }
             Err(error) => {
                 // Nada começou a rodar: devolve o que já foi carregado.
@@ -377,7 +377,7 @@ pub fn run_all(
     names: &[&str],
     on_end: Option<fn(&Finished)>,
 ) -> Result<RunReport, RunError> {
-    let mut images: Vec<(&'static str, &'static [u8])> = Vec::new();
+    let mut images: Vec<(&str, &[u8])> = Vec::new();
     for name in names {
         let program = PROGRAMS
             .iter()
@@ -389,7 +389,7 @@ pub fn run_all(
 }
 
 /// Executa uma imagem só e devolve o motivo do término.
-fn run_one(name: &'static str, image: &[u8]) -> Result<Termination, RunError> {
+fn run_one(name: &str, image: &[u8]) -> Result<Termination, RunError> {
     let mut report = match run_images(&[(name, image)], None) {
         Ok(report) => report,
         Err(RunError::LoadFailed { error, .. }) => return Err(RunError::Load(error)),
@@ -421,6 +421,11 @@ pub fn run(name: &str) -> Result<Termination, RunError> {
         .find(|program| program.name == name)
         .ok_or(RunError::UnknownProgram)?;
     run_one(program.name, program.image)
+}
+
+/// A imagem ELF do programa embutido `name`, se existir.
+pub fn builtin_image(name: &str) -> Option<&'static [u8]> {
+    PROGRAMS.iter().find(|program| program.name == name).map(|program| program.image)
 }
 
 /// Nomes dos programas embutidos, em ordem alfabética.

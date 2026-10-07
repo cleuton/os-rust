@@ -1318,3 +1318,224 @@ alternam voltam exatamente como estavam.
 Prioridades, `sleep`, criar programas a partir de outros programas,
 comunicação entre programas e sincronização (mutex, semáforo) continuam
 fora do escopo. O kernel segue com um único processador e sem APIC.
+
+## Marco 8: sistema de arquivos
+
+Até o Marco 7, todo programa viajava dentro do kernel, e a única forma de o
+kernel obter dados de fora era a tabela de programas montada pelo `build.rs`. O
+Marco 8 dá ao os-rust a noção de **arquivo**: o kernel passa a ler arquivos,
+sempre somente para leitura, de dois lugares, o `/ram` (um ramdisk embutido na
+imagem de boot) e o `/disco` (um disco ATA), e a executar um programa lido de
+um deles. As duas fontes guardam o mesmo formato, FAT16, e o mesmo código lê as
+duas. Uma pergunta orienta o capítulo inteiro: *e se os bytes que o kernel lê
+estiverem errados?* Um arquivo de um disco é um dado de fora, e dado de fora
+não é confiável.
+
+### Um dispositivo de blocos: a menor ideia de "disco"
+
+Para o leitor de FAT, um disco é uma sequência de **setores** de 512 bytes
+numerados a partir de zero (o número é o endereço de bloco lógico, LBA), e a
+única operação é "me dê o setor `n`". É o trait `BlockDevice` (`src/blockdev.rs`),
+com duas funções: quantos setores o dispositivo tem e ler um. Duas coisas o
+implementam:
+
+- `RamDisk`: uma fatia de bytes que já está na memória (`include_bytes!` da
+  imagem do ramdisk). Ler o setor `n` é copiar 512 bytes dali.
+- `AtaDisk` (`src/ata.rs`): um disco de verdade, que vive atrás de portas de
+  E/S (próxima seção).
+
+O leitor de FAT (`src/fat.rs`) só conhece o trait. Por isso `ls /ram` e `ls
+/disco` passam pelo **mesmo** código, e os testes do leitor rodam sobre imagens
+fabricadas em memória sem nenhum hardware. Não há cache, leitura de vários
+setores, nem escrita: o marco é somente leitura e o que se lê é pouco.
+
+### O layout de um volume FAT16
+
+Um volume FAT é feito de quatro regiões, em ordem:
+
+```text
+setor 0         setor de boot (descreve o volume; termina em 0x55 0xAA)
+setores 1..35   tabela de alocação (FAT), duas cópias de 17 setores
+setores 35..67  diretório raiz (512 entradas de 32 bytes)
+setor 67 em     área de dados, dividida em clusters (aqui, 1 setor cada)
+```
+
+- O **setor de boot** diz o tamanho do setor e do cluster, onde começa cada
+  região e quantos setores o volume tem. O leitor valida cada campo antes de
+  confiar em qualquer um (assinatura, setores por cluster potência de 2, total
+  de setores que cabe no dispositivo, a contagem de clusters entre 4085 e
+  65524, que é o que faz de um volume FAT16 de verdade...). Cada recusa tem um
+  motivo próprio, que aparece na mensagem (`volume FAT invalido: assinatura`).
+- A **FAT** é um vetor de números de 16 bits, um por cluster. A entrada do
+  cluster `c` diz qual cluster vem **depois** de `c` no mesmo arquivo; um valor
+  especial (`0xFFF8` a `0xFFFF`) marca o fim da cadeia. Um arquivo é uma lista
+  encadeada de clusters, e a FAT é a lista.
+- O **diretório raiz** é uma região fixa de entradas de 32 bytes: nome no
+  formato 8.3 (8 caracteres, 3 de extensão, em maiúsculas, preenchidos com
+  espaços), atributos, primeiro cluster e tamanho. Um subdiretório é um arquivo
+  comum cujo conteúdo são entradas, e vive na área de dados.
+- Os clusters numeram a partir do **2** (os números 0 e 1 da FAT são
+  reservados), então o cluster `c` começa no setor `data_start + (c - 2)`.
+
+Por que FAT16, com 1 setor por cluster e cerca de 2 MiB: FAT12 empacota 12 bits
+(uma entrada cruza dois bytes), FAT32 exige volumes de dezenas de MiB, e FAT16
+com menos de 4085 clusters seria lido como FAT12 por qualquer ferramenta. Um
+cluster do tamanho de um setor deixa o conceito visível: um arquivo de 536
+bytes já ocupa dois clusters e precisa seguir a cadeia.
+
+### Como `read` percorre uma cadeia, e por que não confia nela
+
+Ler um arquivo é: a partir do primeiro cluster, copiar os bytes de cada cluster
+e seguir a FAT até o tamanho do arquivo acabar. O leitor guarda no cursor (a
+posição de leitura) em qual cluster a posição cai, para que a leitura seguinte
+continue dali em vez de recomeçar a cadeia. Mas a cadeia vem do disco, e o disco
+pode estar errado. Três defesas, todas do mesmo tipo (nunca confiar num número
+que veio de fora):
+
+1. **Todo número de cluster é validado antes de virar setor.** Só existem os
+   clusters `2` a `cluster_count + 1`. Uma entrada da FAT que aponta para
+   fora disso, para um cluster livre (`0`), reservado ou marcado como setor
+   ruim, no meio de uma cadeia, é `Corrupt`.
+2. **Toda travessia tem um limite de passos.** Uma cadeia com um ciclo
+   (`c → d → c`) nunca termina por si; mas um arquivo cujo tamanho exige mais
+   clusters do que o volume tem é recusado, e um diretório percorre no máximo
+   512 entradas. Um ciclo vira um erro em um número pequeno de passos, nunca um
+   laço infinito.
+3. **O tamanho é conferido contra a cadeia.** Um arquivo que declara 5000 bytes
+   e tem uma cadeia de dois clusters entrega os 1024 bytes que existem e, na
+   chamada seguinte, o erro. Um tamanho maior que zero sem nenhum cluster
+   também é erro.
+
+Todas as contas com valores do disco usam `checked_*`, e nenhum índice de
+slice depende de um valor não conferido. O resultado é `FatError`, nunca um
+pânico. Os testes do leitor fabricam cada uma dessas imagens ruins com a crate
+`fatimg` e mudam alguns bytes de propósito.
+
+Nomes: `.` e `..` das entradas de subdiretório, entradas apagadas (`0xE5`),
+rótulo de volume e entradas de **nome longo** (atributo `0x0F`, um truque do
+FAT para guardar nomes maiores que 8.3 em várias entradas) são ignorados. Nomes
+longos estão fora do escopo.
+
+### O ATA por PIO
+
+O disco IDE tem alguns registradores em portas de E/S. No canal primário, de
+`0x1F0` a `0x1F7`: dados, contagem de setores, o LBA em três bytes, o registrador
+que escolhe o disco (mestre ou escravo), e o de comando/status. Mais um
+registrador de controle em `0x3F6`. Ler um setor é uma conversa curta:
+
+1. escolher o disco e os 4 bits altos do LBA, e esperar 400 ns (quatro leituras
+   do status alternativo);
+2. esperar o disco largar o bit `BSY` (ocupado);
+3. escrever a contagem (1) e o LBA, e mandar o comando `READ SECTORS` (`0x20`);
+4. esperar `BSY` limpar e `DRQ` (dados prontos) ligar;
+5. ler 256 palavras de 16 bits da porta de dados.
+
+"PIO" quer dizer que o **processador** copia os bytes, uma palavra por vez; no
+DMA o controlador copiaria sozinho para a memória (e o kernel teria de ter
+memória física contígua para isso). Para saber se há um disco ATA e qual o
+tamanho dele, o driver manda `IDENTIFY` (`0xEC`): status `0x00` ou `0xFF` depois
+de escolher o disco é ausência; assinatura diferente nos registradores LBA é
+outro tipo de dispositivo (ATAPI, SATA); e as palavras 60 e 61 da resposta são o
+total de setores.
+
+Duas decisões mantêm o driver pequeno e seguro:
+
+- **Sem interrupção.** O bit `nIEN` do registrador de controle desliga a IRQ do
+  disco, e o PIC não muda: continua só com o timer (IRQ0) e o teclado (IRQ1).
+  Em vez de dormir até o disco avisar, o kernel faz **polling**: lê o registrador
+  de status em laço até o disco responder. Não há mecanismo de bloquear uma
+  tarefa à espera de disco, e para este marco o kernel simplesmente espera.
+- **Toda espera tem limite.** Um laço de polling sem limite travaria o kernel
+  para sempre se o disco não respondesse. A função `wait` lê o status no máximo
+  100 000 vezes e depois desiste com `Timeout`. Não usa relógio: o limite é uma
+  contagem de leituras, o que permite testá-lo sem disco (uma closure que sempre
+  devolve "ocupado" estoura depois de exatamente `max` leituras).
+
+### Por que a leitura de disco é atômica em relação ao escalonador
+
+Ler um setor é uma sequência de acessos a portas que não pode ser intercalada
+com outra: se outro código mexesse no controlador no meio, os registradores
+ficariam inconsistentes. A regra do Marco 7 já garante isso: o kernel **nunca é
+trocado**, o timer só troca de programa quando interrompe ring 3, e uma
+interrupção que chega em ring 0 só envia o EOI e volta (as syscalls rodam com
+`IF` desligado). Como o disco é lido dentro do kernel, nenhuma troca de tarefa
+pode cair no meio da conversa com o disco. O driver deixa a regra explícita no
+código: a sequência inteira roda dentro de `without_interrupts` e sob uma trava
+do controlador, para que continue valendo mesmo que a política do escalonador
+mude um dia.
+
+### Como as imagens são geradas e chegam ao QEMU
+
+Ninguém monta um volume à mão. O `build.rs`, dentro do mesmo `cargo run` ou
+`cargo test`, usa a crate interna `fatimg` (um construtor de volumes FAT16 em
+~200 linhas, `no_std` e sem dependências) para gerar:
+
+- `ramdisk.img` a partir de `discos/ram/`, que o kernel embute com
+  `include_bytes!`;
+- `target/imagens/disco.img` a partir de `discos/disco/`, mais o ELF de
+  `visita` (o programa que só existe no disco) e um arquivo de 65 537 bytes que
+  existe só para provar a recusa de um executável grande demais;
+- `target/imagens/corrompido.img`, o disco com o setor de boot zerado, para os
+  testes.
+
+Todas são montadas em memória antes de qualquer arquivo ser escrito, e um erro
+termina o script: nunca sai uma imagem ausente, parcial ou desatualizada. A
+mesma crate fabrica e adultera imagens dentro dos testes do kernel. O disco
+chega ao QEMU pelos argumentos do `bootimage` no `Cargo.toml`: o disco de boot
+é o primário-mestre, `disco.img` é o primário-escravo (`index=1`), e nos testes
+`corrompido.img` é o secundário-mestre (`index=2`), enquanto o secundário-escravo
+fica vazio de propósito, para provar que a ausência de disco não trava. A opção
+`snapshot=on` manda as escritas para um arquivo temporário do QEMU, então a
+imagem nunca muda (`readonly=on` é recusado pelo QEMU em discos IDE).
+
+### Volumes, caminhos e a tabela de arquivos de cada programa
+
+`src/fs.rs` conhece os dois volumes pelo prefixo (`/ram`, `/disco`) e o estado
+de cada um: montado, ou **indisponível** com um motivo (sem disco, dispositivo
+que não é ATA, setor de boot inválido, erro de leitura). O boot nunca entra em
+pânico por causa de um volume: escreve na serial uma linha por volume e segue.
+Um caminho é validado sem usar o heap (volume, até 8 componentes, nomes 8.3, no
+máximo 64 bytes) e `.` e `..` são **recusados**, então nenhum caminho consegue
+sair do volume.
+
+Cada programa tem a **sua** `FileTable`: quatro posições fixas dentro da
+`Task`, sem heap. O descritor que o programa vê (`0` a `3`) é o índice da
+posição, sempre o menor livre, e cada posição guarda onde o arquivo mora e a
+posição de leitura. Como a tabela é um campo da tarefa, um programa nunca
+enxerga os descritores nem as posições de leitura de outro: dois programas que
+abrem o mesmo arquivo leem cada um do seu ponto. Quando a tarefa termina (por
+`exit` ou por erro), o `Task` é destruído e o `Drop` da tabela fecha o que
+sobrou; um contador global é o que os testes leem para provar que nada ficou
+aberto.
+
+As quatro syscalls (`SYS_OPEN`, `SYS_READ`, `SYS_CLOSE`, `SYS_READ_DIR`) seguem
+a regra de sempre: o kernel não confia em nada que vem do programa. O caminho é
+copiado para um array na pilha do kernel depois de validado; o buffer de leitura
+é conferido (na região do usuário, mapeado, **gravável**) antes de tocar no
+disco; um erro devolve um código do contrato (`ERR_NOENT`, `ERR_BADF`...) e o
+programa **continua rodando**. Um diretório é aberto como um arquivo e lido uma
+entrada por vez (`SYS_READ_DIR`), com o cursor guardado no descritor.
+
+### Como `run` carrega um executável de um arquivo
+
+`run /disco/bin/visita` resolve o alvo antes de iniciar qualquer coisa: lê o
+arquivo **inteiro** para o heap do kernel (recusando, antes de ler, um arquivo
+maior que 64 KiB) e entrega os bytes ao mesmo `run_images` dos programas
+embutidos. Dali em diante é o caminho do Marco 5: `elf::parse` valida o ELF
+**antes** de qualquer página ser mapeada, então um arquivo de texto no lugar de
+um programa é recusado sem tocar na memória. O heap do kernel subiu para 16
+MiB: até 4 executáveis de 64 KiB lidos ao mesmo tempo, e os testes do leitor
+fabricam volumes de 2 MiB em memória.
+
+Um detalhe: o nome de um programa embutido é um texto que vive para sempre, mas
+o nome de um programa lido de um caminho nasce de algo digitado. Guardá-lo como
+`&'static str` exigiria vazar memória a cada `run`; por isso o nome da tarefa é
+um `ProgramName`, uma cópia de até 16 bytes que mora dentro da própria `Task`.
+
+### O que ficou de fora
+
+Escrita, criação e remoção de arquivos, nomes longos de FAT, atributos,
+permissões e datas, partições, mais de um disco, cache de blocos, DMA e
+interrupção de disco, e leitura em streaming de um executável continuam fora do
+escopo. O driver ATA existe para servir o sistema de arquivos e não antecipa o
+modelo geral de drivers do Marco 9.

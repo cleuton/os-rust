@@ -49,7 +49,7 @@ sistema de arquivos ou multitarefa completa.
 
 ## Status
 
-**Versão atual: 0.7.0.** Os Marcos 0 (boot em modo texto VGA, com
+**Versão atual: 0.8.0.** Os Marcos 0 (boot em modo texto VGA, com
 mensagem de boas-vindas, rolagem e tratamento de panic legível), 1
 (interrupções, teclado e prompt de comandos), 2 (infraestrutura de
 depuração: saída serial e testes automatizados dentro do QEMU), 3
@@ -63,8 +63,11 @@ programação: leitura de teclado e memória para os programas, biblioteca de
 runtime, e o isolamento de falhas demonstrado com `run eco` e `run
 falha_memoria`) e 7 (multitarefa: vários programas ao mesmo tempo, cada um na
 sua memória, com troca de contexto cooperativa e preemptiva, demonstrada com
-`run ping pong` e `run contador_a contador_b`) estão concluídos e são o que
-este repositório executa hoje. Os Marcos 8 em diante continuam planejados. A demonstração original de palestra, no
+`run ping pong` e `run contador_a contador_b`) e 8 (sistema de arquivos: um
+ramdisk e um disco ATA, ambos FAT16 somente leitura, com `ls`, `cat`, syscalls
+de arquivo e a execução de um programa lido do disco, demonstrada com `run
+/disco/bin/visita`) estão concluídos e são o que este repositório executa
+hoje. O Marco 9 continua planejado. A demonstração original de palestra, no
 formato usado em aula, está preservada na tag git `v1.0-demo` e continua
 podendo ser usada como está.
 
@@ -85,7 +88,7 @@ detalhes de cada um vêm na sequência.
 | **5. Primeiro programa de usuário (marco central)** | Rodar o primeiro programa de usuário em modo protegido (ring 3), usando um mecanismo de syscall e um carregador de executáveis ELF64 embutidos na imagem de boot. | Comando `run hello` no prompt executa um programa em modo usuário que imprime na tela e retorna ao prompt. | Concluído |
 | 6. Interface de programação | Ampliar o contrato de syscalls (teclado, memória, código de saída) e oferecer uma biblioteca de runtime para quem escreve programas. | Um programa escrito por um aluno lê entrada do teclado e responde (`run eco`); um programa com acesso inválido à memória é encerrado sem derrubar o kernel (`run falha_memoria`). | Concluído |
 | 7. Multitarefa | Trocar de contexto entre mais de um programa carregado, primeiro de forma cooperativa e depois preemptiva. | Dois programas intercalando saída na tela (`run ping pong`, `run contador_a contador_b`). | Concluído |
-| 8. Sistema de arquivos | Ler arquivos de um sistema de arquivos, primeiro um ramdisk embutido e depois um driver de disco com leitura somente. | Listar arquivos e executar um programa lido do disco. | Planejado |
+| 8. Sistema de arquivos | Ler arquivos de um sistema de arquivos, primeiro um ramdisk embutido e depois um driver de disco com leitura somente. | Listar arquivos e executar um programa lido do disco (`ls /ram`, `cat /ram/ola.txt`, `run /disco/bin/visita`). | Concluído |
 | 9. Drivers | Acrescentar suporte a periféricos adicionais dentro do escopo do projeto, um por marco. | Um novo periférico demonstrado funcionando no QEMU. | Planejado |
 
 ### Detalhes dos marcos
@@ -107,7 +110,7 @@ Depende do Marco 1.
 mapa de memória do bootloader (usando o mapeamento completo da física
 que a feature `map_physical_memory` do `bootloader` fornece),
 tradução/criação de mapeamentos na tabela de páginas ativa, e um heap
-fixo de 100 KiB mapeado no boot, com um alocador global (`Box`, `Vec`,
+fixo mapeado no boot (100 KiB neste marco; 16 MiB desde o Marco 8), com um alocador global (`Box`, `Vec`,
 `String`, ...). Demonstrável: o comando `mem` no prompt mostra a memória
 física utilizável, a posição/tamanho do heap, um `Box` com seu endereço,
 e um `Vec` construído a partir de vazio. Depende do Marco 2.
@@ -165,10 +168,22 @@ mostra as linhas dos dois alternadas (cada um cede a CPU ao outro);
 peça a vez; `run falha_memoria contador_a` encerra só quem falhou.
 Depende do Marco 5.
 
-**Marco 8. Sistema de arquivos.** Primeiro um ramdisk somente leitura
-embutido na imagem, depois um driver de disco (ATA) com um sistema de
-arquivos (FAT) somente leitura. Demonstrável: listar arquivos e executar
-um programa lido do disco. Depende do Marco 5.
+**Marco 8. Sistema de arquivos.** Concluído. O kernel passa a ler arquivos,
+sempre **somente leitura**, de dois volumes FAT16 fixos: `/ram`, um ramdisk
+embutido na imagem de boot, e `/disco`, um disco ATA lido por PIO (portas de
+E/S, por polling, sem DMA e sem interrupção de disco). O mesmo leitor de FAT
+lê os dois, através de uma abstração mínima de dispositivo de blocos. Os
+comandos `ls` e `cat` listam e mostram arquivos; quatro syscalls novas
+(`SYS_OPEN`, `SYS_READ`, `SYS_CLOSE`, `SYS_READ_DIR`, contrato versão 4 do
+[`SYSCALLS.md`](SYSCALLS.md)) deixam um programa abrir, ler e listar, cada um
+com a sua tabela de arquivos; e `run` aceita o caminho de um executável.
+As imagens dos volumes são geradas dentro de `cargo run`/`cargo test` pela
+crate `fatimg`, a partir do diretório `discos/`, sem nenhuma ferramenta nova.
+Demonstrável: `ls /ram` e `cat /ram/ola.txt` mostram o ramdisk; `run
+/disco/bin/visita` executa um programa que **existe só no disco** (o kernel
+nunca o viu em tempo de compilação); `run leitor` e `run listador` leem o
+disco por syscalls. Sem o disco, o kernel dá boot normalmente e `ls /disco`
+diz que o volume está indisponível. Depende do Marco 5.
 
 **Marco 9. Drivers.** Periféricos adicionais dentro do escopo do projeto,
 um por marco. Demonstrável: um novo periférico funcionando, mostrado no
@@ -190,8 +205,9 @@ contrato de syscalls: números, semântica, convenções de registradores,
 códigos de erro, formato de executável, região de carga e pilha inicial)
 está documentada em um único arquivo versionado, [`SYSCALLS.md`](SYSCALLS.md),
 desde o Marco 5 (versão 1 do contrato: `write` e `exit`). A versão atual é a
-2, do Marco 6, que acrescenta a leitura de uma linha do teclado e memória
-para o programa (`SYS_READ_LINE` e `SYS_ALLOC`). Ele é a única fonte dessa
+4, do Marco 8, que acrescenta ao que já havia (leitura de uma linha do
+teclado e memória, no Marco 6; ceder a CPU, no Marco 7) a leitura de arquivos
+(`SYS_OPEN`, `SYS_READ`, `SYS_CLOSE` e `SYS_READ_DIR`). Ele é a única fonte dessa
 interface: nenhuma syscall existe sem estar nele, e um teste automatizado
 confere que o texto continua batendo com o código. Uma mudança incompatível
 no contrato aumenta a versão dele e exige atualizar, no mesmo marco, a
@@ -303,13 +319,17 @@ projeto (`x86_64-os_rust.json`), gerar uma imagem de boot com `bootimage`,
 e abrir uma janela do QEMU que dá boot via BIOS direto nesse binário. Em
 poucos segundos você deve ver o logo do os-rust (as 20 linhas do símbolo
 e do nome, no topo da tela), seguido da linha de identificação
-`os-rust v0.7.0` — a versão atual do projeto — e do prompt `os-rust> `
+`os-rust v0.8.0` — a versão atual do projeto — e do prompt `os-rust> `
 pronto para digitação, não um terminal comum.
 
 O mesmo `cargo run` também compila a biblioteca de runtime (`runtime/`) e
 os programas de usuário (a pasta `programs/`, para o target
-`x86_64-os_rust_user.json`) e os embute na imagem de boot: não há nenhum
-passo manual a mais. Se um programa de
+`x86_64-os_rust_user.json`) e os embute na imagem de boot, e também gera as
+imagens do ramdisk e do disco (`discos/`, pela crate `fatimg`) e anexa o disco
+ao QEMU (`target/imagens/disco.img`, pelos argumentos do `bootimage` no
+`Cargo.toml`): não há nenhum passo manual a mais, nem ferramenta nova. Rode
+`cargo run` e `cargo test` sempre a partir da raiz do repositório: o caminho do
+disco é relativo a ela. Se um programa de
 usuário não compilar, o `cargo run` para com o erro do compilador em vez
 de gerar uma imagem com um programa desatualizado.
 
@@ -337,9 +357,11 @@ Não é preciso nenhum passo manual adicional para isso: é o mesmo
 | `panic` | Dispara um panic proposital (mesma tela de erro do tratamento de panic) |
 | `mem` | Mostra memória física utilizável, posição/tamanho do heap, um `Box` e um `Vec` |
 | `falha <tipo>` | Provoca uma exceção de CPU de propósito: `pagina` (`#PF`), `pilha` (`#DF`), `opcode` (`#UD`), `protecao` (`#GP`) ou `breakpoint` (`#BP`); sem argumento ou com um tipo desconhecido, lista os tipos disponíveis |
-| `run <nome> [<nome>...]` | Executa programas de usuário embutidos na imagem, em modo usuário (ring 3), até 4 ao mesmo tempo (o mesmo nome pode se repetir), e volta ao prompt quando o último termina; sem argumento, com um nome desconhecido ou com mais de 4 nomes, não inicia nenhum e lista os programas disponíveis |
+| `ls <caminho>` | Lista as entradas de um diretório (tipo, tamanho e nome), por exemplo `ls /ram` ou `ls /disco/docs`; sem argumento mostra o uso e o estado dos volumes; caminho inexistente, arquivo no lugar de diretório e volume indisponível dão uma mensagem clara |
+| `cat <caminho>` | Mostra o conteúdo de um arquivo, por exemplo `cat /ram/ola.txt` (bytes fora do ASCII imprimível aparecem como `■`); mesmas mensagens de erro de `ls` |
+| `run <alvo> [<alvo>...]` | Executa programas de usuário em modo usuário (ring 3), até 4 ao mesmo tempo (o mesmo alvo pode se repetir), e volta ao prompt quando o último termina. Um alvo que começa com `/` é o caminho de um executável ELF64 (até 64 KiB) lido de um volume, como `/disco/bin/visita`; qualquer outro é o nome de um programa embutido na imagem. Os dois se misturam (`run /disco/bin/visita hello`). Sem argumento, com um alvo inválido ou com mais de 4 alvos, não inicia nenhum |
 
-### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b` e `eco2`
+### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador` e `visita`
 
 O comando `run` executa programas escritos fora do kernel. Cada um vive em
 `programs/src/bin/` e é compilado como um executável ELF64 estático:
@@ -378,6 +400,48 @@ O comando `run` executa programas escritos fora do kernel. Cada um vive em
 - **`eco2`** (`run eco eco2`): o irmão do `eco`, com o prefixo `eco2:` na
   resposta. Digite uma linha e Enter, e depois outra: a primeira vai ao `eco`,
   que pediu primeiro, e a segunda ao `eco2`.
+
+- **`leitor`** (`run leitor`): abre `/disco/docs/longo.txt`, um arquivo que
+  ocupa mais de um cluster do disco, e escreve o conteúdo na tela, lendo em
+  pedaços de 128 bytes pelas syscalls de arquivo. O programa nunca fala com o
+  disco: só pede ao kernel. `run leitor leitor` roda dois leitores ao mesmo
+  tempo, cada um com a sua posição de leitura.
+- **`listador`** (`run listador`): lista a raiz do disco, uma entrada por linha
+  (`dir 0 bin`, `dir 0 docs`, `arquivo <tamanho> leiame.txt`).
+- **`visita`** (`run /disco/bin/visita`): escreve `visita: fui carregado do
+  disco!`. Ele existe **só no disco**: o fonte fica em `programs/src/disco/`,
+  fora de `programs/src/bin/`, então não entra na lista de `run` sem argumento
+  nem na imagem do kernel.
+
+### Arquivos: os volumes `/ram` e `/disco`
+
+O conteúdo dos dois volumes vem do diretório `discos/` do repositório
+(`discos/ram/` e `discos/disco/`), transformado em imagem FAT16 durante o
+`cargo run`/`cargo test`; o disco ainda recebe o executável `visita` e um
+arquivo de 65 537 bytes (`docs/grande.bin`) que existe só para provar a recusa
+de um executável grande demais. Um caminho é `/<volume>/<componente>/...`, com
+nomes 8.3 (até 8 caracteres, ponto e até 3 de extensão), sem diferenciar
+maiúsculas de minúsculas, no máximo 64 bytes e 8 níveis; `.` e `..` não são
+aceitos. Cada programa pode ter 4 arquivos abertos.
+
+Demonstração:
+
+```text
+os-rust> ls /ram
+os-rust> cat /ram/ola.txt
+os-rust> ls /disco
+os-rust> run /disco/bin/visita
+os-rust> run leitor
+os-rust> run listador
+os-rust> run /disco/bin/visita hello
+```
+
+Para ver o kernel sem o disco, rode o QEMU à mão sem o segundo `-drive`
+(`bootimage run`... ou `qemu-system-x86_64 -drive format=raw,file=<imagem do
+bootimage>`): o boot é normal, `ls /ram` funciona e `ls /disco` diz `volume
+indisponivel: /disco (sem disco)`. Limitações: só leitura (nada é criado,
+alterado ou apagado), só nomes curtos 8.3 (entradas de nome longo do FAT são
+ignoradas), um volume FAT16 por fonte, sem cache de blocos nem partições.
 
 Para ver a multitarefa à mão, rode `cargo run` e digite `run ping pong`,
 `run contador_a contador_b`, `run eco eco2` e `run falha_memoria contador_a`
@@ -499,6 +563,42 @@ suíte automatizada (`cargo test`) cobre, além dos testes anteriores:
   16. `src/shell.rs`: `run` lista `eco` e `falha_memoria`, e `#PF` de
   programa mostra `erro de memoria`.
 
+### O que os testes do Marco 8 cobrem
+
+Para conferir à mão, rode `cargo run` e a demonstração da seção **Arquivos**
+acima. A suíte automatizada (`cargo test`) cobre, além dos testes anteriores:
+
+- `src/fat.rs` (o leitor de FAT, sobre imagens fabricadas em memória pela
+  crate `fatimg` e adulteradas byte a byte): setor de boot válido e cada tipo
+  de inválido; raiz e subdiretório; nomes 8.3 sem diferenciar caixa; arquivo
+  vazio, de um cluster, de vários e de tamanho que não é múltiplo do cluster;
+  leitura em pedaços; cadeia com ciclo, que sai do volume, que cai em cluster
+  livre ou reservado, mais curta que o tamanho do arquivo; diretório com ciclo;
+  entradas de nome longo, apagadas e de rótulo ignoradas; caminho inexistente,
+  tipo errado e erro do dispositivo. `src/fs.rs`: validação de caminhos
+  (limites, `.` e `..`, caixa), leitura do ramdisk, tabela de arquivos (limite,
+  descritor inválido, posições independentes, `Drop`). `src/ata.rs`: a espera
+  com limite exato, sem relógio. `src/blockdev.rs` e `src/shell.rs` (`ls` e
+  `cat` com cada erro).
+- `tests/disco_ata.rs` (dentro do QEMU, com os discos extras do `Cargo.toml`):
+  setor de boot e arquivos conhecidos lidos do disco por PIO; drive ausente
+  detectado sem travar; volume corrompido recusado sem pânico; o mesmo leitor de
+  FAT sobre o ramdisk e sobre o disco.
+- `tests/sistema_de_arquivos.rs`: `ls`, `cat` e `run` pelo prompt (disco e
+  ramdisk), recusa de arquivo que não é ELF e de executável grande demais, recusa
+  do comando inteiro com um alvo inválido, mistura de embutido e caminho, 100
+  execuções de um programa do disco sem vazar frames; cada erro das syscalls de
+  arquivo (ELFs montados à mão), o limite de 4 arquivos e a liberação ao
+  terminar por `exit` e por erro; `leitor`, `listador` e dois leitores ao mesmo
+  tempo; sem disco, volume inválido e FAT corrompida (mensagem clara, sem pânico
+  nem laço infinito).
+- `tests/user_runtime.rs`: o `GUIA_DO_PROGRAMADOR.md` contém, literalmente, o
+  código de `leitor` e `listador`; `visita` não está entre os programas
+  embutidos. `src/syscall.rs`: `SYSCALLS.md` (versão 4) concorda com as
+  constantes (syscalls, erros, limites, volumes).
+- `tests/artefatos.rs` continua conferindo os arquivos entregues, incluindo os
+  novos (`fatimg/`, `discos/`, os módulos do kernel e os testes).
+
 ### O que os testes do Marco 7 cobrem
 
 Para conferir à mão, rode `cargo run` e digite `run ping pong`, `run contador_a
@@ -551,7 +651,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   identificação de versão (`VERSION`, os dois derivados de `Cargo.toml`
   em tempo de compilação) e a mensagem de boas-vindas (`print_welcome`),
   inicializa a porta serial, a GDT/TSS, as interrupções, a memória
-  (frames, paginação, heap), o timer e o mecanismo de syscall, e contém a infraestrutura de testes (o
+  (frames, paginação, heap), os volumes de arquivos, o timer e o mecanismo de syscall, e contém a infraestrutura de testes (o
   executor de testes, o tratamento de panic em modo de teste e a
   comunicação com o QEMU sobre sucesso ou falha).
 - `src/main.rs`: o binário de produção — ponto de entrada do boot; limpa
@@ -607,30 +707,45 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   devolve os recursos de quem termina.
 - `src/timer.rs`: o PIT (100 Hz, IRQ0) e o stub da interrupção do timer, que só
   troca de tarefa quando interrompe ring 3.
+- `src/blockdev.rs`: o dispositivo de blocos (ler um setor de 512 bytes por
+  endereço de bloco), implementado pelo ramdisk (`RamDisk`) e pelo disco ATA.
+- `src/fat.rs`: o leitor de FAT16 somente leitura, que trata o volume como dado
+  não confiável (cadeias com limite de passos, números de cluster validados).
+- `src/ata.rs`: o driver de disco ATA por PIO e polling, com limite de espera e
+  detecção de ausência, atômico em relação ao escalonador.
+- `src/fs.rs`: os volumes `/ram` e `/disco`, os caminhos e a tabela de arquivos
+  abertos de cada programa.
 - `src/syscall.rs`: o mecanismo `syscall` (entrada pela instrução, retorno por
-  `iretq`), o despachante e as syscalls `write`, `exit`, `read_line`, `alloc`
-  e `yield`.
+  `iretq`), o despachante e as syscalls `write`, `exit`, `read_line`, `alloc`,
+  `yield`, `open`, `read`, `close` e `read_dir`.
 - `src/programs.rs`: a tabela dos programas embutidos, gerada pelo
   `build.rs`.
 - `src/allocator.rs`: a faixa fixa de endereços virtuais do heap, o
   alocador global (`Box`, `Vec`, `String`, ...) e o tratamento de heap
   esgotado.
 - `src/shell.rs`: o buffer de linha e o prompt de comandos (`help`,
-  `clear`, `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `run <nome>`).
+  `clear`, `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `ls`, `cat`, `run <alvo>`).
 - `abi/`: as constantes do contrato de syscalls (números, erros, limites),
   compartilhadas pelo kernel e pela biblioteca de runtime.
 - `runtime/`: a biblioteca de runtime dos programas de usuário (`entry!`,
-  `print!`/`println!`, `read_line`, `yield_now`, alocador global, tratador de
-  `panic`).
+  `print!`/`println!`, `read_line`, `yield_now`, `File`/`Dir` para ler arquivos,
+  alocador global, tratador de `panic`).
 - `programs/`: a crate dos programas de usuário (`hello`, `crash`, `eco`,
-  `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, um
-  arquivo por programa em `src/bin/`), com o linker
+  `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`,
+  `listador`, um arquivo por programa em `src/bin/`, mais `visita` em
+  `src/disco/`, que só vai para o disco), com o linker
   script (`link.ld`); compilada para o target de usuário pelo `build.rs` da
   raiz, nunca diretamente.
 - `GUIA_DO_PROGRAMADOR.md`: o guia de quem escreve programas para o os-rust.
+- `fatimg/`: o gerador de imagens FAT16 (`no_std`, sem dependências), usado
+  pelo `build.rs` para gerar o ramdisk e o disco e pelos testes para fabricar e
+  adulterar imagens.
+- `discos/`: o conteúdo dos volumes (`discos/ram/` e `discos/disco/`).
 - `build.rs`: compila `programs/` (com um `cargo` aninhado), embute os ELFs no
-  kernel e gera a lista de arquivos entregues que `tests/artefatos.rs` confere.
-- `SYSCALLS.md`: o contrato de syscalls (versão 3).
+  kernel, gera as imagens do ramdisk (embutida no kernel) e do disco
+  (`target/imagens/`, anexada ao QEMU) e a lista de arquivos entregues que
+  `tests/artefatos.rs` confere.
+- `SYSCALLS.md`: o contrato de syscalls (versão 4).
 - `tests/`: os testes de integração, cada um iniciando o kernel do zero
   em seu próprio binário — um teste de boot (que também confere a versão
   na mensagem de boas-vindas), um teste cujo resultado esperado é um
@@ -640,8 +755,9 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   falha esperado), `user_mode.rs` (roda programas de usuário em ring 3),
   `user_runtime.rs` (leitura de teclado, memória, isolamento e o guia),
   `multitarefa.rs` (vários programas ao mesmo tempo: troca de contexto,
-  preempção, isolamento e teclado) e `artefatos.rs` (higiene dos arquivos
-  entregues).
+  preempção, isolamento e teclado), `disco_ata.rs` (o driver ATA),
+  `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
+  e volumes inválidos) e `artefatos.rs` (higiene dos arquivos entregues).
 - `x86_64-os_rust.json`: a especificação do target bare-metal customizado
   (sem sistema operacional por baixo).
 - `x86_64-os_rust_user.json`: a especificação do target dos programas de
