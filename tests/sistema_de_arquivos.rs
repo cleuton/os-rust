@@ -577,12 +577,13 @@ fn arquivos_abertos_sao_liberados_no_exit_e_no_erro_e_os_outros_seguem() {
 }
 
 #[test_case]
-fn syscall_numero_10_continua_encerrando_so_o_programa() {
+fn primeiro_numero_fora_do_contrato_continua_encerrando_so_o_programa() {
+    // O contrato v5 vai até `SYS_TIME` (10); o 11 é o primeiro número livre.
     let mut a = Asm::new();
-    a.mov32(Rax, 10);
+    a.mov32(Rax, 11);
     a.syscall();
     let elf = synth_elf(&a.0);
-    assert_eq!(rodar_sintetico("fs_dez", &elf), Termination::BadSyscall { number: 10 });
+    assert_eq!(rodar_sintetico("fs_onze", &elf), Termination::BadSyscall { number: 11 });
 }
 
 /// A imagem ELF de um programa embutido.

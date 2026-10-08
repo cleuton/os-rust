@@ -11,6 +11,7 @@
 //!   `extern crate alloc;` no programa);
 //! - [`File`], [`Dir`] e [`FsError`]: abrir e ler arquivos e listar diretórios
 //!   (somente leitura; volumes `/ram` e `/disco`);
+//! - [`time::now`]: a data e a hora atuais, em UTC;
 //! - [`exit`]: encerra o programa mais cedo;
 //! - [`yield_now`]: cede a CPU a outro programa (multitarefa);
 //! - um tratador de `panic!` que escreve `[panic] <mensagem>` e sai com o
@@ -26,10 +27,12 @@ pub mod fs;
 pub mod heap;
 pub mod io;
 pub mod sys;
+pub mod time;
 
 pub use fs::{Dir, DirEntry, File, FsError};
 pub use io::read_line;
 pub use sys::{exit, yield_now};
+pub use time::{DateTime, TimeError};
 
 /// Gera o ponto de entrada (`_start`) do programa e o liga à função `main`.
 ///

@@ -35,6 +35,10 @@ pub const SYS_CLOSE: u64 = 8;
 /// `DirEntryRaw`) do diretório aberto. Devolve `1`, ou `0` no fim.
 pub const SYS_READ_DIR: u64 = 9;
 
+/// `time(ptr, len)`: escreve em `ptr` a data e a hora atuais, em UTC, como um
+/// `DateTime` (`len` tem de ser `TIME_SIZE`). Devolve `0`.
+pub const SYS_TIME: u64 = 10;
+
 /// Máximo de programas que `run` carrega ao mesmo tempo. Pedir mais que isso
 /// é recusado antes de iniciar qualquer programa.
 pub const MAX_TASKS: usize = 4;
@@ -88,6 +92,9 @@ pub const ERR_NAMETOOLONG: i64 = -9;
 /// Erro ao ler o volume: disco que não responde, erro do disco ou estrutura
 /// FAT corrompida.
 pub const ERR_IO: i64 = -10;
+/// O relógio devolveu valores impossíveis, não se estabilizou ou não
+/// respondeu (`SYS_TIME`).
+pub const ERR_CLOCK: i64 = -11;
 
 /// Maior caminho aceito por `SYS_OPEN`, em bytes.
 pub const MAX_PATH_LEN: usize = 64;
@@ -121,3 +128,41 @@ pub struct DirEntryRaw {
 
 // O layout é parte do contrato: kernel e runtime compartilham este tipo.
 const _: () = assert!(core::mem::size_of::<DirEntryRaw>() == DIR_ENTRY_SIZE);
+
+/// Tamanho, em bytes, de um `DateTime`.
+pub const TIME_SIZE: usize = 8;
+
+/// A data e a hora como `SYS_TIME` as entrega ao programa: 8 bytes, `year` em
+/// little-endian. Sempre UTC.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DateTime {
+    /// Ano completo (por exemplo, 2026).
+    pub year: u16,
+    /// Mês, de 1 a 12.
+    pub month: u8,
+    /// Dia, de 1 até o último dia do mês.
+    pub day: u8,
+    /// Hora, de 0 a 23.
+    pub hour: u8,
+    /// Minuto, de 0 a 59.
+    pub minute: u8,
+    /// Segundo, de 0 a 59.
+    pub second: u8,
+    /// Zero (alinhamento).
+    pub _pad: u8,
+}
+
+// O layout é parte do contrato: kernel e runtime compartilham este tipo.
+const _: () = assert!(core::mem::size_of::<DateTime>() == TIME_SIZE);
+
+/// `AAAA-MM-DD HH:MM:SS`: o formato único do `data`, do `hora` e dos testes.
+impl core::fmt::Display for DateTime {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        )
+    }
+}

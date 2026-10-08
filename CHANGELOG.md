@@ -5,6 +5,51 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.9.0] - 2026-10-08
+
+Marco 9: driver de RTC. O kernel passa a **ler a data e a hora** do relógio de
+tempo real (o chip CMOS), por polling, e as oferece ao prompt e aos programas
+de usuário. `data` mostra `AAAA-MM-DD HH:MM:SS UTC`; `run hora` mostra o mesmo,
+pedido ao kernel por um programa através de uma syscall nova. O kernel só
+conhece UTC. Este marco também registra no roadmap a trilha de escrita em
+arquivos: os Marcos 10 (ramdisk) e 11 (disco ATA), planejados.
+
+### Adicionado
+
+- Driver de RTC (`src/rtc.rs`): lê ano, mês, dia, hora, minuto e segundo pelas
+  portas `0x70` e `0x71`. Trata BCD e binário, 12 e 24 horas, o século (com
+  regra de reserva: 70 a 99 viram 19xx, 00 a 69 viram 20xx), espera o fim da
+  atualização do chip e lê duas vezes até as leituras coincidirem (até 5
+  tentativas, com limite de espera: nunca trava). Rejeita valores impossíveis,
+  inclusive dia contra o mês e o ano bissexto. A leitura é atômica em relação
+  ao escalonador.
+- Comando `data` no prompt, listado em `help`; um relógio inválido, instável ou
+  sem resposta dá uma mensagem clara, nunca um pânico.
+- Syscall `SYS_TIME` (10) e o erro `ERR_CLOCK` (`-11`): contrato de syscalls
+  versão 5 (`SYSCALLS.md`), com o buffer `DateTime` de 8 bytes. Programas das
+  versões 1 a 4 continuam funcionando.
+- Crate `abi`: `SYS_TIME`, `ERR_CLOCK`, `TIME_SIZE` e `DateTime` (com `Display`
+  no formato `AAAA-MM-DD HH:MM:SS`).
+- Biblioteca de runtime: `time::now()`, `DateTime` e `TimeError`
+  (`runtime/src/time.rs`).
+- Programa de exemplo `hora` (embutido), seção "A hora" no
+  `GUIA_DO_PROGRAMADOR.md` com o código completo, e um capítulo sobre o RTC no
+  `WALKTHROUGH.md`.
+- Testes: os de `src/rtc.rs` (sobre registradores fabricados), os do comando
+  `data` em `src/shell.rs`, os do contrato versão 5 em `src/syscall.rs`,
+  `tests/relogio.rs` e o do guia em `tests/user_runtime.rs`. Também
+  `vga_buffer::screen_count_clock_lines`, que existe só para os testes.
+
+### Alterado
+
+- O roadmap do `README.md`: o Marco 9 deixa de ser "Drivers" genérico e passa a
+  ser "Driver de RTC" (concluído); entram os Marcos 10 (escrita no ramdisk) e 11
+  (escrita no disco ATA), planejados. A afirmação de que os volumes são somente
+  leitura passa a valer "até o Marco 9".
+- O teste de `tests/sistema_de_arquivos.rs` que usava o número 10 como exemplo
+  de syscall inexistente passa a usar o 11, o primeiro número livre do contrato
+  versão 5.
+
 ## [0.8.0] - 2026-10-07
 
 Marco 8: sistema de arquivos. O os-rust passa a **ler arquivos**, sempre

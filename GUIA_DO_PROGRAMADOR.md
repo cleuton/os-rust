@@ -22,6 +22,7 @@ A biblioteca de runtime (`runtime/`, na raiz do repositório) existe para que vo
 - Um alocador global: permite usar `Box`, `Vec`, `String` e o restante da crate `alloc` (com `extern crate alloc;` no seu programa), através da syscall de memória. O heap do programa cresce até 1 MiB.
 - `yield_now()`: cede a CPU a outro programa que esteja rodando ao mesmo tempo (veja a seção **Multitarefa**).
 - `File`, `Dir`, `DirEntry` e `FsError`: abrir e ler arquivos e listar diretórios, somente leitura (veja a seção **Arquivos**).
+- `time::now()`: a data e a hora atuais, em UTC (veja a seção **A hora**).
 - `exit(codigo)`: encerra o programa mais cedo, se precisar.
 - Um tratador de `panic!`: escreve `[panic] <mensagem>` na tela e encerra o programa com o código 101.
 
@@ -619,6 +620,52 @@ fn main() -> i32 {
 3. Rode `cargo run` e, no prompt, `run meuleitor`.
 4. Para só conferir o arquivo sem escrever um programa, o prompt tem `ls <caminho>` e `cat <caminho>` (por exemplo, `ls /disco`, `cat /disco/notas.txt`).
 
+## A hora
+
+Um programa pode perguntar a data e a hora ao kernel, que as lê do relógio do computador (o chip RTC). Você não toca no relógio: usa `time::now()`, da biblioteca de runtime, que faz a syscall `SYS_TIME` por você.
+
+- `time::now()` devolve `Result<DateTime, TimeError>`.
+- Um `DateTime` tem os campos `year`, `month`, `day`, `hour`, `minute` e `second`. Escrito com `{}`, ele sai no formato `AAAA-MM-DD HH:MM:SS`, por exemplo `2026-10-08 15:04:05`.
+- A hora é **sempre UTC**. O os-rust não conhece fuso horário nem horário de verão: se você quer a hora local, some a diferença você mesmo.
+- `TimeError::Clock` quer dizer que o relógio devolveu valores impossíveis ou não respondeu. É raro, mas um programa cuidadoso trata o erro em vez de supor que a hora sempre vem.
+
+O programa `hora` faz só isso. Rode `run hora` e compare com o comando `data` do prompt: a diferença é de segundos. O código completo:
+
+```rust
+//! `hora`: escreve a data e a hora atuais (UTC).
+//!
+//! O programa não toca no relógio: pede a hora ao kernel (syscall `time`, pela
+//! biblioteca de runtime) e escreve o que recebeu, no mesmo formato do comando
+//! `data` do prompt. Rode `run hora` e compare com `data`.
+
+#![no_std]
+#![no_main]
+
+use runtime::{entry, println, time};
+
+entry!(main);
+
+fn main() -> i32 {
+    // Pede ao kernel (syscall `time`) a data e a hora. Só falha se o relógio
+    // do computador devolver valores impossíveis.
+    match time::now() {
+        Ok(agora) => {
+            // `{}` escreve `AAAA-MM-DD HH:MM:SS`; o relógio é sempre UTC.
+            println!("{} UTC", agora);
+            0
+        }
+        Err(erro) => {
+            // Um código de saída diferente de zero faz o kernel avisar no
+            // prompt (`[run] hora terminou com codigo 1`).
+            println!("hora: {}", erro);
+            1
+        }
+    }
+}
+```
+
+Para ver a hora sem escrever um programa, o prompt tem o comando `data`. O contrato da syscall (registradores, formato do buffer de 8 bytes e erros) está em `SYSCALLS.md`, seção 5, `SYS_TIME`.
+
 ## Escrevendo e compilando o seu próprio programa
 
 1. Crie um arquivo novo em `programs/src/bin/`, com o nome do seu programa (por exemplo, `programs/src/bin/meuprograma.rs`).
@@ -633,7 +680,7 @@ Não existe nenhum passo de compilação manual separado: se `cargo run` funcion
 
 A forma mais simples de testar é manual: `cargo run`, depois `run <nome do seu programa>`, observando a tela.
 
-Para verificação automatizada, `cargo test` roda a suíte do kernel, que inclui testes cobrindo o carregamento e a execução de programas de usuário (usando `hello`, `eco` e `falha_memoria` como referência), de vários programas ao mesmo tempo (`tests/multitarefa.rs`: `ping`, `pong`, `contador_a`, `contador_b`, `eco2`) e de programas que leem arquivos (`tests/sistema_de_arquivos.rs`: `leitor`, `listador`, `visita`). Se você quiser um teste dedicado ao seu próprio programa, o padrão usado pelo projeto é um arquivo em `tests/`, dando boot no kernel, "digitando" a entrada com `interrupts::push_scancode`, e verificando o resultado na tela; `tests/user_runtime.rs` é o modelo.
+Para verificação automatizada, `cargo test` roda a suíte do kernel, que inclui testes cobrindo o carregamento e a execução de programas de usuário (usando `hello`, `eco` e `falha_memoria` como referência), de vários programas ao mesmo tempo (`tests/multitarefa.rs`: `ping`, `pong`, `contador_a`, `contador_b`, `eco2`) e de programas que leem arquivos (`tests/sistema_de_arquivos.rs`: `leitor`, `listador`, `visita`) e que pedem a hora (`tests/relogio.rs`: `hora`). Se você quiser um teste dedicado ao seu próprio programa, o padrão usado pelo projeto é um arquivo em `tests/`, dando boot no kernel, "digitando" a entrada com `interrupts::push_scancode`, e verificando o resultado na tela; `tests/user_runtime.rs` é o modelo.
 
 ## Erros comuns
 

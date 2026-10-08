@@ -8,8 +8,8 @@
 use core::arch::asm;
 
 use abi::{
-    SYS_ALLOC, SYS_CLOSE, SYS_EXIT, SYS_OPEN, SYS_READ, SYS_READ_DIR, SYS_READ_LINE, SYS_WRITE,
-    SYS_YIELD,
+    DateTime, SYS_ALLOC, SYS_CLOSE, SYS_EXIT, SYS_OPEN, SYS_READ, SYS_READ_DIR, SYS_READ_LINE,
+    SYS_TIME, SYS_WRITE, SYS_YIELD, TIME_SIZE,
 };
 
 /// Executa `syscall` com o número `nr` e dois argumentos e devolve o
@@ -115,6 +115,15 @@ pub fn alloc(size: usize) -> i64 {
     // SAFETY: `SYS_ALLOC` não recebe ponteiros; qualquer `size` é válido (o
     // kernel devolve erro se não puder atender).
     unsafe { syscall2(SYS_ALLOC, size as u64, 0) }
+}
+
+/// Pede ao kernel a data e a hora atuais (UTC) e as escreve em `buf`. Devolve
+/// `0` ou um código de erro (`< 0`, por exemplo `abi::ERR_CLOCK`).
+pub fn time(buf: &mut DateTime) -> i64 {
+    // SAFETY: `buf` é uma referência exclusiva a um `DateTime` vivo do
+    // programa: memória mapeada e gravável de `TIME_SIZE` bytes, que é o que
+    // `SYS_TIME` exige do intervalo em que o kernel vai escrever.
+    unsafe { syscall2(SYS_TIME, buf as *mut DateTime as u64, TIME_SIZE as u64) }
 }
 
 /// Cede a CPU: o kernel passa a vez ao próximo programa pronto e só volta a

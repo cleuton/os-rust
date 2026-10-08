@@ -322,6 +322,27 @@ pub fn screen_row_bytes(row: usize) -> [u8; BUFFER_WIDTH] {
     bytes
 }
 
+/// Quantas linhas da tela têm a forma `dddd-dd-dd dd:dd:dd UTC` (a saída de
+/// `data` e de `hora`), começando na primeira coluna. Confere só a **forma**,
+/// nunca o valor: os testes não podem depender da hora real. `pub` pelo mesmo
+/// motivo de `screen_contains`: serve também aos testes de `tests/`.
+pub fn screen_count_clock_lines() -> usize {
+    // d = dígito; qualquer outro caractere tem de ser igual ao do modelo.
+    const MODEL: &[u8] = b"dddd-dd-dd dd:dd:dd UTC";
+    (0..BUFFER_HEIGHT)
+        .filter(|&row| {
+            let bytes = screen_row_bytes(row);
+            MODEL.iter().enumerate().all(|(i, &m)| {
+                if m == b'd' {
+                    bytes[i].is_ascii_digit()
+                } else {
+                    bytes[i] == m
+                }
+            })
+        })
+        .count()
+}
+
 /// Verdadeiro se a tela inteira está em branco (todas as posições com
 /// espaço). Usada só por testes de outros módulos para confirmar o
 /// efeito do comando `clear`.

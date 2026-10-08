@@ -1,8 +1,8 @@
 # Contrato de syscalls do os-rust
 
-**Versão do contrato**: 4
+**Versão do contrato**: 5
 
-**Válido a partir de**: os-rust 0.8.0 (Marco 8)
+**Válido a partir de**: os-rust 0.9.0 (Marco 9)
 
 Este documento é tudo que um programa precisa saber para rodar no os-rust.
 O kernel e os programas nunca dependem de nada que não esteja aqui. Uma
@@ -100,7 +100,7 @@ unsafe {
 
 ## 5. Syscalls
 
-Números do contrato v4. **Qualquer outro número** (inclusive `0`)
+Números do contrato v5. **Qualquer outro número** (inclusive `0`)
 encerra o programa (§7).
 
 | Nº | Nome | Argumentos | Resultado |
@@ -114,6 +114,7 @@ encerra o programa (§7).
 | 7 | `SYS_READ` | `rdi = fd`, `rsi = ptr`, `rdx = len` | bytes lidos (`≥ 0`; `0` = fim do arquivo) ou erro (`< 0`) |
 | 8 | `SYS_CLOSE` | `rdi = fd` | `0` ou erro (`< 0`) |
 | 9 | `SYS_READ_DIR` | `rdi = fd`, `rsi = ptr`, `rdx = len` | `1` (uma entrada escrita), `0` (fim do diretório) ou erro (`< 0`) |
+| 10 | `SYS_TIME` | `rdi = ptr`, `rsi = len` | `0` (um `DateTime` escrito) ou erro (`< 0`) |
 
 ### `SYS_WRITE` (1)
 
@@ -248,6 +249,35 @@ escrito).
 - Entradas apagadas, de nome longo, rótulo de volume, `.` e `..` não
   aparecem.
 
+### `SYS_TIME` (10)
+
+Escreve em `ptr` a data e a hora atuais, **em UTC**, como um `DateTime`
+(8 bytes, `repr(C)`). Devolve `0`. Cada chamada lê o relógio de novo; duas
+chamadas seguidas nunca andam para trás.
+
+Formato do buffer:
+
+| Deslocamento | Tamanho | Campo |
+|--------------|---------|-------|
+| 0 | 2 | ano completo (por exemplo, 2026), little-endian |
+| 2 | 1 | mês (1 a 12) |
+| 3 | 1 | dia (1 até o último dia do mês, considerando ano bissexto) |
+| 4 | 1 | hora (0 a 23) |
+| 5 | 1 | minuto (0 a 59) |
+| 6 | 1 | segundo (0 a 59) |
+| 7 | 1 | zero (alinhamento) |
+
+As verificações acontecem nesta ordem:
+
+- `len != 8` (`TIME_SIZE`): `ERR_INVAL`.
+- `[ptr, ptr + 8)` deve estar na região do usuário, mapeado e **gravável**;
+  senão `ERR_FAULT`.
+- O relógio devolveu valores impossíveis, não se estabilizou ou não
+  respondeu: `ERR_CLOCK`. O programa não recebe data nenhuma nesse caso.
+
+Não existe fuso horário: o resultado é sempre UTC. Na biblioteca de runtime:
+`time::now()`.
+
 ## 6. Resultado e códigos de erro
 
 O resultado em `rax` é um inteiro com sinal de 64 bits: `≥ 0` é sucesso
@@ -255,8 +285,8 @@ O resultado em `rax` é um inteiro com sinal de 64 bits: `≥ 0` é sucesso
 
 | Constante | Valor | Quando |
 |-----------|-------|--------|
-| `ERR_FAULT` | `-1` | Ponteiro ou intervalo inválido (fora da região, não mapeado, cruzando páginas não mapeadas, ou não gravável em `SYS_READ_LINE`, `SYS_READ` e `SYS_READ_DIR`). |
-| `ERR_INVAL` | `-2` | Argumento fora dos limites permitidos (`len > 4096`, `size == 0` em `SYS_ALLOC`, `path_len == 0`, ou caminho malformado). |
+| `ERR_FAULT` | `-1` | Ponteiro ou intervalo inválido (fora da região, não mapeado, cruzando páginas não mapeadas, ou não gravável em `SYS_READ_LINE`, `SYS_READ`, `SYS_READ_DIR` e `SYS_TIME`). |
+| `ERR_INVAL` | `-2` | Argumento fora dos limites permitidos (`len > 4096`, `size == 0` em `SYS_ALLOC`, `path_len == 0`, caminho malformado, ou `len != 8` em `SYS_TIME`). |
 | `ERR_NOMEM` | `-3` | `SYS_ALLOC` não pôde dar a memória pedida (limite de 1 MiB do heap ou falta de memória física). |
 | `ERR_NOENT` | `-4` | O caminho, ou um componente dele, não existe. |
 | `ERR_NODEV` | `-5` | Volume desconhecido, ou conhecido mas indisponível (sem disco, volume inválido). |
@@ -265,6 +295,7 @@ O resultado em `rax` é um inteiro com sinal de 64 bits: `≥ 0` é sucesso
 | `ERR_MFILE` | `-8` | O programa já tem 4 arquivos abertos. |
 | `ERR_NAMETOOLONG` | `-9` | Caminho com mais de 64 bytes, ou com mais de 8 componentes. |
 | `ERR_IO` | `-10` | Erro ao ler o volume: disco que não responde, erro do disco ou estrutura FAT corrompida. |
+| `ERR_CLOCK` | `-11` | `SYS_TIME`: o relógio devolveu valores impossíveis, não se estabilizou ou não respondeu. |
 
 Não há errno: o programa recebe só o valor em `rax`.
 
@@ -276,7 +307,7 @@ Não há errno: o programa recebe só o valor em `rax`.
 | `SYS_EXIT(n)`, `n ≠ 0` | `[run] <nome> terminou com codigo <n>` | idem |
 | Acesso inválido à memória (`#PF`) em ring 3 | `[run] <nome> encerrado por erro de memoria: #PF (Page Fault) em <rip>` + `codigo de erro: <código>` + `endereco de falha: <endereço>` | idem |
 | Outra exceção de CPU em ring 3 (`#DE`, `#UD`, `#GP`, `#SS`, `#NP`) | `[run] <nome> encerrado por erro: <sigla> (<nome da exceção>) em <rip>` (+ código de erro, quando houver) | idem |
-| Número de syscall inexistente (qualquer um fora de 1 a 9) | `[run] <nome> encerrado: syscall inexistente (<n>)` | idem |
+| Número de syscall inexistente (qualquer um fora de 1 a 10) | `[run] <nome> encerrado: syscall inexistente (<n>)` | idem |
 
 A mensagem aparece **na hora** em que aquele programa termina, em tela e
 serial, mesmo que outros continuem rodando. Uma falha do programa **nunca**
@@ -415,3 +446,4 @@ os descritores de outro. Na biblioteca de runtime: `File::open`, `File::read`,
 | 2 | 6 (os-rust 0.6.0) | `SYS_READ_LINE` (3) e `SYS_ALLOC` (4); `ERR_NOMEM` (`-3`); janela do heap `[0x6000_0000, 0x6010_0000)`; segmentos do ELF limitados a `[0x4000_0000, 0x6000_0000)`; mensagem de `#PF` mostra "erro de memoria"; seção sobre o teclado. Programas v1 continuam funcionando. |
 | 3 | 7 (os-rust 0.7.0) | `SYS_YIELD` (5); vários programas ao mesmo tempo (até 4, cada um na sua memória, fatia de 5 ticks, timer a 100 Hz); mensagem de término na hora em que o programa termina; teclado para o programa que pediu primeiro. Programas v1 e v2 continuam funcionando. |
 | 4 | 8 (os-rust 0.8.0) | `SYS_OPEN` (6), `SYS_READ` (7), `SYS_CLOSE` (8), `SYS_READ_DIR` (9); erros `ERR_NOENT` (`-4`) a `ERR_IO` (`-10`); volumes `/ram` e `/disco` (FAT16, somente leitura); tabela de arquivos por programa (até 4); `run` aceita caminhos de arquivo (executável de até 64 KiB). Programas v1, v2 e v3 continuam funcionando. |
+| 5 | 9 (os-rust 0.9.0) | `SYS_TIME` (10); erro `ERR_CLOCK` (`-11`); `DateTime` de 8 bytes, sempre em UTC. Programas v1 a v4 continuam funcionando. |

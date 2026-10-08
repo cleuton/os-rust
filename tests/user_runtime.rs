@@ -14,7 +14,7 @@
 //! - `SYS_READ_LINE` inválida, e o prompt retomando o teclado;
 //! - isolamento com `falha_memoria`;
 //! - o guia bate com o código (inclusive os programas do Marco 8, `leitor` e
-//!   `listador`, e os do Marco 7: `ping`,
+//!   `listador`, o do Marco 9, `hora`, e os do Marco 7: `ping`,
 //!   `pong`, `contador_a`, `contador_b` e `eco2`).
 
 #![no_std]
@@ -527,6 +527,7 @@ const CONTADOR_B_RS: &str = include_str!("../programs/src/bin/contador_b.rs");
 const ECO2_RS: &str = include_str!("../programs/src/bin/eco2.rs");
 const LEITOR_RS: &str = include_str!("../programs/src/bin/leitor.rs");
 const LISTADOR_RS: &str = include_str!("../programs/src/bin/listador.rs");
+const HORA_RS: &str = include_str!("../programs/src/bin/hora.rs");
 
 #[test_case]
 fn guia_contem_o_codigo_dos_programas_de_exemplo() {
@@ -550,6 +551,8 @@ fn guia_contem_o_codigo_dos_programas_de_exemplo() {
         // E os do Marco 8, os que leem arquivos.
         ("leitor.rs", LEITOR_RS),
         ("listador.rs", LISTADOR_RS),
+        // E o do Marco 9, o que pede a hora.
+        ("hora.rs", HORA_RS),
     ] {
         assert!(
             GUIA.contains(codigo),
@@ -582,6 +585,10 @@ fn guia_cita_o_contrato_e_a_biblioteca() {
         "/ram",
         "run leitor",
         "run listador",
+        "run hora",
+        "SYS_TIME",
+        "time::now",
+        "UTC",
     ] {
         assert!(GUIA.contains(termo), "o guia nao cita `{}`", termo);
     }
@@ -598,6 +605,7 @@ fn nomes_de_programas_sao_unicos_e_ordenados() {
         "eco2",
         "falha_memoria",
         "hello",
+        "hora",
         "leitor",
         "listador",
         "ping",

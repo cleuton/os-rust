@@ -27,9 +27,10 @@ use crate::{gdt, memory, vga_buffer};
 // programas: os números nunca divergem entre kernel e programas. O texto do
 // contrato é o `SYSCALLS.md`.
 pub use abi::{
-    DirEntryRaw, ERR_BADF, ERR_FAULT, ERR_INVAL, ERR_IO, ERR_MFILE, ERR_NAMETOOLONG, ERR_NODEV,
-    ERR_NOENT, ERR_NOMEM, ERR_TYPE, IO_MAX_LEN, SYS_ALLOC, SYS_CLOSE, SYS_EXIT, SYS_OPEN,
-    SYS_READ, SYS_READ_DIR, SYS_READ_LINE, SYS_WRITE, SYS_YIELD,
+    DateTime, DirEntryRaw, ERR_BADF, ERR_CLOCK, ERR_FAULT, ERR_INVAL, ERR_IO, ERR_MFILE,
+    ERR_NAMETOOLONG, ERR_NODEV, ERR_NOENT, ERR_NOMEM, ERR_TYPE, IO_MAX_LEN, SYS_ALLOC, SYS_CLOSE,
+    SYS_EXIT, SYS_OPEN, SYS_READ, SYS_READ_DIR, SYS_READ_LINE, SYS_TIME, SYS_WRITE, SYS_YIELD,
+    TIME_SIZE,
 };
 use abi::{DIR_ENTRY_SIZE, KIND_DIR, KIND_FILE, MAX_PATH_LEN};
 
@@ -196,6 +197,7 @@ extern "C" fn syscall_dispatch(ctx: &mut TaskContext) {
         SYS_READ => ctx.rax = sys_read(a1, a2, a3) as u64,
         SYS_CLOSE => ctx.rax = sys_close(a1) as u64,
         SYS_READ_DIR => ctx.rax = sys_read_dir(a1, a2, a3) as u64,
+        SYS_TIME => ctx.rax = sys_time(a1, a2) as u64,
         _ => scheduler::terminate_current(Termination::BadSyscall { number: nr }),
     }
 }
@@ -438,6 +440,30 @@ fn sys_read_dir(fd: u64, ptr: u64, len: u64) -> i64 {
     1
 }
 
+/// `time(ptr, len)` (`SYSCALLS.md`, seção 5, `SYS_TIME`): escreve em `ptr` um
+/// `DateTime` (a data e a hora atuais, em UTC) e devolve `0`. Confere nesta
+/// ordem: o tamanho (`ERR_INVAL` se `len != TIME_SIZE`), o ponteiro
+/// (`ERR_FAULT`) e, por último, o relógio (`ERR_CLOCK`). Assim um buffer ruim
+/// é recusado sem nem tocar no chip.
+fn sys_time(ptr: u64, len: u64) -> i64 {
+    if len != TIME_SIZE as u64 {
+        return ERR_INVAL;
+    }
+    if let Err(code) = validate_user_range(ptr, len, true) {
+        return code;
+    }
+    let time = match crate::rtc::read() {
+        Ok(time) => time,
+        Err(_) => return ERR_CLOCK,
+    };
+    // SAFETY: `ptr..ptr + TIME_SIZE` foi validado acima (mapeado, do usuário e
+    // gravável); `DateTime` é `repr(C)` de `TIME_SIZE` bytes (conferido por uma
+    // asserção na crate `abi`); a escrita não exige alinhamento
+    // (`write_unaligned`).
+    unsafe { core::ptr::write_unaligned(ptr as *mut DateTime, time) };
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,6 +493,7 @@ mod tests {
         assert!(CONTRATO.contains(&format!("| {} | `SYS_READ` |", SYS_READ)));
         assert!(CONTRATO.contains(&format!("| {} | `SYS_CLOSE` |", SYS_CLOSE)));
         assert!(CONTRATO.contains(&format!("| {} | `SYS_READ_DIR` |", SYS_READ_DIR)));
+        assert!(CONTRATO.contains(&format!("| {} | `SYS_TIME` |", SYS_TIME)));
     }
 
     #[test_case]
@@ -506,6 +533,7 @@ mod tests {
         assert!(CONTRATO.contains(&format!("| `ERR_MFILE` | `{}` |", ERR_MFILE)));
         assert!(CONTRATO.contains(&format!("| `ERR_NAMETOOLONG` | `{}` |", ERR_NAMETOOLONG)));
         assert!(CONTRATO.contains(&format!("| `ERR_IO` | `{}` |", ERR_IO)));
+        assert!(CONTRATO.contains(&format!("| `ERR_CLOCK` | `{}` |", ERR_CLOCK)));
         assert!(CONTRATO.contains(&format!("`len > {}`", IO_MAX_LEN)));
     }
 
@@ -545,9 +573,55 @@ mod tests {
     }
 
     #[test_case]
-    fn contrato_declara_a_versao_4() {
-        assert!(CONTRATO.contains("**Versão do contrato**: 4"));
-        assert!(CONTRATO.contains("os-rust 0.8.0 (Marco 8)"));
+    fn contrato_declara_a_versao_5() {
+        assert!(CONTRATO.contains("**Versão do contrato**: 5"));
+        assert!(CONTRATO.contains("os-rust 0.9.0 (Marco 9)"));
+    }
+
+    #[test_case]
+    fn contrato_descreve_a_syscall_de_hora() {
+        assert_eq!(SYS_TIME, 10);
+        assert_eq!(ERR_CLOCK, -11);
+        assert_eq!(TIME_SIZE, 8);
+        assert!(CONTRATO.contains("### `SYS_TIME` (10)"));
+        assert!(CONTRATO.contains(&format!("`len != {}` (`TIME_SIZE`)", TIME_SIZE)));
+        assert!(CONTRATO.contains("sempre UTC") || CONTRATO.contains("em UTC"));
+        // O erro novo não repete nenhum código antigo.
+        for antigo in [ERR_FAULT, ERR_INVAL, ERR_NOMEM, ERR_NOENT, ERR_NODEV, ERR_TYPE, ERR_BADF, ERR_MFILE, ERR_NAMETOOLONG, ERR_IO] {
+            assert_ne!(ERR_CLOCK, antigo);
+        }
+    }
+
+    #[test_case]
+    fn contrato_descreve_o_layout_do_datetime() {
+        assert_eq!(core::mem::size_of::<DateTime>(), TIME_SIZE);
+        assert_eq!(core::mem::offset_of!(DateTime, year), 0);
+        assert_eq!(core::mem::offset_of!(DateTime, month), 2);
+        assert_eq!(core::mem::offset_of!(DateTime, day), 3);
+        assert_eq!(core::mem::offset_of!(DateTime, hour), 4);
+        assert_eq!(core::mem::offset_of!(DateTime, minute), 5);
+        assert_eq!(core::mem::offset_of!(DateTime, second), 6);
+        assert_eq!(core::mem::offset_of!(DateTime, _pad), 7);
+        for linha in [
+            "| 0 | 2 | ano completo",
+            "| 2 | 1 | mês",
+            "| 3 | 1 | dia",
+            "| 4 | 1 | hora",
+            "| 5 | 1 | minuto",
+            "| 6 | 1 | segundo",
+            "| 7 | 1 | zero",
+        ] {
+            assert!(CONTRATO.contains(linha), "contrato sem a linha: {}", linha);
+        }
+    }
+
+    #[test_case]
+    fn sys_time_recusa_tamanho_errado_antes_de_olhar_o_ponteiro() {
+        assert_eq!(sys_time(0, 7), ERR_INVAL);
+        assert_eq!(sys_time(0, 9), ERR_INVAL);
+        assert_eq!(sys_time(0, 0), ERR_INVAL);
+        // Tamanho certo, ponteiro do kernel (fora da região do usuário).
+        assert_eq!(sys_time(0x4444_4444_0000, 8), ERR_FAULT);
     }
 
     #[test_case]

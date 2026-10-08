@@ -10,6 +10,7 @@ extern crate alloc;
 
 pub mod allocator;
 pub mod ata;
+pub mod rtc;
 pub mod blockdev;
 pub mod fat;
 pub mod fs;

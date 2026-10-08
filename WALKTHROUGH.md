@@ -1537,5 +1537,141 @@ um `ProgramName`, uma cópia de até 16 bytes que mora dentro da própria `Task`
 Escrita, criação e remoção de arquivos, nomes longos de FAT, atributos,
 permissões e datas, partições, mais de um disco, cache de blocos, DMA e
 interrupção de disco, e leitura em streaming de um executável continuam fora do
-escopo. O driver ATA existe para servir o sistema de arquivos e não antecipa o
-modelo geral de drivers do Marco 9.
+escopo. O driver ATA existe para servir o sistema de arquivos; a escrita fica
+para os Marcos 10 (ramdisk) e 11 (disco ATA).
+
+## Marco 9: o relógio de tempo real
+
+O os-rust já tinha quatro drivers sem ter usado a palavra: o texto VGA, a porta
+serial, o teclado PS/2 e o disco ATA. O Marco 9 acrescenta o quinto, e escolhe o
+menor possível: o **relógio de tempo real** (RTC), o chip que mantém a data e a
+hora com uma bateria própria, mesmo com o computador desligado. Ele é pequeno,
+mas fecha o ciclo completo que o projeto sempre mostra: hardware, driver no
+kernel, syscall, biblioteca de runtime, programa de usuário. E esconde quatro
+armadilhas que valem a aula.
+
+### Duas portas e um índice
+
+O chip não está no espaço de memória: fica atrás de duas **portas de E/S**.
+Escreve-se em `0x70` o número do registrador que se quer e lê-se o valor em
+`0x71`. Os registradores que importam: `0x00` segundos, `0x02` minutos, `0x04`
+horas, `0x07` dia, `0x08` mês, `0x09` ano e `0x32` século, mais dois de estado,
+`0x0A` e `0x0B`. Toda a conversa com o hardware está em duas funções pequenas de
+`src/rtc.rs` (`cmos_read` e `read_regs_once`); o resto do driver é aritmética
+sobre valores já lidos, e por isso pode ser testado sem chip nenhum.
+
+Ao escolher o registrador, o driver mantém o bit 7 do índice desligado
+(`reg & 0x7F`): esse bit é a máscara da interrupção NMI na mesma porta, e este
+marco não tem motivo para mexer nela.
+
+### Primeira armadilha: BCD ou binário
+
+Em **BCD** (decimal codificado em binário), cada nibble guarda um dígito decimal:
+o número 26 vem como `0x26`, não como `0x1A`. Ler `0x26` como se fosse binário
+daria 38. O bit 2 do registrador `0x0B` diz qual formato o chip usa, e o driver
+trata os dois. Um nibble maior que 9 (`0x1A`) não é BCD válido, e o driver o
+recusa em vez de inventar um número.
+
+### Segunda armadilha: 12 ou 24 horas
+
+O bit 1 do `0x0B` escolhe o modo de 24 horas. No de 12 horas, o bit 7 do
+registrador de hora marca **PM** e a hora vai de 1 a 12. As regras que enganam:
+12 AM é a meia-noite (hora 0), 12 PM é o meio-dia (hora 12), e 1 PM a 11 PM
+somam 12. O driver separa o bit de PM do número antes de converter, e rejeita
+uma hora fora de 1 a 12 nesse modo.
+
+Com BCD e binário, 12 e 24 horas, são quatro combinações possíveis do mesmo
+chip, e o primeiro teste do driver confere que as quatro dão exatamente o mesmo
+instante.
+
+### Terceira armadilha: a janela de atualização
+
+Uma vez por segundo o chip reescreve os registradores, e isso leva um tempo. Se o
+driver ler no meio, pode pegar uma data misturada: 23:59:59 já com o dia
+incrementado, por exemplo. O bit 7 do registrador `0x0A` (UIP, *update in
+progress*) avisa que a atualização está em andamento.
+
+O driver faz duas coisas. Primeiro **espera o UIP baixar**, com um limite de
+100 000 consultas (um chip que nunca responde não pode travar o kernel; o erro é
+`indisponivel`). Segundo, **lê duas vezes e compara**: se as duas leituras são
+iguais, está confirmado; se diferem, o chip virou o segundo no meio, e tenta de
+novo, até 5 vezes. Se nunca estabilizar, o erro é `instavel`. Esperar o UIP não
+bastaria sozinho, porque a atualização pode começar logo depois da checagem; a
+segunda leitura é a prova. A função `read_consistent` recebe quem lê o chip como
+parâmetro, e é por isso que os testes simulam um chip que vira o segundo no meio.
+
+### Quarta armadilha: o ano tem dois dígitos
+
+O registrador `0x09` guarda só os dois últimos dígitos do ano: 2026 vem como 26.
+Alguns chips têm um registrador de **século** (`0x32`, que vale 20 em 2026);
+outros não, e ele vem zerado. Se o século existe e é válido, o ano é
+`século * 100 + ano`. Se não, o driver usa uma regra de reserva: de 70 a 99 é
+19xx, de 00 a 69 é 20xx. Assim 2026 aparece como `2026` e nunca como `0026`.
+
+### O que o driver valida, e o que não calcula
+
+Depois de converter, o driver confere as faixas (mês de 1 a 12, hora de 0 a 23,
+minuto e segundo de 0 a 59) e o dia contra o mês, considerando o ano bissexto:
+31 de fevereiro e 29 de fevereiro de 2025 não existem, e o driver devolve
+`relogio invalido` em vez de um valor impossível. Um ano é bissexto se for
+divisível por 4, exceto os séculos que não são divisíveis por 400 (2000 foi, 1900
+não). Isso é só **rejeitar**: o driver não calcula a virada de dia, de mês ou de
+ano, que vem do chip. E o kernel nunca entra em pânico por causa de um relógio
+ruim: o comando `data` mostra a mensagem, e a syscall devolve `ERR_CLOCK`.
+
+### Por que é polling, e não a interrupção do chip
+
+O RTC pode gerar uma interrupção (IRQ8) a cada segundo ou num alarme. Este marco
+não a usa: ler a hora sob demanda é mais simples, o PIC continua só com o timer e
+o teclado, e não há nada que precise acontecer *quando* o segundo vira. Quem
+quiser acordar um programa às 7h precisará da interrupção; quem só pergunta
+"que horas são?" não precisa.
+
+### Por que a leitura é atômica
+
+O par "escolher o registrador, ler o valor" não pode ser intercalado com outro
+par: se uma interrupção trocasse de programa entre os dois `out`/`in` e o outro
+programa também lesse o relógio, o valor lido seria o do registrador errado.
+`rtc::read` roda inteiro com as interrupções desligadas
+(`without_interrupts`), e a syscall já roda assim. Resultado: dois programas
+pedindo a hora ao mesmo tempo (`run hora hora`) nunca recebem um valor misturado.
+
+### Do chip ao programa: `data`, `SYS_TIME` e `hora`
+
+O caminho completo, de baixo para cima:
+
+1. `rtc::read()` devolve um `DateTime` (`abi`) ou um `RtcError`.
+2. O comando `data` (`src/shell.rs`) o escreve com `{}` e acrescenta ` UTC`.
+3. A syscall `SYS_TIME` (10, contrato versão 5) valida o tamanho (exatamente 8
+   bytes) e o ponteiro (pelo mesmo caminho das outras syscalls) e só então lê o
+   relógio e escreve o `DateTime` no buffer do programa. Um buffer ruim é
+   recusado sem nem tocar no chip.
+4. A biblioteca de runtime esconde a syscall atrás de `time::now()`.
+5. O programa `hora` chama `time::now()` e escreve o resultado.
+
+`DateTime` mora na crate `abi` porque kernel e runtime precisam concordar no
+layout dos 8 bytes (ano em 2 bytes, depois mês, dia, hora, minuto, segundo e um
+byte de alinhamento), e o `Display` mora junto, então `data` e `hora` mostram
+exatamente o mesmo texto.
+
+### Só UTC
+
+O QEMU entrega ao chip a hora do computador hospedeiro em UTC, e o kernel a
+mostra como veio, com o sufixo `UTC`. Fuso horário e horário de verão são
+política, não hardware, e ficam de fora: um programa que queira a hora local
+soma a diferença.
+
+### Como o marco é testado sem depender da hora real
+
+A conversão é testada com registradores fabricados (`src/rtc.rs`), sem tocar em
+porta alguma: as quatro combinações de formato, meia-noite e meio-dia, valores
+impossíveis, o século, o bissexto, e a repetição da leitura. Os testes dentro do
+QEMU (`tests/relogio.rs`) só conferem o que é verdade em qualquer dia: o ano está
+numa faixa plausível, e duas leituras seguidas não andam para trás.
+
+### O que ficou de fora
+
+Acertar o relógio (escrever no RTC), a interrupção IRQ8 e o alarme, fuso
+horário e horário de verão, e qualquer cálculo de calendário além de rejeitar
+datas que não existem. A escrita, aliás, volta a aparecer em outro lugar: os
+Marcos 10 e 11 ensinam o kernel a escrever em arquivos.

@@ -1,15 +1,16 @@
-//! Buffer de linha e prompt de comandos mínimo (`help`, `clear`, `echo`, `sobre`, `panic`, `mem`, `falha`, `ls`, `cat`, `run`).
+//! Buffer de linha e prompt de comandos mínimo (`help`, `clear`, `echo`, `sobre`, `panic`, `mem`, `falha`, `ls`, `cat`, `run`, `data`).
 
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-use abi::MAX_TASKS;
+use abi::{DateTime, MAX_TASKS};
 
 use crate::fat::Kind;
 use crate::fs::{self, FsError, OpenFile, VolumeId};
 use crate::keyboard::LINE_CAPACITY;
+use crate::rtc::{self, RtcError};
 use crate::user::{self, Finished, RunError, Termination};
 use crate::{
     allocator, interrupts, keyboard, memory, print, println, serial_println, vga_buffer, NAME,
@@ -41,6 +42,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ),
     ("ls", "lista um diretorio (ex.: ls /ram, ls /disco)"),
     ("cat", "mostra o conteudo de um arquivo (ex.: cat /ram/ola.txt)"),
+    ("data", "mostra a data e a hora (UTC) do relogio"),
     (
         "run",
         "executa programas embutidos ou arquivos, juntos (ex.: run hello, run ping pong, run /disco/bin/visita)",
@@ -175,6 +177,8 @@ fn execute(line: &str) {
         "ls" => cmd_ls(rest),
         "cat" => cmd_cat(rest),
         "run" => cmd_run(rest),
+        // Argumentos extras em `rest` são ignorados, como em `sobre`.
+        "data" => cmd_data(),
         _ => println!("comando desconhecido: {} (digite help)", name),
     }
 }
@@ -193,6 +197,21 @@ fn cmd_sobre() {
     println!("{}", VERSION);
     println!("{}: demonstracao de boot bare metal em Rust, sem SO por baixo.", NAME);
     println!("Boot via BIOS, saida VGA e teclado via IRQ1, tudo no mesmo binario.");
+}
+
+/// `data`: lê o relógio e mostra `AAAA-MM-DD HH:MM:SS UTC`, ou o motivo de não
+/// haver hora. Um relógio ruim nunca derruba o kernel.
+fn cmd_data() {
+    println!("{}", format_clock(rtc::read()));
+}
+
+/// O texto de `data` para um resultado do relógio. Separada de `cmd_data` para
+/// que a mensagem de erro seja testada sem depender do chip.
+fn format_clock(result: Result<DateTime, RtcError>) -> String {
+    match result {
+        Ok(time) => alloc::format!("{} UTC", time),
+        Err(error) => alloc::format!("data: {}", error),
+    }
 }
 
 fn cmd_panic() {
@@ -687,6 +706,52 @@ mod tests {
         assert!(vga_buffer::screen_contains("heap"));
         assert!(vga_buffer::screen_contains("Box"));
         assert!(vga_buffer::screen_contains("Vec"));
+    }
+
+    // --- data ---
+
+    fn t(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> DateTime {
+        DateTime { year, month, day, hour, minute, second, _pad: 0 }
+    }
+
+    #[test_case]
+    fn data_formata_com_zeros_a_esquerda_e_utc() {
+        assert_eq!(format_clock(Ok(t(2026, 10, 8, 15, 4, 5))), "2026-10-08 15:04:05 UTC");
+        assert_eq!(format_clock(Ok(t(2026, 1, 2, 3, 4, 5))), "2026-01-02 03:04:05 UTC");
+    }
+
+    #[test_case]
+    fn data_com_relogio_ruim_mostra_mensagem_clara_sem_hora() {
+        for (error, palavra) in [
+            (RtcError::Invalid, "invalido"),
+            (RtcError::Unstable, "instavel"),
+            (RtcError::Unavailable, "indisponivel"),
+        ] {
+            let texto = format_clock(Err(error));
+            assert!(texto.contains(palavra));
+            assert!(!texto.contains("UTC"));
+        }
+    }
+
+    #[test_case]
+    fn comando_data_mostra_uma_linha_no_formato() {
+        vga_buffer::clear_screen();
+        execute("data");
+        assert_eq!(vga_buffer::screen_count_clock_lines(), 1);
+    }
+
+    #[test_case]
+    fn comando_data_ignora_argumentos_extras() {
+        vga_buffer::clear_screen();
+        execute("data xyz abc");
+        assert_eq!(vga_buffer::screen_count_clock_lines(), 1);
+    }
+
+    #[test_case]
+    fn help_lista_o_comando_data() {
+        vga_buffer::clear_screen();
+        execute("help");
+        assert!(vga_buffer::screen_contains("data - mostra a data e a hora"));
     }
 
     #[test_case]

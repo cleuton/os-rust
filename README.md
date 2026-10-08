@@ -49,7 +49,7 @@ sistema de arquivos ou multitarefa completa.
 
 ## Status
 
-**Versão atual: 0.8.0.** Os Marcos 0 (boot em modo texto VGA, com
+**Versão atual: 0.9.0.** Os Marcos 0 (boot em modo texto VGA, com
 mensagem de boas-vindas, rolagem e tratamento de panic legível), 1
 (interrupções, teclado e prompt de comandos), 2 (infraestrutura de
 depuração: saída serial e testes automatizados dentro do QEMU), 3
@@ -66,15 +66,18 @@ sua memória, com troca de contexto cooperativa e preemptiva, demonstrada com
 `run ping pong` e `run contador_a contador_b`) e 8 (sistema de arquivos: um
 ramdisk e um disco ATA, ambos FAT16 somente leitura, com `ls`, `cat`, syscalls
 de arquivo e a execução de um programa lido do disco, demonstrada com `run
-/disco/bin/visita`) estão concluídos e são o que este repositório executa
-hoje. O Marco 9 continua planejado. A demonstração original de palestra, no
+/disco/bin/visita`) e 9 (driver de RTC: o kernel lê a data e a hora do
+relógio do computador, mostradas pelo comando `data` e oferecidas aos programas
+pela syscall `SYS_TIME`, com `run hora`) estão concluídos e são o que este
+repositório executa hoje. Os Marcos 10 e 11 (escrita em arquivos) estão
+planejados. A demonstração original de palestra, no
 formato usado em aula, está preservada na tag git `v1.0-demo` e continua
 podendo ser usada como está.
 
 ## Roadmap
 
 O os-rust avança em marcos numerados, cada um terminando em algo visível
-no QEMU. A tabela abaixo resume os onze primeiros marcos planejados; os
+no QEMU. A tabela abaixo resume os treze primeiros marcos planejados; os
 detalhes de cada um vêm na sequência.
 
 | Marco | Objetivo | Demonstrável | Status |
@@ -89,7 +92,9 @@ detalhes de cada um vêm na sequência.
 | 6. Interface de programação | Ampliar o contrato de syscalls (teclado, memória, código de saída) e oferecer uma biblioteca de runtime para quem escreve programas. | Um programa escrito por um aluno lê entrada do teclado e responde (`run eco`); um programa com acesso inválido à memória é encerrado sem derrubar o kernel (`run falha_memoria`). | Concluído |
 | 7. Multitarefa | Trocar de contexto entre mais de um programa carregado, primeiro de forma cooperativa e depois preemptiva. | Dois programas intercalando saída na tela (`run ping pong`, `run contador_a contador_b`). | Concluído |
 | 8. Sistema de arquivos | Ler arquivos de um sistema de arquivos, primeiro um ramdisk embutido e depois um driver de disco com leitura somente. | Listar arquivos e executar um programa lido do disco (`ls /ram`, `cat /ram/ola.txt`, `run /disco/bin/visita`). | Concluído |
-| 9. Drivers | Acrescentar suporte a periféricos adicionais dentro do escopo do projeto, um por marco. | Um novo periférico demonstrado funcionando no QEMU. | Planejado |
+| 9. Driver de RTC | Ler a data e a hora do relógio de tempo real (chip CMOS) por polling e oferecê-las ao prompt e aos programas de usuário por uma syscall nova. | `data` mostra a data e a hora em UTC; `run hora` mostra o mesmo, pedido ao kernel por um programa. | Concluído |
+| 10. Escrita no ramdisk | Escrever em FAT16, criando, gravando, ampliando e apagando arquivos, aplicado ao volume `/ram`. | Criar um arquivo em `/ram`, mostrá-lo com `cat` e apagá-lo, também por programa de usuário. | Planejado |
+| 11. Escrita no disco ATA | Gravar setores no disco ATA e tornar o `/disco` gravável pela mesma camada de escrita, com persistência entre boots. | Gravar um arquivo em `/disco`, reiniciar o QEMU e ler o arquivo. | Planejado |
 
 ### Detalhes dos marcos
 
@@ -169,7 +174,7 @@ peça a vez; `run falha_memoria contador_a` encerra só quem falhou.
 Depende do Marco 5.
 
 **Marco 8. Sistema de arquivos.** Concluído. O kernel passa a ler arquivos,
-sempre **somente leitura**, de dois volumes FAT16 fixos: `/ram`, um ramdisk
+**somente leitura** (até o Marco 9; a escrita chega com os Marcos 10 e 11), de dois volumes FAT16 fixos: `/ram`, um ramdisk
 embutido na imagem de boot, e `/disco`, um disco ATA lido por PIO (portas de
 E/S, por polling, sem DMA e sem interrupção de disco). O mesmo leitor de FAT
 lê os dois, através de uma abstração mínima de dispositivo de blocos. Os
@@ -185,9 +190,42 @@ nunca o viu em tempo de compilação); `run leitor` e `run listador` leem o
 disco por syscalls. Sem o disco, o kernel dá boot normalmente e `ls /disco`
 diz que o volume está indisponível. Depende do Marco 5.
 
-**Marco 9. Drivers.** Periféricos adicionais dentro do escopo do projeto,
-um por marco. Demonstrável: um novo periférico funcionando, mostrado no
-QEMU. Depende do Marco 4.
+**Marco 9. Driver de RTC.** Concluído. O kernel passa a ter o quinto driver
+(depois de VGA, serial, teclado PS/2 e disco ATA): o relógio de tempo real, o
+chip CMOS que mantém a data e a hora com bateria própria. O chip é lido por
+duas portas de E/S (`0x70` escolhe o registrador, `0x71` entrega o valor), por
+polling, sem a interrupção IRQ8 e sem mexer no PIC. O driver trata valores em
+BCD ou binário, hora em 12 ou 24 horas, o ano de dois dígitos (com o registrador
+de século, quando existe), espera o fim da atualização que o chip faz a cada
+segundo e lê duas vezes até as leituras coincidirem, e rejeita datas
+impossíveis (mês 0, 31 de fevereiro). O kernel só conhece UTC: não há fuso
+horário. Uma syscall nova, `SYS_TIME` (contrato versão 5 do
+[`SYSCALLS.md`](SYSCALLS.md)), entrega a hora a um programa, e a biblioteca de
+runtime a esconde atrás de `time::now()`. Demonstrável: `data` mostra
+`AAAA-MM-DD HH:MM:SS UTC` e, alguns segundos depois, uma hora posterior; `run
+hora` mostra a mesma hora, pedida ao kernel por um programa. Depende do Marco 5.
+
+**Marco 10. Escrita no ramdisk.** Planejado. A primeira metade da escrita em
+arquivos, no volume que vive na memória e se perde ao reiniciar, onde errar não
+custa nada. Escopo: a camada de escrita do FAT16 (alocar e liberar clusters,
+atualizar as duas cópias da FAT, criar, gravar, ampliar e apagar arquivos),
+aplicada ao volume `/ram`; comandos de prompt para criar e apagar arquivos;
+syscalls novas de criação, escrita e remoção (contrato versão 6); um programa de
+exemplo que grava um arquivo e outro programa que o lê. O `/disco` continua
+somente leitura. Demonstrável: criar um arquivo em `/ram`, mostrá-lo com `cat` e
+apagá-lo, também por programa de usuário. Depende do Marco 8.
+
+**Marco 11. Escrita no disco ATA.** Planejado. A segunda metade: levar a mesma
+camada ao disco de verdade. Escopo: escrita de setores por PIO no driver ATA
+(incluindo o comando de descarga do cache do disco); o `/disco` gravável pela
+mesma camada do Marco 10; criação e remoção de diretórios; a ordem das escritas
+que mantém o volume consistente se for interrompida; e a persistência entre dois
+boots do QEMU sobre a mesma imagem, com a decisão de como o `build.rs` deixa de
+regenerar o disco quando o objetivo é preservá-lo (hoje ele o regenera a cada
+`cargo run`/`cargo test`, o que apagaria qualquer gravação). Os testes operam
+sempre sobre uma cópia da imagem. Contrato versão 7, se houver syscalls novas
+(por exemplo, de diretório). Demonstrável: gravar um arquivo em `/disco`,
+reiniciar o QEMU e ler o arquivo. Depende do Marco 10.
 
 ### Por que essa ordem
 
@@ -205,9 +243,9 @@ contrato de syscalls: números, semântica, convenções de registradores,
 códigos de erro, formato de executável, região de carga e pilha inicial)
 está documentada em um único arquivo versionado, [`SYSCALLS.md`](SYSCALLS.md),
 desde o Marco 5 (versão 1 do contrato: `write` e `exit`). A versão atual é a
-4, do Marco 8, que acrescenta ao que já havia (leitura de uma linha do
-teclado e memória, no Marco 6; ceder a CPU, no Marco 7) a leitura de arquivos
-(`SYS_OPEN`, `SYS_READ`, `SYS_CLOSE` e `SYS_READ_DIR`). Ele é a única fonte dessa
+5, do Marco 9, que acrescenta ao que já havia (leitura de uma linha do
+teclado e memória, no Marco 6; ceder a CPU, no Marco 7; leitura de arquivos,
+no Marco 8) a hora (`SYS_TIME`). Ele é a única fonte dessa
 interface: nenhuma syscall existe sem estar nele, e um teste automatizado
 confere que o texto continua batendo com o código. Uma mudança incompatível
 no contrato aumenta a versão dele e exige atualizar, no mesmo marco, a
@@ -319,7 +357,7 @@ projeto (`x86_64-os_rust.json`), gerar uma imagem de boot com `bootimage`,
 e abrir uma janela do QEMU que dá boot via BIOS direto nesse binário. Em
 poucos segundos você deve ver o logo do os-rust (as 20 linhas do símbolo
 e do nome, no topo da tela), seguido da linha de identificação
-`os-rust v0.8.0` — a versão atual do projeto — e do prompt `os-rust> `
+`os-rust v0.9.0` — a versão atual do projeto — e do prompt `os-rust> `
 pronto para digitação, não um terminal comum.
 
 O mesmo `cargo run` também compila a biblioteca de runtime (`runtime/`) e
@@ -359,9 +397,10 @@ Não é preciso nenhum passo manual adicional para isso: é o mesmo
 | `falha <tipo>` | Provoca uma exceção de CPU de propósito: `pagina` (`#PF`), `pilha` (`#DF`), `opcode` (`#UD`), `protecao` (`#GP`) ou `breakpoint` (`#BP`); sem argumento ou com um tipo desconhecido, lista os tipos disponíveis |
 | `ls <caminho>` | Lista as entradas de um diretório (tipo, tamanho e nome), por exemplo `ls /ram` ou `ls /disco/docs`; sem argumento mostra o uso e o estado dos volumes; caminho inexistente, arquivo no lugar de diretório e volume indisponível dão uma mensagem clara |
 | `cat <caminho>` | Mostra o conteúdo de um arquivo, por exemplo `cat /ram/ola.txt` (bytes fora do ASCII imprimível aparecem como `■`); mesmas mensagens de erro de `ls` |
+| `data` | Mostra a data e a hora do relógio do computador, em UTC, no formato `AAAA-MM-DD HH:MM:SS UTC`; se o relógio estiver inválido ou não responder, mostra uma mensagem clara. Argumentos extras são ignorados |
 | `run <alvo> [<alvo>...]` | Executa programas de usuário em modo usuário (ring 3), até 4 ao mesmo tempo (o mesmo alvo pode se repetir), e volta ao prompt quando o último termina. Um alvo que começa com `/` é o caminho de um executável ELF64 (até 64 KiB) lido de um volume, como `/disco/bin/visita`; qualquer outro é o nome de um programa embutido na imagem. Os dois se misturam (`run /disco/bin/visita hello`). Sem argumento, com um alvo inválido ou com mais de 4 alvos, não inicia nenhum |
 
-### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador` e `visita`
+### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora` e `visita`
 
 O comando `run` executa programas escritos fora do kernel. Cada um vive em
 `programs/src/bin/` e é compilado como um executável ELF64 estático:
@@ -408,6 +447,10 @@ O comando `run` executa programas escritos fora do kernel. Cada um vive em
   tempo, cada um com a sua posição de leitura.
 - **`listador`** (`run listador`): lista a raiz do disco, uma entrada por linha
   (`dir 0 bin`, `dir 0 docs`, `arquivo <tamanho> leiame.txt`).
+- **`hora`** (`run hora`): pede a data e a hora ao kernel (syscall `SYS_TIME`,
+  por `time::now()`) e as escreve como `AAAA-MM-DD HH:MM:SS UTC`, o mesmo
+  formato do comando `data`; se o relógio estiver inválido, escreve `hora:
+  relogio invalido` e sai com o código 1.
 - **`visita`** (`run /disco/bin/visita`): escreve `visita: fui carregado do
   disco!`. Ele existe **só no disco**: o fonte fica em `programs/src/disco/`,
   fora de `programs/src/bin/`, então não entra na lista de `run` sem argumento
@@ -563,6 +606,28 @@ suíte automatizada (`cargo test`) cobre, além dos testes anteriores:
   16. `src/shell.rs`: `run` lista `eco` e `falha_memoria`, e `#PF` de
   programa mostra `erro de memoria`.
 
+### O que os testes do Marco 9 cobrem
+
+Para conferir à mão, rode `cargo run`, digite `data`, espere alguns segundos e
+digite `data` de novo (a segunda hora é posterior; compare com `date -u` no
+computador), depois `run hora` (a mesma hora, com diferença de segundos).
+A suíte automatizada (`cargo test`) cobre, além dos testes anteriores, sem
+depender da hora real:
+
+- `src/rtc.rs`: a conversão sobre registradores fabricados: BCD e binário, 12 e
+  24 horas (as quatro combinações dão o mesmo instante), meia-noite e
+  meio-dia, campos impossíveis, dia contra o mês e o ano bissexto, a regra do
+  século, e a repetição da leitura quando o chip está atualizando (incluindo a
+  desistência depois de 5 tentativas);
+- `src/shell.rs`: o comando `data` (formato, mensagens de erro, argumentos
+  extras ignorados) e a presença em `help`;
+- `src/syscall.rs`: o contrato versão 5 bate com o código (número, erro,
+  layout de 8 bytes);
+- `tests/relogio.rs` (dentro do QEMU): leitura em faixa plausível e sem andar
+  para trás, `SYS_TIME` com buffer válido, tamanho errado e ponteiro inválido,
+  `run hora`, dois `hora` ao mesmo tempo, e os programas dos marcos anteriores;
+- `tests/user_runtime.rs`: o código de `hora` no guia é idêntico ao do repositório.
+
 ### O que os testes do Marco 8 cobrem
 
 Para conferir à mão, rode `cargo run` e a demonstração da seção **Arquivos**
@@ -713,26 +778,28 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   não confiável (cadeias com limite de passos, números de cluster validados).
 - `src/ata.rs`: o driver de disco ATA por PIO e polling, com limite de espera e
   detecção de ausência, atômico em relação ao escalonador.
+- `src/rtc.rs`: o driver do relógio de tempo real (portas `0x70`/`0x71`, BCD e
+  binário, 12 e 24 horas, janela de atualização, século), por polling.
 - `src/fs.rs`: os volumes `/ram` e `/disco`, os caminhos e a tabela de arquivos
   abertos de cada programa.
 - `src/syscall.rs`: o mecanismo `syscall` (entrada pela instrução, retorno por
   `iretq`), o despachante e as syscalls `write`, `exit`, `read_line`, `alloc`,
-  `yield`, `open`, `read`, `close` e `read_dir`.
+  `yield`, `open`, `read`, `close`, `read_dir` e `time`.
 - `src/programs.rs`: a tabela dos programas embutidos, gerada pelo
   `build.rs`.
 - `src/allocator.rs`: a faixa fixa de endereços virtuais do heap, o
   alocador global (`Box`, `Vec`, `String`, ...) e o tratamento de heap
   esgotado.
 - `src/shell.rs`: o buffer de linha e o prompt de comandos (`help`,
-  `clear`, `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `ls`, `cat`, `run <alvo>`).
+  `clear`, `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `ls`, `cat`, `data`, `run <alvo>`).
 - `abi/`: as constantes do contrato de syscalls (números, erros, limites),
   compartilhadas pelo kernel e pela biblioteca de runtime.
 - `runtime/`: a biblioteca de runtime dos programas de usuário (`entry!`,
-  `print!`/`println!`, `read_line`, `yield_now`, `File`/`Dir` para ler arquivos,
+  `print!`/`println!`, `read_line`, `yield_now`, `File`/`Dir` para ler arquivos, `time::now()`,
   alocador global, tratador de `panic`).
 - `programs/`: a crate dos programas de usuário (`hello`, `crash`, `eco`,
   `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`,
-  `listador`, um arquivo por programa em `src/bin/`, mais `visita` em
+  `listador`, `hora`, um arquivo por programa em `src/bin/`, mais `visita` em
   `src/disco/`, que só vai para o disco), com o linker
   script (`link.ld`); compilada para o target de usuário pelo `build.rs` da
   raiz, nunca diretamente.
