@@ -1,3 +1,5 @@
+[ENGLISH VERSION](PROGRAMMERS_GUIDE.md)
+
 # Guia do Programador - os-rust
 
 Este guia é para quem quer escrever um programa que roda dentro do os-rust, sem precisar entender o kernel por dentro. Se você quer saber como o boot, a memória ou as interrupções funcionam, o documento certo é o `WALKTHROUGH.md`. Este aqui assume que você só quer escrever código que rode em modo usuário, usando a biblioteca de runtime do projeto.

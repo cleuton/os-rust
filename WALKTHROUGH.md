@@ -1,3 +1,5 @@
+[ENGLISH VERSION](WALKTHROUGH.en.md)
+
 # Como o os-rust funciona (para quem nunca viu um sistema operacional)
 
 Este texto explica, sem pressupor nenhum conhecimento prévio de sistemas

@@ -1,3 +1,5 @@
+[ENGLISH VERSION](README.en.md)
+
 # os-rust
 
 ```text
@@ -49,7 +51,9 @@ sistema de arquivos ou multitarefa completa.
 
 ## Status
 
-**Versão atual: 0.9.0.** Os Marcos 0 (boot em modo texto VGA, com
+A documentação do projeto também está disponível em inglês (veja o link `ENGLISH VERSION` no início de cada arquivo `.md`).
+
+**Versão atual: 0.9.1.** Os Marcos 0 (boot em modo texto VGA, com
 mensagem de boas-vindas, rolagem e tratamento de panic legível), 1
 (interrupções, teclado e prompt de comandos), 2 (infraestrutura de
 depuração: saída serial e testes automatizados dentro do QEMU), 3
@@ -357,7 +361,7 @@ projeto (`x86_64-os_rust.json`), gerar uma imagem de boot com `bootimage`,
 e abrir uma janela do QEMU que dá boot via BIOS direto nesse binário. Em
 poucos segundos você deve ver o logo do os-rust (as 20 linhas do símbolo
 e do nome, no topo da tela), seguido da linha de identificação
-`os-rust v0.9.0` — a versão atual do projeto — e do prompt `os-rust> `
+`os-rust v0.9.1` — a versão atual do projeto — e do prompt `os-rust> `
 pronto para digitação, não um terminal comum.
 
 O mesmo `cargo run` também compila a biblioteca de runtime (`runtime/`) e

@@ -1,9 +1,17 @@
+[ENGLISH VERSION](CHANGELOG.en.md)
+
 # Changelog
 
 Todas as mudanças notáveis deste projeto são registradas neste arquivo,
 uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
+
+## [0.9.1] - 2026-10-08
+
+### Adicionado
+
+- Versão em inglês da documentação.
 
 ## [0.9.0] - 2026-10-08
 

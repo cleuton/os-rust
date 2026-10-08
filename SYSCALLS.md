@@ -1,3 +1,5 @@
+[ENGLISH VERSION](SYSCALLS.en.md)
+
 # Contrato de syscalls do os-rust
 
 **Versão do contrato**: 5
