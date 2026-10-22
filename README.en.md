@@ -51,7 +51,7 @@ multitasking.
 
 The project documentation is also available in English (see the `ENGLISH VERSION` link at the top of each `.md` file).
 
-**Current version: 0.9.1.** Milestones 0 (boot in VGA text mode, with a
+**Current version: 0.9.2.** Milestones 0 (boot in VGA text mode, with a
 welcome message, scrolling and readable panic handling), 1 (interrupts,
 keyboard and command prompt), 2 (debugging infrastructure: serial output
 and automated tests inside QEMU), 3 (memory: physical frame allocator,
@@ -360,7 +360,7 @@ This will: compile the kernel for this project's custom bare-metal target
 QEMU window that boots via BIOS straight into that binary. Within a few
 seconds you should see the os-rust logo (the 20 lines of the symbol and the
 name, at the top of the screen), followed by the identification line
-`os-rust v0.9.1` — the project's current version — and the `os-rust> `
+`os-rust v0.9.2` — the project's current version — and the `os-rust> `
 prompt ready for typing, not an ordinary terminal.
 
 The same `cargo run` also compiles the runtime library (`runtime/`) and the
@@ -401,7 +401,7 @@ is needed for this: it is the same `cargo run` as always.
 | `data` | Shows the date and time of the computer's clock, in UTC, in the format `AAAA-MM-DD HH:MM:SS UTC`; if the clock is invalid or does not respond, shows a clear message. Extra arguments are ignored |
 | `run <target> [<target>...]` | Executes user programs in user mode (ring 3), up to 4 at the same time (the same target may repeat), and returns to the prompt when the last one ends. A target that starts with `/` is the path of an ELF64 executable (up to 64 KiB) read from a volume, like `/disco/bin/visita`; any other is the name of a program embedded in the image. The two can be mixed (`run /disco/bin/visita hello`). With no argument, with an invalid target or with more than 4 targets, it starts none |
 
-### User programs: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora` and `visita`
+### User programs: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `visita` and `labirint`
 
 The `run` command executes programs written outside the kernel. Each one
 lives in `programs/src/bin/` and is compiled as a static ELF64 executable:
@@ -458,13 +458,32 @@ lives in `programs/src/bin/` and is compiled as a static ELF64 executable:
   disco!`. It exists **only on the disk**: the source is in
   `programs/src/disco/`, outside `programs/src/bin/`, so it is neither in
   the list of `run` with no argument nor in the kernel image.
+- **`labirint`** (`run /disco/bin/labirint`): generates and solves an ASCII
+  maze. It asks for the rows (2 to 7, Enter = 5) and the columns (2 to 26,
+  Enter = 10), draws the maze, waits for Enter and draws the same maze with
+  the path marked with `*`. An empty answer uses the default; an invalid
+  answer writes `valor invalido, usando N` and uses the default. Like
+  `visita`, it exists **only on the disk**. The name has 8 letters because of
+  FAT's 8.3 (`labirinto` would have 9). It is the port of a plain Rust program
+  (`std` and the `rand` crate), and what changed is marked in the source
+  comments:
+
+  | # | In the original | In `labirint` |
+  |---|---|---|
+  | A | `rand::thread_rng()` and `gen_range` | `Aleatorio` struct (xorshift64), seeded with the kernel's time |
+  | B | `std::env::args()` for rows and columns | two questions with `read_line` (`run` passes no arguments) |
+  | C | `fn main()` with `std`'s `println!` | `#![no_std]`, `#![no_main]`, `entry!(main)` and `runtime`'s `print!`/`println!` |
+
+  Two behavior changes exist only because of the 80x25 screen: the size is
+  limited (2 to 7 rows, 2 to 26 columns) and the program waits for Enter
+  between the maze and the solution.
 
 ### Files: the `/ram` and `/disco` volumes
 
 The contents of the two volumes come from the repository's `discos/`
 directory (`discos/ram/` and `discos/disco/`), turned into a FAT16 image
 during `cargo run`/`cargo test`; the disk also receives the `visita`
-executable and a 65,537-byte file (`docs/grande.bin`) that exists only to
+and `labirint` executables and a 65,537-byte file (`docs/grande.bin`) that exists only to
 prove the rejection of an executable that is too large. A path is
 `/<volume>/<component>/...`, with 8.3 names (up to 8 characters, a dot and
 up to 3 of extension), case-insensitive, at most 64 bytes and 8 levels; `.`

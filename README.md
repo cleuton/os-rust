@@ -53,7 +53,7 @@ sistema de arquivos ou multitarefa completa.
 
 A documentação do projeto também está disponível em inglês (veja o link `ENGLISH VERSION` no início de cada arquivo `.md`).
 
-**Versão atual: 0.9.1.** Os Marcos 0 (boot em modo texto VGA, com
+**Versão atual: 0.9.2.** Os Marcos 0 (boot em modo texto VGA, com
 mensagem de boas-vindas, rolagem e tratamento de panic legível), 1
 (interrupções, teclado e prompt de comandos), 2 (infraestrutura de
 depuração: saída serial e testes automatizados dentro do QEMU), 3
@@ -361,7 +361,7 @@ projeto (`x86_64-os_rust.json`), gerar uma imagem de boot com `bootimage`,
 e abrir uma janela do QEMU que dá boot via BIOS direto nesse binário. Em
 poucos segundos você deve ver o logo do os-rust (as 20 linhas do símbolo
 e do nome, no topo da tela), seguido da linha de identificação
-`os-rust v0.9.1` — a versão atual do projeto — e do prompt `os-rust> `
+`os-rust v0.9.2` — a versão atual do projeto — e do prompt `os-rust> `
 pronto para digitação, não um terminal comum.
 
 O mesmo `cargo run` também compila a biblioteca de runtime (`runtime/`) e
@@ -404,7 +404,7 @@ Não é preciso nenhum passo manual adicional para isso: é o mesmo
 | `data` | Mostra a data e a hora do relógio do computador, em UTC, no formato `AAAA-MM-DD HH:MM:SS UTC`; se o relógio estiver inválido ou não responder, mostra uma mensagem clara. Argumentos extras são ignorados |
 | `run <alvo> [<alvo>...]` | Executa programas de usuário em modo usuário (ring 3), até 4 ao mesmo tempo (o mesmo alvo pode se repetir), e volta ao prompt quando o último termina. Um alvo que começa com `/` é o caminho de um executável ELF64 (até 64 KiB) lido de um volume, como `/disco/bin/visita`; qualquer outro é o nome de um programa embutido na imagem. Os dois se misturam (`run /disco/bin/visita hello`). Sem argumento, com um alvo inválido ou com mais de 4 alvos, não inicia nenhum |
 
-### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora` e `visita`
+### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `visita` e `labirint`
 
 O comando `run` executa programas escritos fora do kernel. Cada um vive em
 `programs/src/bin/` e é compilado como um executável ELF64 estático:
@@ -459,12 +459,30 @@ O comando `run` executa programas escritos fora do kernel. Cada um vive em
   disco!`. Ele existe **só no disco**: o fonte fica em `programs/src/disco/`,
   fora de `programs/src/bin/`, então não entra na lista de `run` sem argumento
   nem na imagem do kernel.
+- **`labirint`** (`run /disco/bin/labirint`): gera e resolve um labirinto em
+  ASCII. Pergunta as linhas (2 a 7, Enter = 5) e as colunas (2 a 26, Enter =
+  10), desenha o labirinto, espera um Enter e desenha o mesmo labirinto com o
+  caminho marcado com `*`. Uma resposta vazia usa o padrão; uma resposta
+  inválida escreve `valor invalido, usando N` e usa o padrão. Como `visita`,
+  existe **só no disco**. O nome tem 8 letras por causa do 8.3 do FAT (com
+  `labirinto` seriam 9). É o port de um programa de Rust comum (`std` e a
+  crate `rand`), e o que mudou está marcado nos comentários do fonte:
+
+  | # | No original | No `labirint` |
+  |---|---|---|
+  | A | `rand::thread_rng()` e `gen_range` | struct `Aleatorio` (xorshift64), semeada pela hora do kernel |
+  | B | `std::env::args()` para linhas e colunas | duas perguntas com `read_line` (`run` não passa argumentos) |
+  | C | `fn main()` com `println!` do `std` | `#![no_std]`, `#![no_main]`, `entry!(main)` e `print!`/`println!` do `runtime` |
+
+  Duas mudanças de comportamento existem só por causa da tela de 80x25: o
+  tamanho é limitado (2 a 7 linhas, 2 a 26 colunas) e o programa espera um
+  Enter entre o labirinto e a solução.
 
 ### Arquivos: os volumes `/ram` e `/disco`
 
 O conteúdo dos dois volumes vem do diretório `discos/` do repositório
 (`discos/ram/` e `discos/disco/`), transformado em imagem FAT16 durante o
-`cargo run`/`cargo test`; o disco ainda recebe o executável `visita` e um
+`cargo run`/`cargo test`; o disco ainda recebe os executáveis `visita` e `labirint` e um
 arquivo de 65 537 bytes (`docs/grande.bin`) que existe só para provar a recusa
 de um executável grande demais. Um caminho é `/<volume>/<componente>/...`, com
 nomes 8.3 (até 8 caracteres, ponto e até 3 de extensão), sem diferenciar

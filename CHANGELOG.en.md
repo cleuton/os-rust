@@ -5,6 +5,23 @@ at a time. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/), and the versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.2] - 2026-10-22
+
+Maintenance release: no new milestone, no kernel change and no syscall
+contract change (it stays at version 5).
+
+### Added
+
+- `labirint` example program, which exists only on the disk
+  (`/disco/bin/labirint`): the port of `labirinto_demo` (an ASCII maze
+  generator and solver, previously plain Rust with `std` and `rand`). It asks
+  for the rows (2 to 7) and the columns (2 to 26), draws the maze, waits for
+  Enter and draws the same maze with the path marked with `*`. Randomness
+  comes from its own xorshift64 generator, seeded with the kernel's time.
+- `build.rs` writes the ELF to `/disco/bin/labirint` and fails if it exceeds
+  `MAX_EXEC_SIZE`.
+- A new integration test in `tests/sistema_de_arquivos.rs`.
+
 ## [0.9.1] - 2026-10-08
 
 ### Added

@@ -119,8 +119,8 @@ const MAX_EXEC_SIZE: usize = 65536;
 ///
 /// - `OUT_DIR/ramdisk.img`: `discos/ram/` mais `bin/hello` (cópia do ELF
 ///   `hello`); o kernel a embute com `include_bytes!`;
-/// - `target/imagens/disco.img`: `discos/disco/` mais `bin/visita` (o programa
-///   que só existe no disco) e `docs/grande.bin`; o QEMU a recebe como
+/// - `target/imagens/disco.img`: `discos/disco/` mais `bin/visita` e
+///   `bin/labirint` (os programas que só existem no disco) e `docs/grande.bin`; o QEMU a recebe como
 ///   disco de dados (ver `Cargo.toml`, `[package.metadata.bootimage]`);
 /// - `target/imagens/corrompido.img`: o disco com o setor de boot zerado, para
 ///   os testes provarem que um volume inválido é recusado.
@@ -141,6 +141,17 @@ fn generate_images(root: &Path, out_dir: &Path, built_dir: &Path) {
     disco.dir("bin").unwrap_or_else(|e| panic!("disco: cria bin: {e:?}"));
     let visita = fs::read(built_dir.join("visita")).expect("le o ELF de visita");
     disco.file("bin/visita", &visita).unwrap_or_else(|e| panic!("disco: grava bin/visita: {e:?}"));
+    // `labirint` é o segundo programa que só existe no disco. Se o ELF passar
+    // do limite de `run`, o build para aqui: nunca sai um disco com um
+    // programa que `run` recusa.
+    let labirint = fs::read(built_dir.join("labirint")).expect("le o ELF de labirint");
+    assert!(
+        labirint.len() <= MAX_EXEC_SIZE,
+        "labirint: o ELF tem {} bytes e `run` aceita no maximo {} (MAX_EXEC_SIZE)",
+        labirint.len(),
+        MAX_EXEC_SIZE
+    );
+    disco.file("bin/labirint", &labirint).unwrap_or_else(|e| panic!("disco: grava bin/labirint: {e:?}"));
     disco
         .file("docs/grande.bin", &vec![0u8; MAX_EXEC_SIZE + 1])
         .unwrap_or_else(|e| panic!("disco: grava docs/grande.bin: {e:?}"));

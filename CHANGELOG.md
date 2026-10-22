@@ -7,6 +7,23 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.9.2] - 2026-10-22
+
+Versão de manutenção: sem marco novo, sem mudança de kernel e sem mudança de
+contrato de syscalls (continua na versão 5).
+
+### Adicionado
+
+- Programa de exemplo `labirint`, que existe só no disco
+  (`/disco/bin/labirint`): o port do `labirinto_demo` (gerador e resolvedor de
+  labirinto em ASCII, antes Rust comum com `std` e `rand`). Pergunta as linhas
+  (2 a 7) e as colunas (2 a 26), desenha o labirinto, espera um Enter e desenha
+  o mesmo labirinto com o caminho marcado com `*`. O sorteio usa um gerador
+  xorshift64 próprio, semeado pela hora do kernel.
+- O `build.rs` grava o ELF em `/disco/bin/labirint` e falha se ele passar de
+  `MAX_EXEC_SIZE`.
+- Teste de integração novo em `tests/sistema_de_arquivos.rs`.
+
 ## [0.9.1] - 2026-10-08
 
 ### Adicionado

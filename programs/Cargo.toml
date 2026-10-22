@@ -22,3 +22,11 @@ runtime = { path = "../runtime" }
 [[bin]]
 name = "visita"
 path = "src/disco/visita.rs"
+
+# `labirint` também existe só no disco, no mesmo modelo de `visita`: fica em
+# `src/disco/`, fora de `src/bin/`, então NÃO entra na tabela de programas
+# embutidos nem no kernel. O mesmo `cargo build` o compila, e o `build.rs`
+# grava o ELF em `/disco/bin/labirint`.
+[[bin]]
+name = "labirint"
+path = "src/disco/labirint.rs"

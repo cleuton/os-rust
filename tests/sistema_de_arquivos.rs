@@ -48,7 +48,7 @@ use os_rust::user::{
 use os_rust::blockdev::{BlockDevice, BlockError, RamDisk};
 use os_rust::fat::Fat;
 use os_rust::fs::{Reason, VolumeId, VolumeState};
-use os_rust::{fs, memory, shell, user, vga_buffer};
+use os_rust::{fs, interrupts, keyboard, memory, shell, user, vga_buffer};
 use x86_64::VirtAddr;
 
 entry_point!(main);
@@ -822,4 +822,146 @@ fn cadeia_com_ciclo_e_cadeia_fora_do_volume_terminam_em_erro_de_io() {
         exige(&rodar_comando("cat /disco/docs/longo.txt"), "erro de leitura");
         exige(&rodar_comando("echo vivo"), "vivo");
     });
+}
+
+// ---------------------------------------------------------------------------
+// `labirint`: o programa de exemplo que existe só no disco
+// ---------------------------------------------------------------------------
+
+/// Esvazia a fila de scancodes e solta Shift: a fila e o estado de Shift são
+/// globais, então cada teste que digita para um programa começa do zero.
+fn reset_teclado() {
+    while interrupts::next_scancode().is_some() {}
+    keyboard::translate(0xAA); // Shift esquerdo solto
+    keyboard::translate(0xB6); // Shift direito solto
+}
+
+/// "Digita" `texto` na fila de scancodes do kernel, para o programa que vai
+/// rodar ler com `read_line`. Aceita letras minúsculas de `a` a `c`, dígitos e
+/// `\n`. A fila tem 16 posições: mais que isso é erro do teste.
+fn empurrar(texto: &str) {
+    assert!(texto.len() <= 16, "texto gera mais scancodes que a fila (16)");
+    for ch in texto.bytes() {
+        let scancode = match ch {
+            b'a' => 0x1E,
+            b'b' => 0x30,
+            b'c' => 0x2E,
+            b'1'..=b'9' => 0x02 + (ch - b'1'),
+            b'0' => 0x0B,
+            b'\n' => 0x1C,
+            _ => panic!("caractere sem scancode no teste: {:?}", ch as char),
+        };
+        interrupts::push_scancode(scancode);
+    }
+}
+
+/// As 25 linhas da tela, **inclusive as vazias**, sem os espaços do fim. O
+/// desenho do labirinto tem linhas vazias que precisam ser contadas.
+fn linhas_brutas() -> Vec<String> {
+    (0..25)
+        .map(|row| {
+            let texto: String = vga_buffer::screen_row_bytes(row)
+                .iter()
+                .map(|&b| if (0x20..=0x7e).contains(&b) { b as char } else { '?' })
+                .collect();
+            String::from(texto.trim_end())
+        })
+        .collect()
+}
+
+/// Limpa a tela, "digita" as respostas e roda `labirint`; devolve as 25 linhas.
+fn rodar_labirint(respostas: &str) -> Vec<String> {
+    reset_teclado();
+    vga_buffer::clear_screen();
+    empurrar(respostas);
+    digitar_no_prompt("run /disco/bin/labirint");
+    linhas_brutas()
+}
+
+/// As linhas do desenho que vem **depois** da pausa: entre a linha
+/// `Enter para ver a solucao` e o prompt que volta.
+fn desenho_depois_da_pausa(tela: &[String]) -> &[String] {
+    let pausa = tela
+        .iter()
+        .rposition(|linha| linha.contains("Enter para ver a solucao"))
+        .unwrap_or_else(|| panic!("a tela nao tem a pausa: {:?}", tela));
+    let fim = tela[pausa + 1..]
+        .iter()
+        .position(|linha| linha.starts_with("os-rust>"))
+        .map(|n| pausa + 1 + n)
+        .unwrap_or(tela.len());
+    &tela[pausa + 1..fim]
+}
+
+#[test_case]
+fn labirint_roda_do_disco_com_o_tamanho_padrao() {
+    // Enter nas duas perguntas e Enter na pausa.
+    let tela = rodar_labirint("\n\n\n");
+    let depois = desenho_depois_da_pausa(&tela);
+    // 5 linhas de células: `3 * 5` linhas de desenho mais a linha vazia que o
+    // `println!` acrescenta depois do `\n` final.
+    assert_eq!(depois.len(), 16, "desenho resolvido: {:?}", tela);
+    assert!(depois.iter().any(|linha| linha.contains('*')), "sem caminho: {:?}", tela);
+    // O programa terminou bem: sem pânico e sem código de saída diferente de 0.
+    let nao_vazias: Vec<String> = tela.iter().filter(|l| !l.is_empty()).cloned().collect();
+    assert!(!tem(&nao_vazias, "[panic]"), "{:?}", tela);
+    assert!(!tem(&nao_vazias, "terminou com codigo"), "{:?}", tela);
+
+    // O programa só existe no disco: aparece em `ls /disco/bin`, não no `run`.
+    let tela = rodar_comando("ls /disco/bin");
+    exige(&tela, "labirint");
+    exige(&tela, "visita");
+    let tela = rodar_comando("run");
+    assert!(!tem(&tela, "labirint"), "labirint nao pode ser embutido: {:?}", tela);
+}
+
+#[test_case]
+fn labirint_escolhe_e_valida_o_tamanho() {
+    // 3x3 cabe inteiro na tela (25 linhas), então dá para contar o desenho
+    // antes e depois da pausa: `3 * 3 + 1` linhas cada, e o `*` só aparece
+    // depois. (Não é 2x2 porque o gerador do programa original não garante
+    // caminho nesse tamanho: cerca de metade dos 2x2 saem sem solução. A partir
+    // de 3x3 o caminho sempre existe.)
+    let tela = rodar_labirint("3\n3\n\n");
+    let pausa = tela
+        .iter()
+        .rposition(|linha| linha.contains("Enter para ver a solucao"))
+        .unwrap_or_else(|| panic!("a tela nao tem a pausa: {:?}", tela));
+    let colunas = tela
+        .iter()
+        .rposition(|linha| linha.contains("colunas (2 a 26, Enter = 10):"))
+        .unwrap_or_else(|| panic!("a tela nao tem a pergunta de colunas: {:?}", tela));
+    let antes = &tela[colunas + 1..pausa];
+    assert_eq!(antes.len(), 10, "desenho antes da pausa: {:?}", tela);
+    assert!(!antes.iter().any(|linha| linha.contains('*')), "caminho antes da pausa: {:?}", tela);
+    let depois = desenho_depois_da_pausa(&tela);
+    assert_eq!(depois.len(), 10, "desenho depois da pausa: {:?}", tela);
+    assert!(depois.iter().any(|linha| linha.contains('*')), "sem caminho: {:?}", tela);
+
+    // O menor tamanho (2x2) é desenhado e o programa termina bem. Não se exige
+    // `*`: ver o comentário acima.
+    let tela = rodar_labirint("2\n2\n\n");
+    assert_eq!(desenho_depois_da_pausa(&tela).len(), 7, "desenho 2x2: {:?}", tela);
+    assert!(!tela.concat().contains("[panic]"), "{:?}", tela);
+
+    // Colunas inválidas (zero e fora da faixa) com 2 linhas: o desenho é
+    // pequeno e o aviso continua na tela. O padrão de colunas é 10.
+    for resposta in ["2\n0\n\n", "2\n99\n\n"] {
+        let tela = rodar_labirint(resposta);
+        assert!(tela.concat().contains("valor invalido, usando 10"), "{:?}", tela);
+        assert_eq!(desenho_depois_da_pausa(&tela).len(), 7, "{:?}", tela);
+        assert!(!tela.concat().contains("[panic]"), "{:?}", tela);
+    }
+
+    // Linhas inválidas (texto e fora da faixa): o padrão é 5 linhas, e o
+    // desenho resolvido tem `3 * 5 + 1` linhas. O aviso em si já rolou para
+    // fora da tela (dois desenhos de 16 linhas), mas o tamanho prova o padrão.
+    for resposta in ["abc\n2\n\n", "99\n2\n\n"] {
+        let tela = rodar_labirint(resposta);
+        assert_eq!(desenho_depois_da_pausa(&tela).len(), 16, "{:?}", tela);
+        assert!(!tela.concat().contains("[panic]"), "{:?}", tela);
+    }
+
+    // O kernel segue vivo.
+    exige(&rodar_comando("echo vivo"), "vivo");
 }
