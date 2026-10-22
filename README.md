@@ -407,7 +407,8 @@ Não é preciso nenhum passo manual adicional para isso: é o mesmo
 ### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `visita` e `labirint`
 
 O comando `run` executa programas escritos fora do kernel. Cada um vive em
-`programs/src/bin/` e é compilado como um executável ELF64 estático:
+`programs/src/bin/` (exceto `visita` e `labirint`, em
+`programs/src/disco/`) e é compilado como um executável ELF64 estático:
 
 - **`hello`** (`run hello`): escreve `Ola do ring 3!` e termina. Demonstra o
   caminho completo: o programa roda em ring 3, pede ao kernel que escreva
@@ -496,6 +497,7 @@ os-rust> ls /ram
 os-rust> cat /ram/ola.txt
 os-rust> ls /disco
 os-rust> run /disco/bin/visita
+os-rust> run /disco/bin/labirint
 os-rust> run leitor
 os-rust> run listador
 os-rust> run /disco/bin/visita hello
@@ -821,8 +823,8 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   alocador global, tratador de `panic`).
 - `programs/`: a crate dos programas de usuário (`hello`, `crash`, `eco`,
   `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`,
-  `listador`, `hora`, um arquivo por programa em `src/bin/`, mais `visita` em
-  `src/disco/`, que só vai para o disco), com o linker
+  `listador`, `hora`, um arquivo por programa em `src/bin/`, mais `visita` e `labirint` em
+  `src/disco/`, que só vão para o disco), com o linker
   script (`link.ld`); compilada para o target de usuário pelo `build.rs` da
   raiz, nunca diretamente.
 - `GUIA_DO_PROGRAMADOR.md`: o guia de quem escreve programas para o os-rust.
@@ -834,7 +836,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   kernel, gera as imagens do ramdisk (embutida no kernel) e do disco
   (`target/imagens/`, anexada ao QEMU) e a lista de arquivos entregues que
   `tests/artefatos.rs` confere.
-- `SYSCALLS.md`: o contrato de syscalls (versão 4).
+- `SYSCALLS.md`: o contrato de syscalls (versão 5).
 - `tests/`: os testes de integração, cada um iniciando o kernel do zero
   em seu próprio binário — um teste de boot (que também confere a versão
   na mensagem de boas-vindas), um teste cujo resultado esperado é um

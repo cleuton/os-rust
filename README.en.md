@@ -404,7 +404,8 @@ is needed for this: it is the same `cargo run` as always.
 ### User programs: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `visita` and `labirint`
 
 The `run` command executes programs written outside the kernel. Each one
-lives in `programs/src/bin/` and is compiled as a static ELF64 executable:
+lives in `programs/src/bin/` (except `visita` and `labirint`, in
+`programs/src/disco/`) and is compiled as a static ELF64 executable:
 
 - **`hello`** (`run hello`): writes `Ola do ring 3!` and ends. Demonstrates
   the complete path: the program runs in ring 3, asks the kernel to write to
@@ -496,6 +497,7 @@ os-rust> ls /ram
 os-rust> cat /ram/ola.txt
 os-rust> ls /disco
 os-rust> run /disco/bin/visita
+os-rust> run /disco/bin/labirint
 os-rust> run leitor
 os-rust> run listador
 os-rust> run /disco/bin/visita hello
@@ -829,7 +831,7 @@ chapter in [`WALKTHROUGH.md`](./WALKTHROUGH.md).
 - `programs/`: the user programs crate (`hello`, `crash`, `eco`,
   `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`,
   `leitor`, `listador`, `hora`, one file per program in `src/bin/`, plus
-  `visita` in `src/disco/`, which only goes to the disk), with the linker
+  `visita` and `labirint` in `src/disco/`, which only go to the disk), with the linker
   script (`link.ld`); compiled for the user target by the root `build.rs`,
   never directly.
 - `GUIA_DO_PROGRAMADOR.md`: the guide for those who write programs for
@@ -843,7 +845,7 @@ chapter in [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   in the kernel, generates the ramdisk images (embedded in the kernel) and
   the disk (`target/imagens/`, attached to QEMU) and the list of delivered
   files that `tests/artefatos.rs` checks.
-- `SYSCALLS.md`: the syscall contract (version 4).
+- `SYSCALLS.md`: the syscall contract (version 5).
 - `tests/`: the integration tests, each one starting the kernel from scratch
   in its own binary — a boot test (which also checks the version in the
   welcome message), a test whose expected result is a panic, tests of the
