@@ -23,7 +23,7 @@
   o:o   ::__:        []    uu/|]  ::__:   \ut
 ```
 
-![](imagem.jpg)
+![](image-en.jpeg)
 
 os-rust started as a minimal demonstration of "programming without an
 operating system" in Rust: a binary that boots directly via BIOS in a QEMU
