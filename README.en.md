@@ -51,7 +51,7 @@ multitasking.
 
 The project documentation is also available in English (see the `ENGLISH VERSION` link at the top of each `.md` file).
 
-**Current version: 0.9.2.** Milestones 0 (boot in VGA text mode, with a
+**Current version: 0.10.0.** Milestones 0 (boot in VGA text mode, with a
 welcome message, scrolling and readable panic handling), 1 (interrupts,
 keyboard and command prompt), 2 (debugging infrastructure: serial output
 and automated tests inside QEMU), 3 (memory: physical frame allocator,
@@ -65,13 +65,15 @@ failure isolation demonstrated with `run eco` and `run falha_memoria`) and
 7 (multitasking: several programs at the same time, each in its own memory,
 with cooperative and preemptive context switching, demonstrated with `run
 ping pong` and `run contador_a contador_b`) and 8 (file system: a ramdisk
-and an ATA disk, both read-only FAT16, with `ls`, `cat`, file syscalls and
+and an ATA disk, both FAT16 (read-only in Milestone 8), with `ls`, `cat`, file syscalls and
 the execution of a program read from the disk, demonstrated with `run
 /disco/bin/visita`) and 9 (RTC driver: the kernel reads the date and time
 from the computer's clock, shown by the `data` command and offered to
-programs through the `SYS_TIME` syscall, with `run hora`) are completed and
-are what this repository runs today. Milestones 10 and 11 (file writing) are
-planned. The original talk demo, in the format used in class, is preserved
+programs through the `SYS_TIME` syscall, with `run hora`) are completed,
+and 10 (ramdisk writing: creating, appending to and deleting files in `/ram`,
+from the prompt and from user programs, with `run gravador` and `run
+apagador`) are what this repository runs today. Milestone 11 (ATA disk
+writing) is planned. The original talk demo, in the format used in class, is preserved
 in the git tag `v1.0-demo` and can still be used as is.
 
 ## Roadmap
@@ -93,7 +95,7 @@ details of each follow.
 | 7. Multitasking | Switch context between more than one loaded program, first cooperatively and then preemptively. | Two programs interleaving output on the screen (`run ping pong`, `run contador_a contador_b`). | Completed |
 | 8. File system | Read files from a file system, first an embedded ramdisk and then a read-only disk driver. | List files and execute a program read from the disk (`ls /ram`, `cat /ram/ola.txt`, `run /disco/bin/visita`). | Completed |
 | 9. RTC driver | Read the date and time from the real-time clock (CMOS chip) by polling and offer them to the prompt and to user programs through a new syscall. | `data` shows the date and time in UTC; `run hora` shows the same, requested from the kernel by a program. | Completed |
-| 10. Ramdisk writing | Write to FAT16, creating, writing, extending and deleting files, applied to the `/ram` volume. | Create a file in `/ram`, show it with `cat` and delete it, also from a user program. | Planned |
+| 10. Ramdisk writing | Write to FAT16, creating, writing, extending and deleting files, applied to the `/ram` volume. | Create a file in `/ram`, show it with `cat` and delete it, also from a user program. | Completed |
 | 11. ATA disk writing | Write sectors to the ATA disk and make `/disco` writable through the same writing layer, with persistence across boots. | Write a file to `/disco`, restart QEMU and read the file. | Planned |
 
 ### Milestone details
@@ -175,8 +177,8 @@ shows the output of both interleaved without either asking for its turn;
 on Milestone 5.
 
 **Milestone 8. File system.** Completed. The kernel now reads files,
-**read-only** (until Milestone 9; writing arrives with Milestones 10 and
-11), from two fixed FAT16 volumes: `/ram`, a ramdisk embedded in the boot
+**read-only** (in Milestone 8; writing reached `/ram` in Milestone 10 and reaches
+`/disco` in Milestone 11), from two fixed FAT16 volumes: `/ram`, a ramdisk embedded in the boot
 image, and `/disco`, an ATA disk read via PIO (I/O ports, by polling, with
 no DMA and no disk interrupt). The same FAT reader reads both, through a
 minimal block device abstraction. The `ls` and `cat` commands list and show
@@ -208,16 +210,22 @@ Demonstrable: `data` shows `AAAA-MM-DD HH:MM:SS UTC` and, a few seconds
 later, a later time; `run hora` shows the same time, requested from the
 kernel by a program. Depends on Milestone 5.
 
-**Milestone 10. Ramdisk writing.** Planned. The first half of file writing,
+**Milestone 10. Ramdisk writing.** Completed. The first half of file writing,
 on the volume that lives in memory and is lost on restart, where making
-mistakes costs nothing. Scope: the FAT16 writing layer (allocating and
-freeing clusters, updating both copies of the FAT, creating, writing,
-extending and deleting files), applied to the `/ram` volume; prompt commands
-to create and delete files; new syscalls for creation, writing and removal
-(contract version 6); an example program that writes a file and another
-program that reads it. `/disco` remains read-only. Demonstrable: create a
-file in `/ram`, show it with `cat` and delete it, also from a user program.
-Depends on Milestone 8.
+mistakes costs nothing. `/ram` is now a writable copy, made at boot, of the
+embedded image (which is never written). Delivered: the FAT16 writing layer
+(create an empty file, append bytes at the end through the lowest free
+cluster, delete giving the clusters back; both FAT copies updated; the size
+written last, so an interruption between two sectors leaves the volume
+readable; no cache); the `grava`, `anexa` and `apaga` prompt commands; the
+`SYS_CREATE`, `SYS_OPEN_APPEND`, `SYS_WRITE_FILE` and `SYS_REMOVE` syscalls and
+the `ERR_EXIST`, `ERR_NOSPC`, `ERR_ROFS` and `ERR_BUSY` errors (contract
+version 6); in the runtime library, `FileWriter` and `remove`; and two example
+programs: `gravador` (creates and extends `/ram/gravado.txt`) and `apagador`
+(shows the file and deletes it). A file only grows at the end, and a file open
+by any program cannot be deleted. `/disco` remains read-only. Demonstrable:
+create a file in `/ram`, show it with `cat` and delete it, also from a user
+program. Depends on Milestone 8.
 
 **Milestone 11. ATA disk writing.** Planned. The second half: bringing the
 same layer to the real disk. Scope: sector writing via PIO in the ATA driver
@@ -246,10 +254,10 @@ The programming interface between the kernel and user programs (the syscall
 contract: numbers, semantics, register conventions, error codes, executable
 format, load region and initial stack) is documented in a single versioned
 file, [`SYSCALLS.md`](SYSCALLS.md), since Milestone 5 (contract version 1:
-`write` and `exit`). The current version is 5, from Milestone 9, which adds
+`write` and `exit`). The current version is 6, from Milestone 10, which adds
 to what was already there (reading a line from the keyboard and memory, in
 Milestone 6; yielding the CPU, in Milestone 7; reading files, in Milestone
-8) the time (`SYS_TIME`). It is the only source of this interface: no
+8; the time, `SYS_TIME`, in Milestone 9) writing files in `/ram`. It is the only source of this interface: no
 syscall exists without being in it, and an automated test checks that the
 text keeps matching the code. An incompatible change to the contract
 increases its version and requires updating, in the same milestone, the
@@ -360,7 +368,7 @@ This will: compile the kernel for this project's custom bare-metal target
 QEMU window that boots via BIOS straight into that binary. Within a few
 seconds you should see the os-rust logo (the 20 lines of the symbol and the
 name, at the top of the screen), followed by the identification line
-`os-rust v0.9.2` — the project's current version — and the `os-rust> `
+`os-rust v0.10.0` — the project's current version — and the `os-rust> `
 prompt ready for typing, not an ordinary terminal.
 
 The same `cargo run` also compiles the runtime library (`runtime/`) and the
@@ -398,10 +406,13 @@ is needed for this: it is the same `cargo run` as always.
 | `falha <tipo>` | Deliberately triggers a CPU exception: `pagina` (`#PF`), `pilha` (`#DF`), `opcode` (`#UD`), `protecao` (`#GP`) or `breakpoint` (`#BP`); with no argument or with an unknown type, lists the available types |
 | `ls <path>` | Lists the entries of a directory (type, size and name), for example `ls /ram` or `ls /disco/docs`; with no argument shows the usage and the state of the volumes; a nonexistent path, a file in place of a directory and an unavailable volume give a clear message |
 | `cat <path>` | Shows the contents of a file, for example `cat /ram/ola.txt` (bytes outside printable ASCII appear as `■`); same error messages as `ls` |
+| `grava <path> [<text>]` | Creates a file in `/ram` (for example `grava /ram/nota.txt ola`); with text, writes the text plus a line break. Shows `grava: criado <path> (<N> bytes)`. Never overwrites: a name that already exists gives `ja existe` |
+| `anexa <path> <text>` | Appends the text, plus a line break, to the end of a file that already exists in `/ram`; shows the new size. Never creates |
+| `apaga <path>` | Deletes a file from `/ram` and gives its space back; a file open by any program gives `arquivo em uso`. On `/disco`, the three commands say `volume somente leitura: /disco` |
 | `data` | Shows the date and time of the computer's clock, in UTC, in the format `AAAA-MM-DD HH:MM:SS UTC`; if the clock is invalid or does not respond, shows a clear message. Extra arguments are ignored |
 | `run <target> [<target>...]` | Executes user programs in user mode (ring 3), up to 4 at the same time (the same target may repeat), and returns to the prompt when the last one ends. A target that starts with `/` is the path of an ELF64 executable (up to 64 KiB) read from a volume, like `/disco/bin/visita`; any other is the name of a program embedded in the image. The two can be mixed (`run /disco/bin/visita hello`). With no argument, with an invalid target or with more than 4 targets, it starts none |
 
-### User programs: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `visita` and `labirint`
+### User programs: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `visita` and `labirint`
 
 The `run` command executes programs written outside the kernel. Each one
 lives in `programs/src/bin/` (except `visita` and `labirint`, in
@@ -443,6 +454,28 @@ lives in `programs/src/bin/` (except `visita` and `labirint`, in
 - **`eco2`** (`run eco eco2`): the sibling of `eco`, with the `eco2:` prefix
   in the response. Type a line and Enter, and then another: the first goes
   to `eco`, which asked first, and the second to `eco2`.
+
+- **`gravador`** (`run gravador`): creates `/ram/gravado.txt` with 20 lines
+  (680 bytes); if the file already exists, appends the line `mais uma linha do
+  gravador` (707 bytes). **`apagador`** (`run apagador`): writes the file to
+  the screen, closes it (an open file is not deleted) and removes it; without
+  the file, it warns and ends with code 1. Demonstration:
+
+  ```text
+  os-rust> grava /ram/nota.txt ola, ramdisk
+  grava: criado /ram/nota.txt (13 bytes)
+  os-rust> anexa /ram/nota.txt segunda linha
+  anexa: /ram/nota.txt agora tem 27 bytes
+  os-rust> cat /ram/nota.txt
+  os-rust> apaga /ram/nota.txt
+  apaga: removido /ram/nota.txt
+  os-rust> run gravador
+  gravador: criei /ram/gravado.txt (680 bytes)
+  os-rust> run gravador
+  gravador: ampliei /ram/gravado.txt (+27 bytes)
+  os-rust> run apagador
+  apagador: removi /ram/gravado.txt
+  ```
 
 - **`leitor`** (`run leitor`): opens `/disco/docs/longo.txt`, a file that
   takes up more than one cluster of the disk, and writes the contents to the
@@ -506,8 +539,13 @@ os-rust> run /disco/bin/visita hello
 To see the kernel without the disk, run QEMU by hand without the second
 `-drive` (`bootimage run`... or `qemu-system-x86_64 -drive
 format=raw,file=<bootimage image>`): the boot is normal, `ls /ram` works and
-`ls /disco` says `volume indisponivel: /disco (sem disco)`. Limitations:
-read-only (nothing is created, changed or deleted), only short 8.3 names
+`ls /disco` says `volume indisponivel: /disco (sem disco)`. Writing: `/ram` is **read and write** (`grava`, `anexa`, `apaga` and the
+writing syscalls); `/disco` is **read-only** until Milestone 11. Restarting
+QEMU restores `/ram` to its initial contents: the embedded image is never
+changed. Writing limitations: a file only grows at the end (no seeking,
+overwriting in the middle or truncating), directories are not created or
+removed, a directory does not grow (no free slot, `sem espaco`), and an open
+file is not deleted. General limitations: only short 8.3 names
 (FAT long-name entries are ignored), one FAT16 volume per source, no block
 cache and no partitions.
 
@@ -629,6 +667,40 @@ prompt back; `run hello` and `run eco` work afterwards). The automated suite
   the top of the kernel entry stack is a multiple of 16. `src/shell.rs`:
   `run` lists `eco` and `falha_memoria`, and a program's `#PF` shows `erro
   de memoria`.
+
+### What the Milestone 10 tests cover
+
+To check by hand, follow the demonstration in the **User programs** section
+(`grava`, `anexa`, `cat`, `apaga`, `run gravador`, `run apagador`) and restart
+QEMU to see `/ram` go back to its initial contents. The automated suite
+(`cargo test`) covers, besides the earlier tests:
+
+- `src/blockdev.rs`: the writable ramdisk (write and read back, sector past the
+  end, read-only device that refuses, `reset`);
+- `src/fat.rs` (on volumes fabricated in memory): create (exact 32-byte entry,
+  a single sector written, repeated name, full directory); append (empty file,
+  inside a cluster, crossing 512 bytes, size multiple of 512, 4096 bytes at
+  once); lowest free cluster and reuse; full volume with partial write; remove
+  (`0xE5` entry, chain freed in both FAT copies); tampered chain refused
+  without writing; new cluster with no leftovers from a deleted file; 2-sector
+  per cluster volume refuses writes; and the **simulated interruption**: a
+  device that fails on the N-th write, for every N, of create, of append
+  crossing a cluster and of remove, and the volume stays mountable and
+  readable;
+- `src/fs.rs`: `reset_ramdisk`, create/remove errors, `/disco` refusing before
+  looking at the path, `ERR_BUSY` (and release on close and on table
+  destruction), the 4-file limit leaving no file behind, descriptor modes and
+  two writers on the same file;
+- `src/shell.rs`: `grava`, `anexa` and `apaga` with each success and error
+  message, usage, full volume in the middle of the text and `help`;
+- `src/syscall.rs`: contract version 6 matches the code;
+- `tests/escrita_no_ramdisk.rs` (inside QEMU): `gravador` and `apagador` end to
+  end (680 and 707 bytes, code 1 without the file, 100 cycles without leaking
+  clusters, frames or descriptors), every error of every new syscall in
+  contract order (hand-built ELFs), `ERR_BUSY` and release after `close`,
+  `exit` and a fault, partial write with a full volume, two programs appending
+  to the same file, `/disco` unchanged, unavailable volume, tampered FAT,
+  `/ram` restored, and the contract and the guide (literal program code).
 
 ### What the Milestone 9 tests cover
 
@@ -802,9 +874,11 @@ chapter in [`WALKTHROUGH.md`](./WALKTHROUGH.md).
 - `src/timer.rs`: the PIT (100 Hz, IRQ0) and the timer interrupt stub, which
   only switches tasks when it interrupts ring 3.
 - `src/blockdev.rs`: the block device (read a 512-byte sector by block
-  address), implemented by the ramdisk (`RamDisk`) and the ATA disk.
-- `src/fat.rs`: the read-only FAT16 reader, which treats the volume as
-  untrusted data (chains with a step limit, validated cluster numbers).
+  address, and optionally write one), implemented by the embedded ramdisk
+  (`RamDisk`, read-only), the writable ramdisk (`WritableRam`) and the ATA
+  disk (read-only).
+- `src/fat.rs`: FAT16 (reading and simple writing: create, append, delete),
+  which treats the volume as untrusted data (chains with a step limit, validated cluster numbers).
 - `src/ata.rs`: the ATA disk driver via PIO and polling, with a wait limit
   and absence detection, atomic with respect to the scheduler.
 - `src/rtc.rs`: the real-time clock driver (ports `0x70`/`0x71`, BCD and
@@ -813,24 +887,24 @@ chapter in [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   table of each program.
 - `src/syscall.rs`: the `syscall` mechanism (entry through the instruction,
   return through `iretq`), the dispatcher and the `write`, `exit`,
-  `read_line`, `alloc`, `yield`, `open`, `read`, `close`, `read_dir` and
-  `time` syscalls.
+  `read_line`, `alloc`, `yield`, `open`, `read`, `close`, `read_dir`, `time`,
+  `create`, `open_append`, `write_file` and `remove` syscalls.
 - `src/programs.rs`: the table of embedded programs, generated by
   `build.rs`.
 - `src/allocator.rs`: the fixed range of virtual addresses of the heap, the
   global allocator (`Box`, `Vec`, `String`, ...) and the handling of an
   exhausted heap.
 - `src/shell.rs`: the line buffer and the command prompt (`help`, `clear`,
-  `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `ls`, `cat`, `data`,
+  `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `ls`, `cat`, `grava`, `anexa`, `apaga`, `data`,
   `run <target>`).
 - `abi/`: the syscall contract constants (numbers, errors, limits), shared
   by the kernel and the runtime library.
 - `runtime/`: the user programs' runtime library (`entry!`,
   `print!`/`println!`, `read_line`, `yield_now`, `File`/`Dir` for reading
-  files, `time::now()`, global allocator, `panic` handler).
+  files, `FileWriter`/`remove` for writing them, `time::now()`, global allocator, `panic` handler).
 - `programs/`: the user programs crate (`hello`, `crash`, `eco`,
   `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`,
-  `leitor`, `listador`, `hora`, one file per program in `src/bin/`, plus
+  `leitor`, `listador`, `hora`, `gravador`, `apagador`, one file per program in `src/bin/`, plus
   `visita` and `labirint` in `src/disco/`, which only go to the disk), with the linker
   script (`link.ld`); compiled for the user target by the root `build.rs`,
   never directly.
@@ -845,7 +919,7 @@ chapter in [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   in the kernel, generates the ramdisk images (embedded in the kernel) and
   the disk (`target/imagens/`, attached to QEMU) and the list of delivered
   files that `tests/artefatos.rs` checks.
-- `SYSCALLS.md`: the syscall contract (version 5).
+- `SYSCALLS.md`: the syscall contract (version 6).
 - `tests/`: the integration tests, each one starting the kernel from scratch
   in its own binary — a boot test (which also checks the version in the
   welcome message), a test whose expected result is a panic, tests of the
@@ -855,7 +929,8 @@ chapter in [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   user programs in ring 3), `user_runtime.rs` (keyboard reading, memory,
   isolation and the guide), `multitarefa.rs` (several programs at the same
   time: context switching, preemption, isolation and keyboard),
-  `disco_ata.rs` (the ATA driver), `sistema_de_arquivos.rs` (`ls`, `cat`,
+  `disco_ata.rs` (the ATA driver), `escrita_no_ramdisk.rs` (writing to `/ram`: commands, syscalls, `gravador` and
+  `apagador`), `sistema_de_arquivos.rs` (`ls`, `cat`,
   `run` by path, file syscalls and invalid volumes) and `artefatos.rs`
   (hygiene of the delivered files).
 - `x86_64-os_rust.json`: the custom bare-metal target specification (no

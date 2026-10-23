@@ -53,7 +53,7 @@ sistema de arquivos ou multitarefa completa.
 
 A documentação do projeto também está disponível em inglês (veja o link `ENGLISH VERSION` no início de cada arquivo `.md`).
 
-**Versão atual: 0.9.2.** Os Marcos 0 (boot em modo texto VGA, com
+**Versão atual: 0.10.0.** Os Marcos 0 (boot em modo texto VGA, com
 mensagem de boas-vindas, rolagem e tratamento de panic legível), 1
 (interrupções, teclado e prompt de comandos), 2 (infraestrutura de
 depuração: saída serial e testes automatizados dentro do QEMU), 3
@@ -68,13 +68,14 @@ runtime, e o isolamento de falhas demonstrado com `run eco` e `run
 falha_memoria`) e 7 (multitarefa: vários programas ao mesmo tempo, cada um na
 sua memória, com troca de contexto cooperativa e preemptiva, demonstrada com
 `run ping pong` e `run contador_a contador_b`) e 8 (sistema de arquivos: um
-ramdisk e um disco ATA, ambos FAT16 somente leitura, com `ls`, `cat`, syscalls
+ramdisk e um disco ATA, ambos FAT16 (somente leitura no Marco 8), com `ls`, `cat`, syscalls
 de arquivo e a execução de um programa lido do disco, demonstrada com `run
 /disco/bin/visita`) e 9 (driver de RTC: o kernel lê a data e a hora do
 relógio do computador, mostradas pelo comando `data` e oferecidas aos programas
-pela syscall `SYS_TIME`, com `run hora`) estão concluídos e são o que este
-repositório executa hoje. Os Marcos 10 e 11 (escrita em arquivos) estão
-planejados. A demonstração original de palestra, no
+pela syscall `SYS_TIME`, com `run hora`) e 10 (escrita no ramdisk: criar,
+acrescentar e apagar arquivos no `/ram`, pelo prompt e por programas de
+usuário, com `run gravador` e `run apagador`) estão concluídos e são o que este
+repositório executa hoje. O Marco 11 (escrita no disco ATA) está planejado. A demonstração original de palestra, no
 formato usado em aula, está preservada na tag git `v1.0-demo` e continua
 podendo ser usada como está.
 
@@ -97,7 +98,7 @@ detalhes de cada um vêm na sequência.
 | 7. Multitarefa | Trocar de contexto entre mais de um programa carregado, primeiro de forma cooperativa e depois preemptiva. | Dois programas intercalando saída na tela (`run ping pong`, `run contador_a contador_b`). | Concluído |
 | 8. Sistema de arquivos | Ler arquivos de um sistema de arquivos, primeiro um ramdisk embutido e depois um driver de disco com leitura somente. | Listar arquivos e executar um programa lido do disco (`ls /ram`, `cat /ram/ola.txt`, `run /disco/bin/visita`). | Concluído |
 | 9. Driver de RTC | Ler a data e a hora do relógio de tempo real (chip CMOS) por polling e oferecê-las ao prompt e aos programas de usuário por uma syscall nova. | `data` mostra a data e a hora em UTC; `run hora` mostra o mesmo, pedido ao kernel por um programa. | Concluído |
-| 10. Escrita no ramdisk | Escrever em FAT16, criando, gravando, ampliando e apagando arquivos, aplicado ao volume `/ram`. | Criar um arquivo em `/ram`, mostrá-lo com `cat` e apagá-lo, também por programa de usuário. | Planejado |
+| 10. Escrita no ramdisk | Escrever em FAT16, criando, gravando, ampliando e apagando arquivos, aplicado ao volume `/ram`. | Criar um arquivo em `/ram`, mostrá-lo com `cat` e apagá-lo, também por programa de usuário. | Concluído |
 | 11. Escrita no disco ATA | Gravar setores no disco ATA e tornar o `/disco` gravável pela mesma camada de escrita, com persistência entre boots. | Gravar um arquivo em `/disco`, reiniciar o QEMU e ler o arquivo. | Planejado |
 
 ### Detalhes dos marcos
@@ -178,7 +179,7 @@ peça a vez; `run falha_memoria contador_a` encerra só quem falhou.
 Depende do Marco 5.
 
 **Marco 8. Sistema de arquivos.** Concluído. O kernel passa a ler arquivos,
-**somente leitura** (até o Marco 9; a escrita chega com os Marcos 10 e 11), de dois volumes FAT16 fixos: `/ram`, um ramdisk
+**somente leitura** (no Marco 8; a escrita chegou ao `/ram` no Marco 10 e chega ao `/disco` no Marco 11), de dois volumes FAT16 fixos: `/ram`, um ramdisk
 embutido na imagem de boot, e `/disco`, um disco ATA lido por PIO (portas de
 E/S, por polling, sem DMA e sem interrupção de disco). O mesmo leitor de FAT
 lê os dois, através de uma abstração mínima de dispositivo de blocos. Os
@@ -209,15 +210,22 @@ runtime a esconde atrás de `time::now()`. Demonstrável: `data` mostra
 `AAAA-MM-DD HH:MM:SS UTC` e, alguns segundos depois, uma hora posterior; `run
 hora` mostra a mesma hora, pedida ao kernel por um programa. Depende do Marco 5.
 
-**Marco 10. Escrita no ramdisk.** Planejado. A primeira metade da escrita em
+**Marco 10. Escrita no ramdisk.** Concluído. A primeira metade da escrita em
 arquivos, no volume que vive na memória e se perde ao reiniciar, onde errar não
-custa nada. Escopo: a camada de escrita do FAT16 (alocar e liberar clusters,
-atualizar as duas cópias da FAT, criar, gravar, ampliar e apagar arquivos),
-aplicada ao volume `/ram`; comandos de prompt para criar e apagar arquivos;
-syscalls novas de criação, escrita e remoção (contrato versão 6); um programa de
-exemplo que grava um arquivo e outro programa que o lê. O `/disco` continua
-somente leitura. Demonstrável: criar um arquivo em `/ram`, mostrá-lo com `cat` e
-apagá-lo, também por programa de usuário. Depende do Marco 8.
+custa nada. O `/ram` agora é uma cópia gravável, feita no boot, da imagem
+embutida (que nunca é escrita). Entregue: a camada de escrita do FAT16 (criar
+um arquivo vazio, acrescentar bytes ao fim pelo menor cluster livre, apagar
+devolvendo os clusters; as duas cópias da FAT atualizadas; o tamanho gravado
+por último, para que uma interrupção entre dois setores deixe o volume legível;
+sem cache); os comandos de prompt `grava`, `anexa` e `apaga`; as syscalls
+`SYS_CREATE`, `SYS_OPEN_APPEND`, `SYS_WRITE_FILE` e `SYS_REMOVE` e os erros
+`ERR_EXIST`, `ERR_NOSPC`, `ERR_ROFS` e `ERR_BUSY` (contrato versão 6); na
+biblioteca de runtime, `FileWriter` e `remove`; e dois programas de exemplo:
+`gravador` (cria e amplia `/ram/gravado.txt`) e `apagador` (mostra o arquivo e o
+apaga). Um arquivo só cresce pelo fim, e um arquivo aberto por algum programa
+não pode ser apagado. O `/disco` continua somente leitura. Demonstrável: criar
+um arquivo em `/ram`, mostrá-lo com `cat` e apagá-lo, também por programa de
+usuário. Depende do Marco 8.
 
 **Marco 11. Escrita no disco ATA.** Planejado. A segunda metade: levar a mesma
 camada ao disco de verdade. Escopo: escrita de setores por PIO no driver ATA
@@ -247,9 +255,9 @@ contrato de syscalls: números, semântica, convenções de registradores,
 códigos de erro, formato de executável, região de carga e pilha inicial)
 está documentada em um único arquivo versionado, [`SYSCALLS.md`](SYSCALLS.md),
 desde o Marco 5 (versão 1 do contrato: `write` e `exit`). A versão atual é a
-5, do Marco 9, que acrescenta ao que já havia (leitura de uma linha do
+6, do Marco 10, que acrescenta ao que já havia (leitura de uma linha do
 teclado e memória, no Marco 6; ceder a CPU, no Marco 7; leitura de arquivos,
-no Marco 8) a hora (`SYS_TIME`). Ele é a única fonte dessa
+no Marco 8; a hora, `SYS_TIME`, no Marco 9) a escrita de arquivos no `/ram`. Ele é a única fonte dessa
 interface: nenhuma syscall existe sem estar nele, e um teste automatizado
 confere que o texto continua batendo com o código. Uma mudança incompatível
 no contrato aumenta a versão dele e exige atualizar, no mesmo marco, a
@@ -361,7 +369,7 @@ projeto (`x86_64-os_rust.json`), gerar uma imagem de boot com `bootimage`,
 e abrir uma janela do QEMU que dá boot via BIOS direto nesse binário. Em
 poucos segundos você deve ver o logo do os-rust (as 20 linhas do símbolo
 e do nome, no topo da tela), seguido da linha de identificação
-`os-rust v0.9.2` — a versão atual do projeto — e do prompt `os-rust> `
+`os-rust v0.10.0` — a versão atual do projeto — e do prompt `os-rust> `
 pronto para digitação, não um terminal comum.
 
 O mesmo `cargo run` também compila a biblioteca de runtime (`runtime/`) e
@@ -401,10 +409,13 @@ Não é preciso nenhum passo manual adicional para isso: é o mesmo
 | `falha <tipo>` | Provoca uma exceção de CPU de propósito: `pagina` (`#PF`), `pilha` (`#DF`), `opcode` (`#UD`), `protecao` (`#GP`) ou `breakpoint` (`#BP`); sem argumento ou com um tipo desconhecido, lista os tipos disponíveis |
 | `ls <caminho>` | Lista as entradas de um diretório (tipo, tamanho e nome), por exemplo `ls /ram` ou `ls /disco/docs`; sem argumento mostra o uso e o estado dos volumes; caminho inexistente, arquivo no lugar de diretório e volume indisponível dão uma mensagem clara |
 | `cat <caminho>` | Mostra o conteúdo de um arquivo, por exemplo `cat /ram/ola.txt` (bytes fora do ASCII imprimível aparecem como `■`); mesmas mensagens de erro de `ls` |
+| `grava <caminho> [<texto>]` | Cria um arquivo no `/ram` (por exemplo `grava /ram/nota.txt ola`); com texto, grava o texto mais uma quebra de linha. Mostra `grava: criado <caminho> (<N> bytes)`. Nunca sobrescreve: um nome que já existe dá `ja existe` |
+| `anexa <caminho> <texto>` | Acrescenta o texto, mais uma quebra de linha, ao fim de um arquivo que já existe no `/ram`; mostra o tamanho novo. Nunca cria |
+| `apaga <caminho>` | Apaga um arquivo do `/ram` e devolve o espaço dele; um arquivo aberto por algum programa dá `arquivo em uso`. No `/disco`, os três comandos dizem `volume somente leitura: /disco` |
 | `data` | Mostra a data e a hora do relógio do computador, em UTC, no formato `AAAA-MM-DD HH:MM:SS UTC`; se o relógio estiver inválido ou não responder, mostra uma mensagem clara. Argumentos extras são ignorados |
 | `run <alvo> [<alvo>...]` | Executa programas de usuário em modo usuário (ring 3), até 4 ao mesmo tempo (o mesmo alvo pode se repetir), e volta ao prompt quando o último termina. Um alvo que começa com `/` é o caminho de um executável ELF64 (até 64 KiB) lido de um volume, como `/disco/bin/visita`; qualquer outro é o nome de um programa embutido na imagem. Os dois se misturam (`run /disco/bin/visita hello`). Sem argumento, com um alvo inválido ou com mais de 4 alvos, não inicia nenhum |
 
-### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `visita` e `labirint`
+### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `visita` e `labirint`
 
 O comando `run` executa programas escritos fora do kernel. Cada um vive em
 `programs/src/bin/` (exceto `visita` e `labirint`, em
@@ -444,6 +455,28 @@ O comando `run` executa programas escritos fora do kernel. Cada um vive em
 - **`eco2`** (`run eco eco2`): o irmão do `eco`, com o prefixo `eco2:` na
   resposta. Digite uma linha e Enter, e depois outra: a primeira vai ao `eco`,
   que pediu primeiro, e a segunda ao `eco2`.
+
+- **`gravador`** (`run gravador`): cria `/ram/gravado.txt` com 20 linhas
+  (680 bytes); se o arquivo já existe, acrescenta a linha `mais uma linha do
+  gravador` (707 bytes). **`apagador`** (`run apagador`): escreve o arquivo na
+  tela, fecha-o (arquivo aberto não se apaga) e o remove; sem o arquivo, avisa
+  e termina com código 1. Demonstração:
+
+  ```text
+  os-rust> grava /ram/nota.txt ola, ramdisk
+  grava: criado /ram/nota.txt (13 bytes)
+  os-rust> anexa /ram/nota.txt segunda linha
+  anexa: /ram/nota.txt agora tem 27 bytes
+  os-rust> cat /ram/nota.txt
+  os-rust> apaga /ram/nota.txt
+  apaga: removido /ram/nota.txt
+  os-rust> run gravador
+  gravador: criei /ram/gravado.txt (680 bytes)
+  os-rust> run gravador
+  gravador: ampliei /ram/gravado.txt (+27 bytes)
+  os-rust> run apagador
+  apagador: removi /ram/gravado.txt
+  ```
 
 - **`leitor`** (`run leitor`): abre `/disco/docs/longo.txt`, um arquivo que
   ocupa mais de um cluster do disco, e escreve o conteúdo na tela, lendo em
@@ -506,8 +539,14 @@ os-rust> run /disco/bin/visita hello
 Para ver o kernel sem o disco, rode o QEMU à mão sem o segundo `-drive`
 (`bootimage run`... ou `qemu-system-x86_64 -drive format=raw,file=<imagem do
 bootimage>`): o boot é normal, `ls /ram` funciona e `ls /disco` diz `volume
-indisponivel: /disco (sem disco)`. Limitações: só leitura (nada é criado,
-alterado ou apagado), só nomes curtos 8.3 (entradas de nome longo do FAT são
+indisponivel: /disco (sem disco)`. Escrita: o `/ram` é de **leitura e
+escrita** (`grava`, `anexa`, `apaga` e as syscalls de escrita); o `/disco` é
+**somente leitura** até o Marco 11. Reiniciar o QEMU restaura o `/ram` ao
+conteúdo inicial: a imagem embutida nunca é alterada. Limitações da escrita: um
+arquivo só cresce pelo fim (sem posicionar, sobrescrever no meio nem truncar),
+não se criam nem se removem diretórios, o diretório não cresce (sem posição
+livre, `sem espaco`), e um arquivo aberto não se apaga. Limitações gerais: só
+nomes curtos 8.3 (entradas de nome longo do FAT são
 ignoradas), um volume FAT16 por fonte, sem cache de blocos nem partições.
 
 Para ver a multitarefa à mão, rode `cargo run` e digite `run ping pong`,
@@ -629,6 +668,40 @@ suíte automatizada (`cargo test`) cobre, além dos testes anteriores:
   recusado. `src/gdt.rs`: o topo da pilha de entrada do kernel é múltiplo de
   16. `src/shell.rs`: `run` lista `eco` e `falha_memoria`, e `#PF` de
   programa mostra `erro de memoria`.
+
+### O que os testes do Marco 10 cobrem
+
+Para conferir à mão, siga a demonstração da seção **Programas de usuário**
+(`grava`, `anexa`, `cat`, `apaga`, `run gravador`, `run apagador`) e reinicie o
+QEMU para ver o `/ram` voltar ao conteúdo inicial. A suíte automatizada
+(`cargo test`) cobre, além dos testes anteriores:
+
+- `src/blockdev.rs`: o ramdisk gravável (escrever e ler de volta, setor fora do
+  fim, dispositivo somente leitura que recusa, `reset`);
+- `src/fat.rs` (sobre volumes fabricados em memória): criar (entrada exata de 32
+  bytes, um único setor escrito, nome repetido, diretório cheio); acrescentar
+  (arquivo vazio, dentro de um cluster, cruzando 512 bytes, tamanho múltiplo de
+  512, 4096 bytes de uma vez); menor cluster livre e reaproveitamento; volume
+  cheio com gravação parcial; remover (entrada `0xE5`, cadeia livre nas duas
+  cópias da FAT); cadeia adulterada recusada sem escrever; cluster novo sem
+  sobra de arquivo apagado; volume de 2 setores por cluster recusa escrita; e a
+  **interrupção simulada**: um dispositivo que falha na N-ésima escrita, para
+  cada N, de criar, de acrescentar atravessando um cluster e de remover, e o
+  volume continua montável e legível;
+- `src/fs.rs`: `reset_ramdisk`, os erros de criar/remover, o `/disco` recusando
+  antes de olhar o caminho, `ERR_BUSY` (e a liberação ao fechar e ao destruir a
+  tabela), o limite de 4 arquivos sem deixar arquivo para trás, modos de
+  descritor e dois escritores no mesmo arquivo;
+- `src/shell.rs`: `grava`, `anexa` e `apaga` com cada mensagem de sucesso e de
+  erro, o uso, volume cheio no meio do texto e `help`;
+- `src/syscall.rs`: o contrato versão 6 bate com o código;
+- `tests/escrita_no_ramdisk.rs` (dentro do QEMU): `gravador` e `apagador` ponta a
+  ponta (680 e 707 bytes, código 1 sem arquivo, 100 ciclos sem vazar clusters,
+  frames nem descritores), cada erro de cada syscall nova na ordem do contrato
+  (ELFs montados à mão), `ERR_BUSY` e a liberação depois de `close`, de `exit` e
+  de falha, escrita parcial com o volume cheio, dois programas acrescentando ao
+  mesmo arquivo, o `/disco` que não muda, volume indisponível, FAT adulterada,
+  o `/ram` restaurado e o contrato e o guia (código literal dos programas).
 
 ### O que os testes do Marco 9 cobrem
 
@@ -797,9 +870,12 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
 - `src/timer.rs`: o PIT (100 Hz, IRQ0) e o stub da interrupção do timer, que só
   troca de tarefa quando interrompe ring 3.
 - `src/blockdev.rs`: o dispositivo de blocos (ler um setor de 512 bytes por
-  endereço de bloco), implementado pelo ramdisk (`RamDisk`) e pelo disco ATA.
-- `src/fat.rs`: o leitor de FAT16 somente leitura, que trata o volume como dado
-  não confiável (cadeias com limite de passos, números de cluster validados).
+  endereço de bloco, e, opcionalmente, gravar um), implementado pelo ramdisk
+  embutido (`RamDisk`, somente leitura), pelo ramdisk gravável (`WritableRam`) e
+  pelo disco ATA (somente leitura).
+- `src/fat.rs`: o FAT16 (leitura e escrita simples: criar, acrescentar, apagar),
+  que trata o volume como dado não confiável (cadeias com limite de passos,
+  números de cluster validados).
 - `src/ata.rs`: o driver de disco ATA por PIO e polling, com limite de espera e
   detecção de ausência, atômico em relação ao escalonador.
 - `src/rtc.rs`: o driver do relógio de tempo real (portas `0x70`/`0x71`, BCD e
@@ -808,22 +884,23 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   abertos de cada programa.
 - `src/syscall.rs`: o mecanismo `syscall` (entrada pela instrução, retorno por
   `iretq`), o despachante e as syscalls `write`, `exit`, `read_line`, `alloc`,
-  `yield`, `open`, `read`, `close`, `read_dir` e `time`.
+  `yield`, `open`, `read`, `close`, `read_dir`, `time`, `create`, `open_append`,
+  `write_file` e `remove`.
 - `src/programs.rs`: a tabela dos programas embutidos, gerada pelo
   `build.rs`.
 - `src/allocator.rs`: a faixa fixa de endereços virtuais do heap, o
   alocador global (`Box`, `Vec`, `String`, ...) e o tratamento de heap
   esgotado.
 - `src/shell.rs`: o buffer de linha e o prompt de comandos (`help`,
-  `clear`, `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `ls`, `cat`, `data`, `run <alvo>`).
+  `clear`, `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `ls`, `cat`, `grava`, `anexa`, `apaga`, `data`, `run <alvo>`).
 - `abi/`: as constantes do contrato de syscalls (números, erros, limites),
   compartilhadas pelo kernel e pela biblioteca de runtime.
 - `runtime/`: a biblioteca de runtime dos programas de usuário (`entry!`,
-  `print!`/`println!`, `read_line`, `yield_now`, `File`/`Dir` para ler arquivos, `time::now()`,
+  `print!`/`println!`, `read_line`, `yield_now`, `File`/`Dir` para ler arquivos, `FileWriter`/`remove` para escrevê-los, `time::now()`,
   alocador global, tratador de `panic`).
 - `programs/`: a crate dos programas de usuário (`hello`, `crash`, `eco`,
   `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`,
-  `listador`, `hora`, um arquivo por programa em `src/bin/`, mais `visita` e `labirint` em
+  `listador`, `hora`, `gravador`, `apagador`, um arquivo por programa em `src/bin/`, mais `visita` e `labirint` em
   `src/disco/`, que só vão para o disco), com o linker
   script (`link.ld`); compilada para o target de usuário pelo `build.rs` da
   raiz, nunca diretamente.
@@ -836,7 +913,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   kernel, gera as imagens do ramdisk (embutida no kernel) e do disco
   (`target/imagens/`, anexada ao QEMU) e a lista de arquivos entregues que
   `tests/artefatos.rs` confere.
-- `SYSCALLS.md`: o contrato de syscalls (versão 5).
+- `SYSCALLS.md`: o contrato de syscalls (versão 6).
 - `tests/`: os testes de integração, cada um iniciando o kernel do zero
   em seu próprio binário — um teste de boot (que também confere a versão
   na mensagem de boas-vindas), um teste cujo resultado esperado é um
@@ -847,7 +924,8 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   `user_runtime.rs` (leitura de teclado, memória, isolamento e o guia),
   `multitarefa.rs` (vários programas ao mesmo tempo: troca de contexto,
   preempção, isolamento e teclado), `disco_ata.rs` (o driver ATA),
-  `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
+  `escrita_no_ramdisk.rs` (escrita no `/ram`: comandos, syscalls, `gravador` e
+  `apagador`), `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
   e volumes inválidos) e `artefatos.rs` (higiene dos arquivos entregues).
 - `x86_64-os_rust.json`: a especificação do target bare-metal customizado
   (sem sistema operacional por baixo).

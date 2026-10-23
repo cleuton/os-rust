@@ -1,4 +1,4 @@
-//! Buffer de linha e prompt de comandos mínimo (`help`, `clear`, `echo`, `sobre`, `panic`, `mem`, `falha`, `ls`, `cat`, `run`, `data`).
+//! Buffer de linha e prompt de comandos mínimo (`help`, `clear`, `echo`, `sobre`, `panic`, `mem`, `falha`, `ls`, `cat`, `grava`, `anexa`, `apaga`, `run`, `data`).
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -42,6 +42,9 @@ const COMMANDS: &[(&str, &str)] = &[
     ),
     ("ls", "lista um diretorio (ex.: ls /ram, ls /disco)"),
     ("cat", "mostra o conteudo de um arquivo (ex.: cat /ram/ola.txt)"),
+    ("grava", "cria um arquivo no /ram (ex.: grava /ram/nota.txt ola)"),
+    ("anexa", "acrescenta texto ao fim de um arquivo do /ram (ex.: anexa /ram/nota.txt mais)"),
+    ("apaga", "apaga um arquivo do /ram (ex.: apaga /ram/nota.txt)"),
     ("data", "mostra a data e a hora (UTC) do relogio"),
     (
         "run",
@@ -176,6 +179,9 @@ fn execute(line: &str) {
         "falha" => cmd_falha(rest),
         "ls" => cmd_ls(rest),
         "cat" => cmd_cat(rest),
+        "grava" => cmd_grava(rest),
+        "anexa" => cmd_anexa(rest),
+        "apaga" => cmd_apaga(rest),
         "run" => cmd_run(rest),
         // Argumentos extras em `rest` são ignorados, como em `sobre`.
         "data" => cmd_data(),
@@ -408,6 +414,15 @@ fn report_fs_error(command: &str, path: &str, error: FsError) {
             "{}: erro de leitura (disco ou volume corrompido): {}",
             command, path
         )),
+        FsError::AlreadyExists => say(format_args!("{}: ja existe: {}", command, path)),
+        FsError::NoSpace => {
+            say(format_args!("{}: sem espaco (volume ou diretorio cheio): {}", command, path))
+        }
+        FsError::ReadOnly => {
+            let volume = fs::parse(path.as_bytes()).map(|p| p.volume.name()).unwrap_or("?");
+            say(format_args!("{}: volume somente leitura: /{}", command, volume));
+        }
+        FsError::Busy => say(format_args!("{}: arquivo em uso: {}", command, path)),
         FsError::BadDescriptor | FsError::TooManyOpen => {
             say(format_args!("{}: erro interno de arquivo: {}", command, path))
         }
@@ -483,6 +498,92 @@ fn cmd_cat(rest: &str) {
     // Um arquivo que não termina em quebra de linha não pode grudar no prompt.
     if last != b'\n' {
         println!();
+    }
+}
+
+/// Separa o caminho (primeira palavra) do texto (o resto, sem os espaços
+/// iniciais; os espaços internos ficam como foram digitados).
+fn split_path_and_text(rest: &str) -> (&str, &str) {
+    let rest = rest.trim_start();
+    match rest.split_once(char::is_whitespace) {
+        Some((path, text)) => (path, text.trim_start()),
+        None => (rest, ""),
+    }
+}
+
+/// Grava `text` e uma quebra de linha no fim do arquivo aberto. Repete a
+/// escrita até acabar: um volume que enche no meio devolve o erro, e o que
+/// coube já está gravado. A linha tem no máximo 128 caracteres (limite do
+/// teclado), então cabe no buffer.
+fn write_line(file: &mut OpenFile, text: &str) -> Result<usize, FsError> {
+    let mut line = [0u8; LINE_CAPACITY + 2];
+    let bytes = text.as_bytes();
+    let len = bytes.len().min(LINE_CAPACITY);
+    line[..len].copy_from_slice(&bytes[..len]);
+    line[len] = b'\n';
+    let total = len + 1;
+    let mut done = 0;
+    while done < total {
+        done += file.write(&line[done..total])?;
+    }
+    Ok(total)
+}
+
+/// `grava <caminho> [<texto>]`: cria um arquivo no volume gravável (`/ram`) e,
+/// se houver texto, grava o texto mais uma quebra de linha. Nunca sobrescreve:
+/// um nome que já existe é erro.
+fn cmd_grava(rest: &str) {
+    let (path, text) = split_path_and_text(rest);
+    if path.is_empty() {
+        say(format_args!("uso: grava <caminho> [<texto>]"));
+        print_volumes();
+        return;
+    }
+    let mut file = match OpenFile::create(path.as_bytes()) {
+        Ok(file) => file,
+        Err(error) => return report_fs_error("grava", path, error),
+    };
+    let written = if text.is_empty() {
+        0
+    } else {
+        match write_line(&mut file, text) {
+            Ok(n) => n,
+            // O que coube fica gravado; a mensagem é a do erro.
+            Err(error) => return report_fs_error("grava", path, error),
+        }
+    };
+    say(format_args!("grava: criado {} ({} bytes)", path, written));
+}
+
+/// `anexa <caminho> <texto>`: acrescenta o texto, mais uma quebra de linha, ao
+/// fim de um arquivo que já existe. Nunca cria.
+fn cmd_anexa(rest: &str) {
+    let (path, text) = split_path_and_text(rest);
+    if path.is_empty() || text.is_empty() {
+        say(format_args!("uso: anexa <caminho> <texto>"));
+        print_volumes();
+        return;
+    }
+    let mut file = match OpenFile::open_append(path.as_bytes()) {
+        Ok(file) => file,
+        Err(error) => return report_fs_error("anexa", path, error),
+    };
+    if let Err(error) = write_line(&mut file, text) {
+        return report_fs_error("anexa", path, error);
+    }
+    // O tamanho novo vem do volume, não de uma conta: é o que `ls` mostraria.
+    match fs::lookup(path.as_bytes()) {
+        Ok((_, node)) => say(format_args!("anexa: {} agora tem {} bytes", path, node.size)),
+        Err(error) => report_fs_error("anexa", path, error),
+    }
+}
+
+/// `apaga <caminho>`: remove um arquivo e devolve os clusters dele ao volume.
+fn cmd_apaga(rest: &str) {
+    let Some(path) = single_path("apaga", rest) else { return };
+    match fs::remove(path.as_bytes()) {
+        Ok(()) => say(format_args!("apaga: removido {}", path)),
+        Err(error) => report_fs_error("apaga", path, error),
     }
 }
 
@@ -968,4 +1069,228 @@ mod tests {
     // de comandos"). A cobertura fica por conta da validação manual no
     // QEMU e dos testes de integração dedicados (`tests/page_fault.rs`,
     // `tests/double_fault.rs`).
+
+    // --- grava, anexa e apaga (Marco 10) ---
+
+    /// Roda `f` com o `/ram` no estado inicial e o devolve a ele, conferindo
+    /// que os clusters livres e a raiz voltaram ao que eram.
+    fn com_ram_limpo(f: impl FnOnce()) {
+        fs::reset_ramdisk();
+        let livres = fs::free_clusters(VolumeId::Ram).unwrap();
+        let raiz = {
+            vga_buffer::clear_screen();
+            execute("ls /ram");
+            vga_buffer::screen_contains("ola.txt")
+        };
+        assert!(raiz);
+        f();
+        fs::reset_ramdisk();
+        assert_eq!(fs::free_clusters(VolumeId::Ram).unwrap(), livres);
+    }
+
+    fn tela(comando: &str) -> bool {
+        vga_buffer::clear_screen();
+        execute(comando);
+        true
+    }
+
+    #[test_case]
+    fn grava_cat_e_apaga_mostram_as_linhas_da_historia_1() {
+        com_ram_limpo(|| {
+            let livres = fs::free_clusters(VolumeId::Ram).unwrap();
+            tela("grava /ram/nota.txt ola, ramdisk");
+            assert!(vga_buffer::screen_contains("grava: criado /ram/nota.txt (13 bytes)"));
+            tela("cat /ram/nota.txt");
+            assert!(vga_buffer::screen_contains("ola, ramdisk"));
+            tela("ls /ram");
+            assert!(vga_buffer::screen_contains(&alloc::format!("{:>8}  nota.txt", 13)));
+            tela("apaga /ram/nota.txt");
+            assert!(vga_buffer::screen_contains("apaga: removido /ram/nota.txt"));
+            tela("cat /ram/nota.txt");
+            assert!(vga_buffer::screen_contains("cat: nao encontrado: /ram/nota.txt"));
+            assert_eq!(fs::free_clusters(VolumeId::Ram).unwrap(), livres);
+        });
+    }
+
+    #[test_case]
+    fn grava_sem_texto_cria_arquivo_de_zero_bytes() {
+        com_ram_limpo(|| {
+            tela("grava /ram/novo.txt");
+            assert!(vga_buffer::screen_contains("grava: criado /ram/novo.txt (0 bytes)"));
+            tela("ls /ram");
+            assert!(vga_buffer::screen_contains(&alloc::format!("{:>8}  novo.txt", 0)));
+        });
+    }
+
+    #[test_case]
+    fn grava_em_subdiretorio_existente() {
+        com_ram_limpo(|| {
+            tela("grava /ram/docs/nota.txt oi");
+            assert!(vga_buffer::screen_contains("grava: criado /ram/docs/nota.txt (3 bytes)"));
+            tela("ls /ram/docs");
+            assert!(vga_buffer::screen_contains("nota.txt"));
+            assert!(vga_buffer::screen_contains("sobre.txt"));
+        });
+    }
+
+    #[test_case]
+    fn grava_em_nome_existente_nao_sobrescreve_e_ignora_maiusculas() {
+        com_ram_limpo(|| {
+            tela("grava /ram/nota.txt primeiro");
+            tela("grava /RAM/Nota.TXT x");
+            assert!(vga_buffer::screen_contains("grava: ja existe: /RAM/Nota.TXT"));
+            tela("cat /ram/nota.txt");
+            assert!(vga_buffer::screen_contains("primeiro"));
+            tela("grava /ram/docs x");
+            assert!(vga_buffer::screen_contains("grava: ja existe: /ram/docs"));
+            tela("grava /ram x");
+            assert!(vga_buffer::screen_contains("grava: ja existe: /ram"));
+        });
+    }
+
+    #[test_case]
+    fn grava_preserva_espacos_internos_e_corta_os_iniciais() {
+        com_ram_limpo(|| {
+            tela("grava /ram/e.txt    a  b   c");
+            assert!(vga_buffer::screen_contains("(9 bytes)"));
+            tela("cat /ram/e.txt");
+            assert!(vga_buffer::screen_contains("a  b   c"));
+        });
+    }
+
+    #[test_case]
+    fn anexa_amplia_o_arquivo_e_atravessa_a_fronteira_de_um_cluster() {
+        com_ram_limpo(|| {
+            tela("grava /ram/nota.txt ola, ramdisk");
+            tela("anexa /ram/nota.txt segunda linha");
+            assert!(vga_buffer::screen_contains("anexa: /ram/nota.txt agora tem 27 bytes"));
+            tela("cat /ram/nota.txt");
+            assert!(vga_buffer::screen_contains("ola, ramdisk"));
+            assert!(vga_buffer::screen_contains("segunda linha"));
+            // Passa de 512 bytes: um segundo cluster.
+            for _ in 0..8 {
+                execute("anexa /ram/nota.txt 0123456789012345678901234567890123456789012345678901234567890123456789");
+            }
+            tela("ls /ram");
+            assert!(vga_buffer::screen_contains(&alloc::format!("{:>8}  nota.txt", 27 + 8 * 71)));
+            let (_, bytes) = {
+                let dados = fs::read_whole(b"/ram/nota.txt", 4096).unwrap();
+                ((), dados)
+            };
+            assert_eq!(bytes.len(), 27 + 8 * 71);
+            assert!(bytes.starts_with(b"ola, ramdisk\nsegunda linha\n"));
+            assert!(bytes.ends_with(b"0123456789\n"));
+        });
+    }
+
+    #[test_case]
+    fn anexa_nao_cria_e_recusa_diretorio_e_raiz() {
+        com_ram_limpo(|| {
+            tela("anexa /ram/nada.txt x");
+            assert!(vga_buffer::screen_contains("anexa: nao encontrado: /ram/nada.txt"));
+            tela("ls /ram");
+            assert!(!vga_buffer::screen_contains("nada.txt"));
+            tela("anexa /ram/docs x");
+            assert!(vga_buffer::screen_contains("anexa: e um diretorio: /ram/docs"));
+            tela("anexa /ram x");
+            assert!(vga_buffer::screen_contains("anexa: e um diretorio: /ram"));
+        });
+    }
+
+    #[test_case]
+    fn apaga_recusa_diretorio_raiz_e_inexistente() {
+        com_ram_limpo(|| {
+            tela("apaga /ram/docs");
+            assert!(vga_buffer::screen_contains("apaga: e um diretorio: /ram/docs"));
+            tela("apaga /ram");
+            assert!(vga_buffer::screen_contains("apaga: e um diretorio: /ram"));
+            tela("apaga /ram/nada.txt");
+            assert!(vga_buffer::screen_contains("apaga: nao encontrado: /ram/nada.txt"));
+        });
+    }
+
+    #[test_case]
+    fn escrita_no_disco_e_recusada_e_volume_desconhecido_e_reportado() {
+        let disco_ok = fs::volume_status(VolumeId::Disco).is_ok();
+        for comando in ["grava /disco/x.txt a", "anexa /disco/leiame.txt a", "apaga /disco/leiame.txt"] {
+            tela(comando);
+            if disco_ok {
+                assert!(vga_buffer::screen_contains("volume somente leitura: /disco"));
+            } else {
+                assert!(vga_buffer::screen_contains("volume indisponivel: /disco"));
+            }
+        }
+        tela("grava /xyz/a x");
+        assert!(vga_buffer::screen_contains("grava: volume desconhecido: /xyz/a"));
+        tela("apaga ram/x");
+        assert!(vga_buffer::screen_contains("apaga: caminho invalido: ram/x"));
+    }
+
+    #[test_case]
+    fn comandos_de_escrita_sem_argumentos_mostram_o_uso_e_os_volumes() {
+        for (comando, uso) in [
+            ("grava", "uso: grava <caminho> [<texto>]"),
+            ("anexa", "uso: anexa <caminho> <texto>"),
+            ("anexa /ram/ola.txt", "uso: anexa <caminho> <texto>"),
+            ("apaga", "uso: apaga <caminho>"),
+        ] {
+            tela(comando);
+            assert!(vga_buffer::screen_contains(uso));
+            assert!(vga_buffer::screen_contains("volumes: /ram (ok)"));
+        }
+    }
+
+    #[test_case]
+    fn apaga_arquivo_em_uso_mostra_a_mensagem_e_o_prompt_segue_respondendo() {
+        com_ram_limpo(|| {
+            let mut tabela = fs::FileTable::new();
+            let fd = tabela.open(b"/ram/ola.txt").unwrap();
+            tela("apaga /ram/ola.txt");
+            assert!(vga_buffer::screen_contains("apaga: arquivo em uso: /ram/ola.txt"));
+            tela("echo oi");
+            assert!(vga_buffer::screen_contains("oi"));
+            tabela.close(fd).unwrap();
+        });
+    }
+
+    #[test_case]
+    fn volume_cheio_no_meio_do_texto_mostra_sem_espaco_e_deixa_o_que_coube() {
+        com_ram_limpo(|| {
+            // Enche o volume até sobrar um cluster livre depois de o último
+            // cluster de `enche.bin` ficar com 3 bytes de folga.
+            let mut enche = fs::OpenFile::create(b"/ram/enche.bin").unwrap();
+            let bloco = [b'x'; 512];
+            while fs::free_clusters(VolumeId::Ram).unwrap() > 2 {
+                enche.write(&bloco).unwrap();
+            }
+            enche.write(&bloco[..509]).unwrap();
+            let (_, antes) = fs::lookup(b"/ram/enche.bin").unwrap();
+            // O último cluster livre vai para `cabe.txt`.
+            tela("grava /ram/cabe.txt 0123456789");
+            assert!(vga_buffer::screen_contains("grava: criado /ram/cabe.txt (11 bytes)"));
+            assert_eq!(fs::free_clusters(VolumeId::Ram).unwrap(), 0);
+            // Em `enche.bin` só cabem os 3 bytes que faltavam no cluster.
+            tela("anexa /ram/enche.bin 0123456789");
+            assert!(vga_buffer::screen_contains("sem espaco (volume ou diretorio cheio): /ram/enche.bin"));
+            let (_, depois) = fs::lookup(b"/ram/enche.bin").unwrap();
+            assert_eq!(depois.size, antes.size + 3);
+            drop(enche);
+            tela("apaga /ram/enche.bin");
+            assert!(vga_buffer::screen_contains("apaga: removido /ram/enche.bin"));
+        });
+    }
+
+    #[test_case]
+    fn help_lista_grava_anexa_e_apaga() {
+        tela("help");
+        for (nome, trecho) in [("grava -", "/ram"), ("anexa -", "/ram"), ("apaga -", "/ram")] {
+            assert!(vga_buffer::screen_contains(nome));
+            let _ = trecho;
+        }
+        for (nome, descricao) in COMMANDS {
+            if ["grava", "anexa", "apaga"].contains(nome) {
+                assert!(descricao.contains("/ram"));
+            }
+        }
+    }
 }

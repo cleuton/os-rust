@@ -8,8 +8,9 @@
 use core::arch::asm;
 
 use abi::{
-    DateTime, SYS_ALLOC, SYS_CLOSE, SYS_EXIT, SYS_OPEN, SYS_READ, SYS_READ_DIR, SYS_READ_LINE,
-    SYS_TIME, SYS_WRITE, SYS_YIELD, TIME_SIZE,
+    DateTime, SYS_ALLOC, SYS_CLOSE, SYS_CREATE, SYS_EXIT, SYS_OPEN, SYS_OPEN_APPEND, SYS_READ,
+    SYS_READ_DIR, SYS_READ_LINE, SYS_REMOVE, SYS_TIME, SYS_WRITE, SYS_WRITE_FILE, SYS_YIELD,
+    TIME_SIZE,
 };
 
 /// Executa `syscall` com o número `nr` e dois argumentos e devolve o
@@ -183,4 +184,36 @@ pub fn read_dir(fd: i64, buf: &mut [u8]) -> i64 {
     // SAFETY: o ponteiro e o tamanho vêm de uma fatia mutável viva do programa
     // (memória mapeada e gravável), que é o que `SYS_READ_DIR` exige.
     unsafe { syscall3(SYS_READ_DIR, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) }
+}
+
+/// Cria o arquivo `path` (vazio) e o abre para acrescentar. Devolve o
+/// descritor (`≥ 0`) ou um código de erro (`< 0`, por exemplo `abi::ERR_EXIST`).
+pub fn create(path: &[u8]) -> i64 {
+    // SAFETY: o ponteiro e o tamanho vêm de uma fatia viva do programa (memória
+    // mapeada para ele), que é o que `SYS_CREATE` exige do caminho.
+    unsafe { syscall2(SYS_CREATE, path.as_ptr() as u64, path.len() as u64) }
+}
+
+/// Abre o arquivo existente `path` para acrescentar bytes ao fim. Devolve o
+/// descritor ou um código de erro.
+pub fn open_append(path: &[u8]) -> i64 {
+    // SAFETY: como em `create`: fatia viva do programa.
+    unsafe { syscall2(SYS_OPEN_APPEND, path.as_ptr() as u64, path.len() as u64) }
+}
+
+/// Grava `buf` no fim do arquivo aberto para acrescentar `fd`. Devolve os
+/// bytes gravados (pode ser menos que `buf.len()` se o volume encheu) ou um
+/// código de erro. `buf.len()` deve ser no máximo `abi::IO_MAX_LEN`.
+pub fn write_file(fd: i64, buf: &[u8]) -> i64 {
+    // SAFETY: o ponteiro e o tamanho vêm de uma fatia viva do programa (memória
+    // mapeada e legível), que é o que `SYS_WRITE_FILE` exige do intervalo que
+    // o kernel vai ler.
+    unsafe { syscall3(SYS_WRITE_FILE, fd as u64, buf.as_ptr() as u64, buf.len() as u64) }
+}
+
+/// Apaga o arquivo `path`. Devolve `0` ou um código de erro (`abi::ERR_BUSY`
+/// se algum programa o tem aberto).
+pub fn remove(path: &[u8]) -> i64 {
+    // SAFETY: como em `create`: fatia viva do programa.
+    unsafe { syscall2(SYS_REMOVE, path.as_ptr() as u64, path.len() as u64) }
 }

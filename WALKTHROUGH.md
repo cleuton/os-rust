@@ -1677,3 +1677,129 @@ Acertar o relógio (escrever no RTC), a interrupção IRQ8 e o alarme, fuso
 horário e horário de verão, e qualquer cálculo de calendário além de rejeitar
 datas que não existem. A escrita, aliás, volta a aparecer em outro lugar: os
 Marcos 10 e 11 ensinam o kernel a escrever em arquivos.
+
+## Marco 10: escrita no ramdisk
+
+Até o Marco 9 o kernel só **lia** arquivos. O Marco 10 ensina o kernel a criar,
+ampliar e apagar arquivos, e começa pelo volume em que errar não custa nada: o
+ramdisk, que vive na memória e se perde ao reiniciar. A ideia cabe em uma frase:
+**um arquivo nasce vazio e só cresce pelo fim; apagar devolve os clusters; nada
+é guardado em cache.** Quem quiser trocar o conteúdo de um arquivo apaga e cria
+de novo. O leitor de FAT do Marco 8 já tratava o volume como dado não confiável;
+o escritor segue a mesma regra, e acrescenta uma pergunta nova: *e se tudo parar
+no meio?*
+
+### O ramdisk deixa de ser uma constante
+
+Até aqui o `/ram` era a imagem gerada pelo `build.rs`, embutida na imagem de
+boot com `include_bytes!`: memória que o kernel não grava. Agora `fs::init` faz
+uma **cópia** dessa imagem para um `Vec<u8>` de 4200 setores (`WritableRam`, em
+`src/blockdev.rs`) e o `/ram` passa a apontar para a cópia. A imagem embutida
+nunca é escrita; reiniciar refaz a cópia e o `/ram` volta ao que era. O trait
+`BlockDevice` ganhou `write_sector` e `writable`, os dois com implementação
+padrão que recusa (`BlockError::ReadOnly`): por isso o `RamDisk` embutido e o
+disco ATA continuam somente leitura sem mudar uma linha.
+
+### A FAT e as duas cópias
+
+A FAT (a tabela de alocação) é um vetor de números de 16 bits, um por cluster: a
+entrada de um cluster diz qual vem depois dele no arquivo, e `0xFFFF` marca o
+fim da cadeia; `0x0000` quer dizer **livre**. O volume guarda a FAT **duas
+vezes**, para que um defeito em uma cópia não perca tudo. Por isso toda mudança
+de uma entrada da FAT (`set_fat_entry`) é gravada nas duas cópias, **a primeira
+antes da outra**. O número de cópias não está em `Geometry`: sai da distância
+entre o início da FAT e o da raiz, dividida pelo tamanho de uma cópia.
+
+### Alocar: o menor cluster livre
+
+Para um cluster novo o escritor varre a FAT do cluster 2 em diante e leva o
+primeiro `0x0000` (`find_free_cluster`). Sem nenhum, `NoSpace`. É a política mais
+simples que existe, e é determinística: os testes sabem qual cluster vão receber,
+e um cluster liberado é o primeiro a voltar.
+
+### A ordem das escritas, e por que o tamanho vai por último
+
+Acrescentar bytes a um arquivo mexe em três lugares: a FAT (um cluster novo e a
+ligação nele), o próprio cluster (os dados) e a entrada de diretório (o tamanho
+e, se o arquivo estava vazio, o primeiro cluster). Cada um é um setor, e o
+sistema pode parar entre dois setores quaisquer. A ordem de `Fat::append` é
+escolhida para que **qualquer** parada deixe o volume legível:
+
+1. marcar o cluster novo como fim de cadeia (`0xFFFF`);
+2. ligar o cluster anterior a ele;
+3. gravar o setor inteiro do cluster novo: os dados mais **zeros** até o fim, para
+   que nenhum byte de um arquivo apagado sobre dentro de um arquivo novo;
+4. só então gravar o **tamanho** (e o primeiro cluster) na entrada de diretório.
+
+O leitor só enxerga o que o tamanho diz. Se a parada vier antes do passo 4, o
+arquivo continua com o tamanho antigo e o cluster novo é invisível: no pior caso
+fica um cluster marcado como usado sem dono, ou ligado ao fim da cadeia além do
+tamanho (o próximo `append` o **reaproveita**). Nunca existe um tamanho que
+prometa mais do que a cadeia cobre. Antes de escrever qualquer coisa, o `append`
+também percorre a cadeia inteira (com o limite de passos do leitor): uma FAT
+adulterada é recusada sem escrever um único setor.
+
+Esse argumento é **testado**, não só explicado: um dispositivo de teste que falha
+na N-ésima escrita (`RwDisk`, em `src/fat.rs`) roda criar, acrescentar
+atravessando um cluster e apagar, para cada N; depois de cada corte o volume é
+remontado, percorrido inteiro pelo leitor, e todos os arquivos anteriores são
+comparados byte a byte.
+
+### Criar: uma escrita só
+
+Criar um arquivo é escrever **um** setor: a entrada nova (nome 8.3, atributo
+arquivo, nenhum cluster, tamanho 0, data e hora zeradas) na primeira posição
+livre do diretório. Uma escrita só não pode ser interrompida pela metade. Para que
+o chamador confira outras condições antes (o programa ainda tem descritor livre?),
+a criação é dividida em `plan_create`, que não escreve nada, e `commit_create`:
+uma criação que falha nunca deixa um arquivo para trás. O diretório não cresce:
+sem posição livre, `NoSpace`.
+
+### Apagar: a entrada primeiro, os clusters depois
+
+`Fat::remove` confere a cadeia inteira **antes** de alterar qualquer coisa: se ela
+tem ciclo, sai do volume ou é mais curta que o tamanho, o arquivo não é apagado
+(`Corrupt`). Depois: (1) marca a entrada como apagada (`0xE5` no primeiro byte do
+nome); (2) libera cada cluster (`0x0000`). A ordem importa pelo mesmo motivo de
+antes: se parar entre as duas, sobram clusters sem dono, mas nunca um arquivo
+visível cuja cadeia já está livre (que outro arquivo reaproveitaria, misturando
+dados).
+
+### Por que um arquivo aberto não se apaga
+
+Um programa que abriu um arquivo guarda uma posição de leitura. Se outro programa
+apagasse o arquivo e um terceiro criasse um novo, os clusters liberados seriam
+reaproveitados, e o leitor passaria a ler dados de outro arquivo. Em vez de
+resolver isso com contagem de referências, o kernel recusa: `SYS_REMOVE` de um
+arquivo que **qualquer** programa tem aberto devolve `ERR_BUSY`. O registro
+(`OPEN_REGISTRY`, em `src/fs.rs`) guarda a identidade de cada arquivo aberto: o
+setor e o deslocamento da **entrada de diretório**, que não muda enquanto o
+arquivo existe (diretórios não crescem e não se movem). O `Drop` da tabela de
+arquivos de cada programa já roda quando ele termina, por `exit` ou por falha, e é
+o que o tira do registro.
+
+### Atômico para o escalonador
+
+Cada escrita roda dentro de uma syscall, com as interrupções desligadas, e o
+timer só troca de programa quando interrompe ring 3. Logo uma escrita termina
+inteira antes de qualquer troca de tarefa, e dois programas acrescentando ao mesmo
+arquivo nunca se atropelam: cada `SYS_WRITE_FILE` lê o tamanho **atual** do
+volume e grava ali.
+
+### Do prompt ao programa
+
+Os comandos `grava`, `anexa` e `apaga` (`src/shell.rs`) usam as mesmas funções de
+`src/fs.rs`. As quatro syscalls novas (`SYS_CREATE`, `SYS_OPEN_APPEND`,
+`SYS_WRITE_FILE`, `SYS_REMOVE`) usam a mesma tabela de arquivos do Marco 8, agora
+com um **modo** por descritor (leitura ou acrescentar). `SYS_WRITE_FILE` copia os
+dados do programa em pedaços de um setor para um buffer da pilha do kernel,
+como `SYS_READ` faz no sentido contrário. A biblioteca de runtime esconde tudo
+atrás de `FileWriter` e `remove`, e os programas `gravador` e `apagador` fecham o
+ciclo.
+
+### O que ficou de fora
+
+Posicionar, sobrescrever no meio e truncar, criar e remover diretórios, data e
+hora nas entradas, atributos, nomes longos e qualquer cache ou escrita atrasada.
+E o disco de verdade: o Marco 11 leva a mesma camada ao `/disco`, com a escrita de
+setores no driver ATA.

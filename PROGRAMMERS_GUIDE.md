@@ -21,7 +21,8 @@ The runtime library (`runtime/`, at the repository root) exists so that you do n
 - `read_line(&mut buffer)`: waits for the user to type a line and press Enter, and returns what was typed (without the Enter) as text, through the keyboard read syscall. The system echoes what is typed to the screen and erases with Backspace; the line is at most 127 characters long.
 - A global allocator: lets you use `Box`, `Vec`, `String`, and the rest of the `alloc` crate (with `extern crate alloc;` in your program), through the memory syscall. The program's heap grows up to 1 MiB.
 - `yield_now()`: yields the CPU to another program that is running at the same time (see the **Multitasking** section).
-- `File`, `Dir`, `DirEntry`, and `FsError`: open and read files and list directories, read-only (see the **Files** section).
+- `File`, `Dir`, `DirEntry`, and `FsError`: open and read files and list directories (see the **Files** section). `File` and `Dir` only read.
+- `FileWriter` and `remove`: create a file, append bytes to its end and delete it, on the `/ram` volume (see the **Writing files** section).
 - `time::now()`: the current date and time, in UTC (see the **The time** section).
 - `exit(codigo)`: ends the program early, if you need to.
 - A `panic!` handler: writes `[panic] <message>` to the screen and ends the program with code 101.
@@ -62,10 +63,14 @@ The official, versioned document for the syscall contract is [`SYSCALLS.md`](SYS
 | 3 | `SYS_READ_LINE` | Waits for a typed line, up to Enter | `read_line(&mut buffer)` |
 | 4 | `SYS_ALLOC` | Grows the program's heap | the global allocator, used by `Box`/`Vec`/`String` |
 | 5 | `SYS_YIELD` | Yields the CPU to another program | `yield_now()` |
-| 6 | `SYS_OPEN` | Opens a file or directory (read-only) | `File::open`, `Dir::open` |
+| 6 | `SYS_OPEN` | Opens a file or directory for reading | `File::open`, `Dir::open` |
 | 7 | `SYS_READ` | Reads bytes from an open file | `File::read` |
 | 8 | `SYS_CLOSE` | Closes a file or directory | automatic, when the `File`/`Dir` goes out of scope |
 | 9 | `SYS_READ_DIR` | Reads the next entry of an open directory | `Dir::next` |
+| 11 | `SYS_CREATE` | Creates an empty file and opens it for appending | `FileWriter::create` |
+| 12 | `SYS_OPEN_APPEND` | Opens an existing file for appending | `FileWriter::append` |
+| 13 | `SYS_WRITE_FILE` | Writes bytes at the end of the file | `FileWriter::write`, `FileWriter::write_all` |
+| 14 | `SYS_REMOVE` | Deletes a file | `remove` |
 
 If your program needs to call a syscall directly (beyond what the runtime library already covers), consult `SYSCALLS.md` for the exact number and convention.
 
@@ -447,7 +452,7 @@ The first line goes to `eco`, which asked first; the second goes to `eco2`.
 
 ## Files
 
-os-rust reads files, **read-only**: no program creates, changes, or deletes files. Files live on two volumes, both in FAT16 format, and your program sees them through the same path, without knowing where the bytes come from:
+os-rust has files on two volumes (`/ram` accepts writes, see **Writing files**; `/disco` is **read-only**). This section shows how to **read**. Files live on two volumes, both in FAT16 format, and your program sees them through the same path, without knowing where the bytes come from:
 
 | Volume | What it is |
 |---|---|
@@ -499,6 +504,10 @@ Every operation returns `Result<_, FsError>`. `FsError` implements `Display`, so
 | `PathTooLong` | more than 64 bytes or 8 components |
 | `Invalid` | malformed path: empty component, name outside 8.3, `.` or `..`, or no `/` at the start |
 | `Io` | error reading the volume: the disk did not respond or the volume structure is corrupted |
+| `Exists` | `FileWriter::create` on a name that already exists |
+| `NoSpace` | the volume (or directory) has no space left |
+| `ReadOnly` | the volume does not accept writes (for example, `/disco`) |
+| `Busy` | `remove` of a file that some program has open |
 
 A file error **never** brings down your program or the kernel: you receive the `Err` and decide what to do.
 
@@ -619,6 +628,180 @@ fn main() -> i32 {
 2. Create `programs/src/bin/meuleitor.rs` by copying `leitor` and change the `CAMINHO` constant to `"/disco/notas.txt"`.
 3. Run `cargo run` and, at the prompt, `run meuleitor`.
 4. To just check the file without writing a program, the prompt has `ls <path>` and `cat <path>` (for example, `ls /disco`, `cat /disco/notas.txt`).
+
+## Writing files
+
+The `/ram` volume accepts writes; `/disco` stays **read-only**. Writing is simple on purpose: **a file is born empty and only grows at the end; deleting gives the space back; nothing is kept for later** (every `write` already leaves the data on the volume, there is no `flush`). To replace the contents of a file, delete it and create it again.
+
+```rust
+use runtime::{remove, FileWriter, FsError};
+
+let mut arquivo = FileWriter::create("/ram/nota.txt")?;  // Result<FileWriter, FsError>; Exists if the name exists
+arquivo.write_all(b"ola, ramdisk\n")?;                   // writes everything, repeating write until done
+let n = arquivo.write(b"mais")?;                         // Result<usize, FsError>; may write less than asked
+
+let mut mesmo = FileWriter::append("/ram/nota.txt")?;    // opens an existing file, for appending
+remove("/ram/nota.txt")?;                                // Result<(), FsError>
+```
+
+The rules:
+
+- **Only at the end.** There is no seeking, overwriting in the middle or truncating. `FileWriter::create` fails with `Exists` if the name exists: nothing is overwritten by accident.
+- **An open file is not deleted.** `remove` of a file that *any* program has open (including yours) returns `Busy`. Close it first: let the `File` or `FileWriter` go out of scope (`drop(arquivo)`).
+- **Full volume.** `write` returns how many bytes fit; the next call returns `NoSpace`. What fit stays written.
+- **A reader sees the size from when it opened.** A `File` opened before a `write` does not see what was appended later; a new open sees everything.
+- Directories do not grow (no free slot, `NoSpace`), directories are not created or removed, and only `/ram` files change: rebooting returns `/ram` to its original contents. Nothing is protected: any file in `/ram` can be deleted.
+- The prompt has the commands `grava <path> [<text>]`, `anexa <path> <text>` and `apaga <path>` to do the same by hand.
+
+### Example program 10: gravador
+
+Creates `/ram/gravado.txt` with 20 lines (680 bytes); if the file already exists, it appends one line. File: `programs/src/bin/gravador.rs`. Run with `run gravador` (creates), again (extends), and check with `cat /ram/gravado.txt`. (The comments in the source are in Portuguese, the project's language.)
+
+```rust
+//! `gravador`: cria um arquivo no ramdisk e, na vez seguinte, o amplia.
+//!
+//! Um programa nunca fala com o disco: ele pede ao kernel, por syscalls, e a
+//! biblioteca de runtime esconde as syscalls atrás de `FileWriter`, que fecha o
+//! descritor sozinho quando sai de escopo. Escrever é sempre **pelo fim**: um
+//! arquivo nasce vazio e só cresce acrescentando bytes. Por isso o programa
+//! tenta criar primeiro; se o nome já existe (`Exists`), abre o arquivo para
+//! acrescentar em vez de sobrescrevê-lo.
+//!
+//! Só o `/ram` aceita escrita (o `/disco` é somente leitura), e reiniciar o
+//! sistema devolve o `/ram` ao conteúdo original. O caminho é fixo porque
+//! programas não recebem argumentos de linha de comando.
+//!
+//! Rode com `run gravador` (cria), de novo (amplia) e `run apagador` (remove).
+
+#![no_std]
+#![no_main]
+
+use runtime::{entry, println, FileWriter, FsError};
+
+entry!(main);
+
+/// O arquivo que o programa cria e amplia.
+const CAMINHO: &str = "/ram/gravado.txt";
+
+fn main() -> i32 {
+    match FileWriter::create(CAMINHO) {
+        Ok(mut arquivo) => {
+            if let Err(erro) = grava_linhas(&mut arquivo) {
+                println!("gravador: nao gravou {}: {}", CAMINHO, erro);
+                return 1;
+            }
+            println!("gravador: criei {} (680 bytes)", CAMINHO);
+            0
+        }
+        // O nome já existe: acrescenta ao fim, sem tocar no que já está lá.
+        Err(FsError::Exists) => {
+            let resultado = FileWriter::append(CAMINHO)
+                .and_then(|mut arquivo| arquivo.write_all(b"mais uma linha do gravador\n"));
+            match resultado {
+                Ok(()) => {
+                    println!("gravador: ampliei {} (+27 bytes)", CAMINHO);
+                    0
+                }
+                Err(erro) => {
+                    println!("gravador: nao gravou {}: {}", CAMINHO, erro);
+                    1
+                }
+            }
+        }
+        Err(erro) => {
+            println!("gravador: nao gravou {}: {}", CAMINHO, erro);
+            1
+        }
+    }
+}
+
+/// Grava as 20 linhas `linha NN: gravada por um programa`, cada uma com 34
+/// bytes (33 de texto e a quebra de linha), 680 no total. A linha é montada
+/// num buffer da pilha: o programa não precisa de heap.
+fn grava_linhas(arquivo: &mut FileWriter) -> Result<(), FsError> {
+    for numero in 1..=20u8 {
+        let mut linha = *b"linha NN: gravada por um programa\n";
+        linha[6] = b'0' + numero / 10;
+        linha[7] = b'0' + numero % 10;
+        arquivo.write_all(&linha)?;
+    }
+    Ok(())
+}
+```
+
+### Example program 11: apagador
+
+Writes to the screen the file that `gravador` created, closes it and deletes it. File: `programs/src/bin/apagador.rs`. Run with `run apagador`.
+
+```rust
+//! `apagador`: mostra o arquivo que o `gravador` criou e o apaga.
+//!
+//! Primeiro lê o conteúdo (em pedaços de 128 bytes, como o `leitor`) e o
+//! escreve na tela, o que também prova que um programa lê o que outro gravou.
+//! Depois remove o arquivo com `remove`.
+//!
+//! Se o arquivo não existe, o programa avisa e termina com código 1.
+//!
+//! Rode com `run gravador` antes, e depois `run apagador`.
+
+#![no_std]
+#![no_main]
+
+use runtime::sys::write;
+use runtime::{entry, println, remove, File, FsError};
+
+entry!(main);
+
+/// O arquivo que o `gravador` cria.
+const CAMINHO: &str = "/ram/gravado.txt";
+
+fn main() -> i32 {
+    let mut arquivo = match File::open(CAMINHO) {
+        Ok(arquivo) => arquivo,
+        Err(FsError::NotFound) => {
+            println!("apagador: nao ha {} (rode gravador antes)", CAMINHO);
+            return 1;
+        }
+        Err(erro) => {
+            println!("apagador: nao abriu {}: {}", CAMINHO, erro);
+            return 2;
+        }
+    };
+
+    let mut pedaco = [0u8; 128];
+    loop {
+        match arquivo.read(&mut pedaco) {
+            // 0 bytes: o arquivo acabou.
+            Ok(0) => break,
+            Ok(n) => {
+                write(&pedaco[..n]);
+            }
+            Err(erro) => {
+                println!("apagador: erro de leitura: {}", erro);
+                return 2;
+            }
+        }
+    }
+
+    // O kernel não apaga um arquivo aberto (um leitor poderia passar a ler
+    // clusters reaproveitados): `remove` daria `Busy`. Por isso o arquivo é
+    // fechado antes, soltando-o de escopo.
+    drop(arquivo);
+
+    match remove(CAMINHO) {
+        Ok(()) => {
+            println!("apagador: removi {}", CAMINHO);
+            0
+        }
+        Err(erro) => {
+            println!("apagador: nao removeu {}: {}", CAMINHO, erro);
+            3
+        }
+    }
+}
+```
+
+Note that `apagador` closes the file (`drop(arquivo)`) **before** calling `remove`: with the file open, `remove` would return `Busy`.
 
 ## The time
 

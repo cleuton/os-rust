@@ -2,9 +2,9 @@
 
 # Contrato de syscalls do os-rust
 
-**Versão do contrato**: 5
+**Versão do contrato**: 6
 
-**Válido a partir de**: os-rust 0.9.0 (Marco 9)
+**Válido a partir de**: os-rust 0.10.0 (Marco 10)
 
 Este documento é tudo que um programa precisa saber para rodar no os-rust.
 O kernel e os programas nunca dependem de nada que não esteja aqui. Uma
@@ -102,7 +102,7 @@ unsafe {
 
 ## 5. Syscalls
 
-Números do contrato v5. **Qualquer outro número** (inclusive `0`)
+Números do contrato v6. **Qualquer outro número** (inclusive `0`)
 encerra o programa (§7).
 
 | Nº | Nome | Argumentos | Resultado |
@@ -117,6 +117,10 @@ encerra o programa (§7).
 | 8 | `SYS_CLOSE` | `rdi = fd` | `0` ou erro (`< 0`) |
 | 9 | `SYS_READ_DIR` | `rdi = fd`, `rsi = ptr`, `rdx = len` | `1` (uma entrada escrita), `0` (fim do diretório) ou erro (`< 0`) |
 | 10 | `SYS_TIME` | `rdi = ptr`, `rsi = len` | `0` (um `DateTime` escrito) ou erro (`< 0`) |
+| 11 | `SYS_CREATE` | `rdi = path_ptr`, `rsi = path_len` | descritor para acrescentar (`≥ 0`) ou erro (`< 0`) |
+| 12 | `SYS_OPEN_APPEND` | `rdi = path_ptr`, `rsi = path_len` | descritor para acrescentar (`≥ 0`) ou erro (`< 0`) |
+| 13 | `SYS_WRITE_FILE` | `rdi = fd`, `rsi = ptr`, `rdx = len` | bytes gravados (`≥ 0`) ou erro (`< 0`) |
+| 14 | `SYS_REMOVE` | `rdi = path_ptr`, `rsi = path_len` | `0` ou erro (`< 0`) |
 
 ### `SYS_WRITE` (1)
 
@@ -216,6 +220,10 @@ antes de ser interpretado.
 - Erro ao ler o volume (disco que não responde, estrutura corrompida):
   `ERR_IO`.
 
+Os descritores abertos por `SYS_CREATE` e `SYS_OPEN_APPEND` são **só para
+acrescentar**: aceitam `SYS_WRITE_FILE` e `SYS_CLOSE`, e `SYS_READ` neles dá
+`ERR_BADF`.
+
 ### `SYS_READ` (7)
 
 Lê até `len` bytes do arquivo aberto em `fd`, a partir da posição dele, para
@@ -228,7 +236,7 @@ chamada.
 - `[ptr, ptr + len)` deve estar dentro da região do usuário, mapeado e
   **gravável**; senão `ERR_FAULT`, antes de ler qualquer coisa do volume.
 - `fd` fora de `0..=3`, nunca aberto ou já fechado: `ERR_BADF`.
-- `fd` de um diretório: `ERR_TYPE`.
+- `fd` de um diretório: `ERR_TYPE`. `fd` aberto para acrescentar: `ERR_BADF`.
 - Se a leitura falha depois de já ter entregue bytes nesta chamada, a chamada
   devolve os bytes entregues, e a **próxima** devolve o erro (`ERR_IO`).
 
@@ -247,7 +255,8 @@ escrito).
 - `len < 20` ou `len > 4096`: `ERR_INVAL`.
 - `[ptr, ptr + 20)` deve estar na região do usuário, mapeado e **gravável**;
   senão `ERR_FAULT`.
-- `fd` inválido: `ERR_BADF`. `fd` de um arquivo: `ERR_TYPE`.
+- `fd` inválido: `ERR_BADF`. `fd` de um arquivo (inclusive um aberto para
+  acrescentar): `ERR_TYPE`.
 - Entradas apagadas, de nome longo, rótulo de volume, `.` e `..` não
   aparecem.
 
@@ -280,6 +289,64 @@ As verificações acontecem nesta ordem:
 Não existe fuso horário: o resultado é sempre UTC. Na biblioteca de runtime:
 `time::now()`.
 
+### `SYS_CREATE` (11)
+
+Cria um arquivo **vazio** e o abre para acrescentar, no menor descritor livre.
+Só o `/ram` aceita escrita. O caminho é tratado exatamente como em
+`SYS_OPEN`; passadas as verificações de caminho, a ordem é:
+
+1. Volume desconhecido ou indisponível: `ERR_NODEV`.
+2. Volume que não aceita escrita (`/disco`; ou um volume com mais de 1 setor
+   por cluster): `ERR_ROFS`. Vem **antes** de olhar o caminho: `/disco/qualquer`
+   dá `ERR_ROFS`, exista ou não.
+3. Diretório pai (todos os componentes menos o último) inexistente:
+   `ERR_NOENT`; um arquivo no meio do caminho: `ERR_TYPE`.
+4. O nome já existe (arquivo, diretório ou a raiz do volume): `ERR_EXIST`.
+5. O programa já tem 4 arquivos abertos: `ERR_MFILE`, **antes** de criar
+   qualquer coisa: uma criação que falha nunca deixa um arquivo para trás.
+6. O diretório pai não tem entrada livre (o diretório não cresce):
+   `ERR_NOSPC`.
+7. Erro ao ler ou gravar o volume, ou FAT inconsistente: `ERR_IO` (em qualquer
+   passo).
+
+A entrada nova tem atributo arquivo, nenhum cluster, tamanho `0` e data e hora
+zeradas.
+
+### `SYS_OPEN_APPEND` (12)
+
+Abre um arquivo **existente** para acrescentar, no menor descritor livre.
+Mesmas verificações de caminho, volume (`ERR_NODEV`, `ERR_ROFS`) e pai de
+`SYS_CREATE`. Inexistente: `ERR_NOENT`. O alvo é um diretório (inclusive a raiz
+do volume): `ERR_TYPE`. 4 arquivos abertos: `ERR_MFILE`. Erro de volume:
+`ERR_IO`.
+
+### `SYS_WRITE_FILE` (13)
+
+Grava `len` bytes de `ptr` no **fim atual** do arquivo aberto em `fd`; o
+tamanho é lido do volume a cada chamada. Verificações, nesta ordem:
+
+- `len == 0`: devolve `0` sem olhar `ptr` nem `fd`. `len > 4096`: `ERR_INVAL`.
+- `[ptr, ptr + len)` deve estar na região do usuário e mapeado (basta ser
+  legível); senão `ERR_FAULT`, antes de gravar qualquer coisa.
+- `fd` fora de `0..=3`, fechado, aberto só para leitura ou de um diretório:
+  `ERR_BADF`.
+
+Devolve o número de bytes gravados. É `len`, a menos que o volume acabe ou
+falhe no meio: então devolve os bytes que gravou (`1 ≤ n < len`), e a
+**próxima** chamada devolve o erro (`ERR_NOSPC` ou `ERR_IO`). Se nenhum byte
+pôde ser gravado, a própria chamada devolve o erro. Ao voltar, os dados, a
+cadeia da FAT e o tamanho já estão no volume: não há cache nem `flush`, e
+`SYS_CLOSE` não grava nada.
+
+### `SYS_REMOVE` (14)
+
+Apaga um arquivo e devolve `0`. Mesmas verificações de caminho, volume e pai
+de `SYS_CREATE`. Inexistente: `ERR_NOENT`. O alvo é um diretório (inclusive a
+raiz): `ERR_TYPE`. Aberto por **qualquer** programa, inclusive o que chama:
+`ERR_BUSY`, sem alterar nada. Cadeia de clusters inconsistente: `ERR_IO`, sem
+alterar nada (um arquivo assim não pode ser apagado). Os clusters do arquivo
+voltam a ficar livres.
+
 ## 6. Resultado e códigos de erro
 
 O resultado em `rax` é um inteiro com sinal de 64 bits: `≥ 0` é sucesso
@@ -292,12 +359,16 @@ O resultado em `rax` é um inteiro com sinal de 64 bits: `≥ 0` é sucesso
 | `ERR_NOMEM` | `-3` | `SYS_ALLOC` não pôde dar a memória pedida (limite de 1 MiB do heap ou falta de memória física). |
 | `ERR_NOENT` | `-4` | O caminho, ou um componente dele, não existe. |
 | `ERR_NODEV` | `-5` | Volume desconhecido, ou conhecido mas indisponível (sem disco, volume inválido). |
-| `ERR_TYPE` | `-6` | Tipo errado: `SYS_READ` em diretório, `SYS_READ_DIR` em arquivo, ou arquivo no meio do caminho. |
-| `ERR_BADF` | `-7` | Descritor inválido: fora de `0..=3`, não aberto ou já fechado. |
+| `ERR_TYPE` | `-6` | Tipo errado: `SYS_READ` em diretório, `SYS_READ_DIR` em arquivo, arquivo no meio do caminho, ou acrescentar ou remover um diretório. |
+| `ERR_BADF` | `-7` | Descritor inválido: fora de `0..=3`, não aberto ou já fechado, ou usado no modo errado (`SYS_READ` em descritor de acrescentar, `SYS_WRITE_FILE` em descritor de leitura). |
 | `ERR_MFILE` | `-8` | O programa já tem 4 arquivos abertos. |
 | `ERR_NAMETOOLONG` | `-9` | Caminho com mais de 64 bytes, ou com mais de 8 componentes. |
 | `ERR_IO` | `-10` | Erro ao ler o volume: disco que não responde, erro do disco ou estrutura FAT corrompida. |
 | `ERR_CLOCK` | `-11` | `SYS_TIME`: o relógio devolveu valores impossíveis, não se estabilizou ou não respondeu. |
+| `ERR_EXIST` | `-12` | `SYS_CREATE`: o nome já existe (arquivo, diretório ou a raiz do volume). |
+| `ERR_NOSPC` | `-13` | Sem cluster livre, ou diretório sem entrada livre. |
+| `ERR_ROFS` | `-14` | O volume existe, está montado e não aceita escrita (`/disco`; ou um volume com mais de 1 setor por cluster). |
+| `ERR_BUSY` | `-15` | `SYS_REMOVE` de um arquivo que algum programa tem aberto. |
 
 Não há errno: o programa recebe só o valor em `rax`.
 
@@ -309,7 +380,7 @@ Não há errno: o programa recebe só o valor em `rax`.
 | `SYS_EXIT(n)`, `n ≠ 0` | `[run] <nome> terminou com codigo <n>` | idem |
 | Acesso inválido à memória (`#PF`) em ring 3 | `[run] <nome> encerrado por erro de memoria: #PF (Page Fault) em <rip>` + `codigo de erro: <código>` + `endereco de falha: <endereço>` | idem |
 | Outra exceção de CPU em ring 3 (`#DE`, `#UD`, `#GP`, `#SS`, `#NP`) | `[run] <nome> encerrado por erro: <sigla> (<nome da exceção>) em <rip>` (+ código de erro, quando houver) | idem |
-| Número de syscall inexistente (qualquer um fora de 1 a 10) | `[run] <nome> encerrado: syscall inexistente (<n>)` | idem |
+| Número de syscall inexistente (qualquer um fora de 1 a 14) | `[run] <nome> encerrado: syscall inexistente (<n>)` | idem |
 
 A mensagem aparece **na hora** em que aquele programa termina, em tela e
 serial, mesmo que outros continuem rodando. Uma falha do programa **nunca**
@@ -382,19 +453,45 @@ digitado depois aparece nele sem perdas.
 
 ## 9. Sistema de arquivos
 
-O sistema de arquivos é **somente leitura**. Não existe syscall para criar,
-escrever, renomear nem apagar: nenhum arquivo muda enquanto o os-rust roda.
+Há dois volumes. O `/ram` é de **leitura e escrita**: dá para criar arquivos,
+acrescentar bytes ao fim deles e apagá-los. O `/disco` continua
+**somente leitura**. Não existe syscall para renomear, posicionar, sobrescrever
+no meio, truncar nem criar ou remover diretórios.
 
 ### Volumes
 
-| Prefixo | O que é | Disponível |
-|---------|---------|------------|
-| `/ram` | ramdisk FAT16 embutido na imagem de boot | sempre |
-| `/disco` | disco ATA (canal primário, escravo) com um volume FAT16 | só se o QEMU anexou um disco com um volume válido |
+| Prefixo | O que é | Disponível | Escrita |
+|---------|---------|------------|---------|
+| `/ram` | ramdisk FAT16: cópia, em memória, da imagem embutida na imagem de boot | sempre | **sim** (volta ao conteúdo original ao reiniciar) |
+| `/disco` | disco ATA (canal primário, escravo) com um volume FAT16 | só se o QEMU anexou um disco com um volume válido | não: **somente leitura** |
 
 Um volume indisponível (sem disco, dispositivo que não é um disco ATA, setor
 de boot inválido, erro de leitura) faz as operações sobre ele devolverem
 `ERR_NODEV`; o outro volume segue funcionando e o kernel não é afetado.
+
+### Escrever
+
+- **Só pelo fim.** Um arquivo nasce vazio (`SYS_CREATE`) e só cresce por
+  `SYS_WRITE_FILE`, sempre no fim atual. Quem quiser trocar o conteúdo apaga e
+  cria de novo.
+- **Sem cache.** Cada escrita termina com os dados, a FAT e o tamanho já no
+  volume. Se a operação for interrompida entre dois setores, o volume continua
+  legível; no pior caso sobram clusters usados sem dono.
+- **Arquivo aberto não se apaga.** `SYS_REMOVE` de um arquivo aberto por
+  qualquer programa (em qualquer modo) dá `ERR_BUSY`. Ao terminar (por `exit`
+  ou por falha), o programa deixa de segurar os arquivos.
+- **Tamanho visto na abertura.** Um arquivo aberto para leitura mostra o
+  tamanho que tinha quando foi aberto; o que for acrescentado depois só
+  aparece numa nova abertura.
+- **Listagem durante escrita.** Um diretório aberto durante uma criação ou
+  remoção nele pode pular ou repetir uma entrada (a listagem anda por posição).
+- **Volume cheio.** Os bytes que couberam ficam gravados; o erro
+  (`ERR_NOSPC`) vem na chamada seguinte.
+- **Diretório não cresce.** Sem entrada livre nos setores que ele já tem, o
+  erro é `ERR_NOSPC`. Só se escreve em volume de 1 setor por cluster (o único
+  layout que o projeto gera); outro valor continua legível, mas a escrita é
+  `ERR_ROFS`.
+- Nada é protegido: qualquer arquivo do `/ram` pode ser apagado.
 
 ### Caminhos
 
@@ -438,7 +535,9 @@ clusters com ciclo, que sai do volume, ou mais curta que o tamanho do arquivo
 Descritores e posições de leitura são **do programa**: dois programas que
 abrem o mesmo arquivo têm posições independentes, e um programa nunca enxerga
 os descritores de outro. Na biblioteca de runtime: `File::open`, `File::read`,
-`Dir::open`, `Dir::next` (os descritores são fechados automaticamente).
+`Dir::open`, `Dir::next`, `FileWriter::create`, `FileWriter::append`,
+`FileWriter::write`, `FileWriter::write_all` e `remove` (os descritores são
+fechados automaticamente).
 
 ## 10. Histórico
 
@@ -449,3 +548,4 @@ os descritores de outro. Na biblioteca de runtime: `File::open`, `File::read`,
 | 3 | 7 (os-rust 0.7.0) | `SYS_YIELD` (5); vários programas ao mesmo tempo (até 4, cada um na sua memória, fatia de 5 ticks, timer a 100 Hz); mensagem de término na hora em que o programa termina; teclado para o programa que pediu primeiro. Programas v1 e v2 continuam funcionando. |
 | 4 | 8 (os-rust 0.8.0) | `SYS_OPEN` (6), `SYS_READ` (7), `SYS_CLOSE` (8), `SYS_READ_DIR` (9); erros `ERR_NOENT` (`-4`) a `ERR_IO` (`-10`); volumes `/ram` e `/disco` (FAT16, somente leitura); tabela de arquivos por programa (até 4); `run` aceita caminhos de arquivo (executável de até 64 KiB). Programas v1, v2 e v3 continuam funcionando. |
 | 5 | 9 (os-rust 0.9.0) | `SYS_TIME` (10); erro `ERR_CLOCK` (`-11`); `DateTime` de 8 bytes, sempre em UTC. Programas v1 a v4 continuam funcionando. |
+| 6 | 10 (os-rust 0.10.0) | `SYS_CREATE` (11), `SYS_OPEN_APPEND` (12), `SYS_WRITE_FILE` (13), `SYS_REMOVE` (14); erros `ERR_EXIST` (`-12`) a `ERR_BUSY` (`-15`); `/ram` passa a aceitar escrita (só pelo fim); `/disco` continua somente leitura; `ERR_TYPE` e `ERR_BADF` cobrem também o modo errado do descritor. Programas v1 a v5 continuam funcionando. |

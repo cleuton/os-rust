@@ -7,6 +7,48 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.10.0] - 2026-10-23
+
+Marco 10: escrita no ramdisk. O kernel passa a **criar, acrescentar e apagar
+arquivos** no volume `/ram`, pelo prompt e por programas de usuário. O `/disco`
+continua somente leitura (o Marco 11 o abre). Contrato de syscalls: versão 6.
+
+### Adicionado
+
+- Camada de escrita do FAT16 (`src/fat.rs`): criar um arquivo vazio, acrescentar
+  bytes ao fim (menor cluster livre, duas cópias da FAT, tamanho gravado por
+  último) e apagar (entrada primeiro, clusters depois). Sem cache; uma
+  interrupção entre dois setores deixa o volume legível. O escritor trata o
+  volume como dado não confiável.
+- Comandos `grava`, `anexa` e `apaga` no prompt, com as mensagens de erro novas
+  (`ja existe`, `sem espaco`, `volume somente leitura`, `arquivo em uso`).
+- Syscalls `SYS_CREATE` (11), `SYS_OPEN_APPEND` (12), `SYS_WRITE_FILE` (13) e
+  `SYS_REMOVE` (14), e os erros `ERR_EXIST` (`-12`), `ERR_NOSPC` (`-13`),
+  `ERR_ROFS` (`-14`) e `ERR_BUSY` (`-15`).
+- Biblioteca de runtime: `FileWriter` (`create`, `append`, `write`,
+  `write_all`), `remove` e quatro erros novos em `FsError`.
+- Programas `gravador` (cria e amplia `/ram/gravado.txt`) e `apagador` (mostra o
+  arquivo e o apaga).
+- Testes: unidade em `blockdev`, `fat` (inclusive a interrupção simulada em cada
+  ponto de falha), `fs`, `shell` e `syscall`; `tests/escrita_no_ramdisk.rs`
+  (programas ponta a ponta, 100 ciclos, cada erro de cada syscall, `ERR_BUSY`,
+  volume cheio, `/disco` que não muda, contrato e guia).
+- Ajudantes de teste ocultos: `fs::reset_ramdisk()` e `fs::free_clusters()`.
+
+### Alterado
+
+- O `/ram` passa a viver em memória gravável (cópia, em `fs::init`, da imagem
+  embutida, que nunca é escrita); reiniciar restaura o conteúdo original.
+- Contrato de syscalls na versão 6 (`SYSCALLS.md`): seção 9 reescrita (`/ram`
+  leitura e escrita, `/disco` somente leitura); `ERR_TYPE` e `ERR_BADF` cobrem
+  também o modo errado do descritor. Programas das versões 1 a 5 continuam
+  funcionando.
+- Dois testes existentes, que valiam para a versão 5 do contrato:
+  `contrato_declara_a_versao_5` (agora `contrato_declara_a_versao_6`) e o teste
+  de `tests/sistema_de_arquivos.rs` que usava o número `11` como syscall
+  inexistente (agora `15`).
+- Versão do projeto: `0.9.2` → `0.10.0`.
+
 ## [0.9.2] - 2026-10-22
 
 Versão de manutenção: sem marco novo, sem mudança de kernel e sem mudança de

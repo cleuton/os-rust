@@ -1,11 +1,15 @@
 //! Volumes, caminhos e arquivos abertos.
 //!
-//! O kernel tem **dois volumes fixos**, ambos FAT16 somente leitura:
+//! O kernel tem **dois volumes fixos**, ambos FAT16:
 //!
-//! | Prefixo  | O que é                                   |
-//! |----------|-------------------------------------------|
-//! | `/ram`   | o ramdisk, embutido na imagem de boot     |
-//! | `/disco` | o disco ATA (canal primário, escravo)     |
+//! | Prefixo  | O que é                                   | Acesso              |
+//! |----------|-------------------------------------------|---------------------|
+//! | `/ram`   | o ramdisk: cópia, em memória gravável, da imagem embutida na imagem de boot | leitura e escrita |
+//! | `/disco` | o disco ATA (canal primário, escravo)     | somente leitura     |
+//!
+//! A escrita é simples: criar um arquivo vazio, acrescentar bytes ao fim e
+//! apagar. Reiniciar restaura o `/ram`: a imagem embutida nunca é escrita.
+//! Um arquivo aberto por algum programa não pode ser apagado (`Busy`).
 //!
 //! Um caminho é `/<volume>/<componente>/...`, sem diferenciar maiúsculas de
 //! minúsculas, com componentes no formato 8.3. `.` e `..` são **inválidos**:
@@ -25,8 +29,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 
 use crate::ata::{AtaDisk, AtaError, Bus, Drive};
-use crate::blockdev::{BlockDevice, RamDisk};
-use crate::fat::{Cursor, DirEntry, Fat, FatError, Geometry, Kind, Node};
+use crate::blockdev::{BlockDevice, RamDisk, WritableRam};
+use crate::fat::{CreatePlan, Cursor, DirEntry, EntryLoc, Fat, FatError, Geometry, Kind, Node};
 
 pub use abi::{MAX_EXEC_SIZE, MAX_OPEN_FILES, MAX_PATH_LEN};
 
@@ -34,7 +38,12 @@ pub use abi::{MAX_EXEC_SIZE, MAX_OPEN_FILES, MAX_PATH_LEN};
 pub const MAX_DEPTH: usize = 8;
 
 /// A imagem do ramdisk, gerada pelo `build.rs` a partir de `discos/ram/`.
-static RAMDISK: RamDisk = RamDisk(include_bytes!(concat!(env!("OUT_DIR"), "/ramdisk.img")));
+/// Fica embutida na imagem de boot e **nunca é escrita**: é só a origem da
+/// cópia gravável abaixo.
+static EMBEDDED_RAMDISK: RamDisk = RamDisk(include_bytes!(concat!(env!("OUT_DIR"), "/ramdisk.img")));
+
+/// O ramdisk de verdade: uma cópia gravável da imagem embutida, feita em `init`.
+static RAMDISK: spin::Once<WritableRam> = spin::Once::new();
 
 /// Um dispositivo de blocos que pode morar num `static`.
 pub type Device = &'static (dyn BlockDevice + Sync);
@@ -125,6 +134,14 @@ pub enum FsError {
     TooManyOpen,
     /// Erro de leitura ou volume corrompido.
     Io,
+    /// Criar: o nome já existe.
+    AlreadyExists,
+    /// Sem cluster livre, ou diretório sem entrada livre.
+    NoSpace,
+    /// O volume está montado mas não aceita escrita.
+    ReadOnly,
+    /// Apagar um arquivo que algum programa tem aberto.
+    Busy,
 }
 
 impl From<FatError> for FsError {
@@ -136,6 +153,9 @@ impl From<FatError> for FsError {
             // Setor de boot ruim, erro de bloco e estrutura corrompida: do
             // ponto de vista de quem lê, tudo é erro de leitura.
             FatError::BadBoot(_) | FatError::Io(_) | FatError::Corrupt => FsError::Io,
+            FatError::Exists => FsError::AlreadyExists,
+            FatError::NoSpace => FsError::NoSpace,
+            FatError::ReadOnly => FsError::ReadOnly,
         }
     }
 }
@@ -278,7 +298,8 @@ fn probe_disco() -> VolumeState {
 /// leitura) deixa o volume indisponível, com o motivo, e o resto do kernel
 /// segue.
 pub fn init() {
-    *VOLUMES.lock() = [mount_state(&RAMDISK), probe_disco()];
+    let ram: &'static WritableRam = RAMDISK.call_once(|| WritableRam::new(EMBEDDED_RAMDISK.0));
+    *VOLUMES.lock() = [mount_state(ram), probe_disco()];
     report(VolumeId::Ram);
     report(VolumeId::Disco);
 }
@@ -302,6 +323,32 @@ fn with_fat<R>(id: VolumeId, f: impl FnOnce(&Fat<'_>) -> Result<R, FatError>) ->
     }
 }
 
+/// Como `with_fat`, para operações que escrevem: um volume que não aceita
+/// escrita (`/disco`, ou mais de 1 setor por cluster) é recusado com `ReadOnly`
+/// **antes** de qualquer consulta ao caminho. Um volume indisponível continua
+/// sendo reportado primeiro.
+fn with_fat_write<R>(id: VolumeId, f: impl FnOnce(&Fat<'_>) -> Result<R, FatError>) -> Result<R, FsError> {
+    with_fat(id, |fat| {
+        fat.check_writable()?;
+        f(fat)
+    })
+}
+
+/// Volta o `/ram` ao conteúdo da imagem embutida. Existe para os testes
+/// deixarem o volume como encontraram; o kernel de produção não a usa.
+#[doc(hidden)]
+pub fn reset_ramdisk() {
+    if let Some(ram) = RAMDISK.r#try() {
+        ram.reset(EMBEDDED_RAMDISK.0);
+    }
+}
+
+/// Quantos clusters estão livres no volume. Existe para os testes.
+#[doc(hidden)]
+pub fn free_clusters(id: VolumeId) -> Result<u32, FsError> {
+    with_fat(id, |fat| fat.free_clusters())
+}
+
 /// Resolve um caminho.
 pub fn lookup(path: &[u8]) -> Result<(VolumeId, Node), FsError> {
     let parsed = parse(path)?;
@@ -320,27 +367,117 @@ pub fn dir_entry(volume: VolumeId, dir: &Node, index: u32) -> Result<Option<DirE
 // Arquivos abertos
 // ---------------------------------------------------------------------------
 
-/// Um arquivo ou diretório aberto, somente para leitura: onde ele mora e onde
-/// a leitura está. Dados simples (`Copy`), sem heap.
+/// Para que um arquivo foi aberto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Leitura sequencial (arquivos) ou listagem (diretórios).
+    Read,
+    /// Acrescentar bytes ao fim; não tem posição.
+    Append,
+}
+
+/// Um arquivo ou diretório aberto: onde ele mora e onde a leitura está (ou, no
+/// modo acrescentar, onde mora a entrada de diretório que a escrita atualiza).
+/// Dados simples (`Copy`), sem heap.
 #[derive(Debug, Clone, Copy)]
 pub struct OpenFile {
     volume: VolumeId,
     node: Node,
-    /// Posição da leitura sequencial (só arquivos).
+    mode: Mode,
+    /// Posição da leitura sequencial (só arquivos abertos para leitura).
     cursor: Option<Cursor>,
     /// Quantas entradas de diretório já foram entregues (só diretórios).
     entries_read: u32,
+    /// A entrada de diretório do arquivo (só arquivos): a identidade dele.
+    loc: Option<EntryLoc>,
+}
+
+/// Uma criação planejada, ainda não gravada (ver `create_plan`).
+pub struct PendingCreate {
+    volume: VolumeId,
+    plan: CreatePlan,
+}
+
+/// Planeja criar o arquivo `path`, **sem escrever nada**: confere o volume
+/// (indisponível, depois somente leitura), o diretório pai e se o nome já
+/// existe. Quem chama pode conferir outras condições (como descritores livres)
+/// antes de `create_commit`, e uma criação que falha nunca deixa arquivo para
+/// trás.
+pub fn create_plan(path: &[u8]) -> Result<PendingCreate, FsError> {
+    let parsed = parse(path)?;
+    let plan = with_fat_write(parsed.volume, |fat| fat.plan_create(parsed.components()))?;
+    Ok(PendingCreate { volume: parsed.volume, plan })
+}
+
+/// Grava a entrada planejada e devolve o arquivo vazio, aberto para acrescentar.
+pub fn create_commit(pending: PendingCreate) -> Result<OpenFile, FsError> {
+    let loc = with_fat_write(pending.volume, |fat| fat.commit_create(pending.plan))?;
+    Ok(OpenFile {
+        volume: pending.volume,
+        node: Node { kind: Kind::File, first_cluster: 0, size: 0 },
+        mode: Mode::Append,
+        cursor: None,
+        entries_read: 0,
+        loc: Some(loc),
+    })
+}
+
+/// Apaga o arquivo `path`. Recusa, sem alterar nada, um arquivo que algum
+/// programa tem aberto (`Busy`): um leitor poderia passar a ler clusters que
+/// já foram reaproveitados.
+pub fn remove(path: &[u8]) -> Result<(), FsError> {
+    let parsed = parse(path)?;
+    let (loc, _) = with_fat_write(parsed.volume, |fat| fat.locate(parsed.components()))?;
+    if is_open(parsed.volume, loc) {
+        return Err(FsError::Busy);
+    }
+    with_fat_write(parsed.volume, |fat| fat.remove(loc))
 }
 
 impl OpenFile {
     /// Abre o arquivo ou diretório `path`.
     pub fn open(path: &[u8]) -> Result<OpenFile, FsError> {
-        let (volume, node) = lookup(path)?;
+        let parsed = parse(path)?;
+        let volume = parsed.volume;
+        let (node, loc) = with_fat(volume, |fat| {
+            let node = fat.lookup(parsed.components())?;
+            let loc = match node.kind {
+                Kind::File => Some(fat.locate(parsed.components())?.0),
+                Kind::Dir => None,
+            };
+            Ok((node, loc))
+        })?;
         let cursor = match node.kind {
             Kind::File => Some(with_fat(volume, |fat| fat.cursor(&node))?),
             Kind::Dir => None,
         };
-        Ok(OpenFile { volume, node, cursor, entries_read: 0 })
+        Ok(OpenFile { volume, node, mode: Mode::Read, cursor, entries_read: 0, loc })
+    }
+
+    /// Cria o arquivo `path` e o abre para acrescentar (planejar e gravar de uma vez).
+    pub fn create(path: &[u8]) -> Result<OpenFile, FsError> {
+        create_commit(create_plan(path)?)
+    }
+
+    /// Abre um arquivo **existente** para acrescentar. Diretório (inclusive a
+    /// raiz) é `IsADirectory`; inexistente é `NotFound`.
+    pub fn open_append(path: &[u8]) -> Result<OpenFile, FsError> {
+        let parsed = parse(path)?;
+        let (loc, node) = with_fat_write(parsed.volume, |fat| fat.locate(parsed.components()))?;
+        Ok(OpenFile { volume: parsed.volume, node, mode: Mode::Append, cursor: None, entries_read: 0, loc: Some(loc) })
+    }
+
+    /// Acrescenta `data` ao fim do arquivo (o fim **atual**, lido do volume
+    /// nesta chamada). Devolve os bytes gravados; ver `Fat::append`. Só vale em
+    /// descritor aberto para acrescentar: senão `BadDescriptor`.
+    pub fn write(&mut self, data: &[u8]) -> Result<usize, FsError> {
+        let loc = match (self.mode, self.loc) {
+            (Mode::Append, Some(loc)) => loc,
+            _ => return Err(FsError::BadDescriptor),
+        };
+        let n = with_fat(self.volume, |fat| fat.append(loc, data))?;
+        self.node.size = self.node.size.saturating_add(n as u32);
+        Ok(n)
     }
 
     /// Arquivo ou diretório.
@@ -355,6 +492,9 @@ impl OpenFile {
 
     /// Lê até `buf.len()` bytes e avança a posição; `0` no fim do arquivo.
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, FsError> {
+        if self.mode == Mode::Append {
+            return Err(FsError::BadDescriptor);
+        }
         let cursor = self.cursor.as_mut().ok_or(FsError::IsADirectory)?;
         with_fat(self.volume, |fat| fat.read(cursor, buf))
     }
@@ -386,6 +526,32 @@ pub fn open_files_in_use() -> usize {
     OPEN_FILES.load(Ordering::Relaxed)
 }
 
+/// Os arquivos abertos neste instante, por qualquer tarefa: o volume e a
+/// entrada de diretório de cada abertura (um item por abertura, então o mesmo
+/// arquivo aberto duas vezes aparece duas vezes). É o que deixa `remove`
+/// recusar um arquivo em uso. Só descritores de `FileTable` entram aqui: o
+/// shell lê e escreve de forma síncrona, sem troca de tarefa no meio.
+static OPEN_REGISTRY: Mutex<Vec<(VolumeId, EntryLoc)>> = Mutex::new(Vec::new());
+
+fn is_open(volume: VolumeId, loc: EntryLoc) -> bool {
+    OPEN_REGISTRY.lock().iter().any(|&(v, l)| v == volume && l == loc)
+}
+
+fn register(file: &OpenFile) {
+    if let Some(loc) = file.loc {
+        OPEN_REGISTRY.lock().push((file.volume, loc));
+    }
+}
+
+fn unregister(file: &OpenFile) {
+    if let Some(loc) = file.loc {
+        let mut registry = OPEN_REGISTRY.lock();
+        if let Some(at) = registry.iter().position(|&(v, l)| v == file.volume && l == loc) {
+            registry.swap_remove(at);
+        }
+    }
+}
+
 /// Os arquivos abertos de **uma** tarefa: `MAX_OPEN_FILES` posições fixas, sem
 /// heap. O descritor que o programa vê é o índice da posição. Como a tabela é
 /// um campo da `Task`, um programa nunca enxerga os descritores nem as posições
@@ -406,7 +572,35 @@ impl FileTable {
     /// reportado como tal mesmo com a tabela cheia.
     pub fn open(&mut self, path: &[u8]) -> Result<usize, FsError> {
         let file = OpenFile::open(path)?;
+        self.insert(file)
+    }
+
+    /// Abre um arquivo existente para acrescentar, na menor posição livre.
+    pub fn open_append(&mut self, path: &[u8]) -> Result<usize, FsError> {
+        let file = OpenFile::open_append(path)?;
+        self.insert(file)
+    }
+
+    /// Cria um arquivo vazio e o abre para acrescentar. A ordem do contrato:
+    /// nome existente, depois tabela cheia (**antes** de criar qualquer coisa),
+    /// depois diretório sem posição livre.
+    pub fn create(&mut self, path: &[u8]) -> Result<usize, FsError> {
+        let pending = create_plan(path)?;
+        if self.slots.iter().all(|slot| slot.is_some()) {
+            return Err(FsError::TooManyOpen);
+        }
+        let file = create_commit(pending)?;
+        self.insert(file)
+    }
+
+    /// Acrescenta `data` ao arquivo aberto em `fd`.
+    pub fn write(&mut self, fd: usize, data: &[u8]) -> Result<usize, FsError> {
+        self.get_mut(fd)?.write(data)
+    }
+
+    fn insert(&mut self, file: OpenFile) -> Result<usize, FsError> {
         let fd = self.slots.iter().position(|slot| slot.is_none()).ok_or(FsError::TooManyOpen)?;
+        register(&file);
         self.slots[fd] = Some(file);
         OPEN_FILES.fetch_add(1, Ordering::Relaxed);
         Ok(fd)
@@ -421,9 +615,8 @@ impl FileTable {
     /// Fecha o descritor `fd`. Fechar de novo é `BadDescriptor`.
     pub fn close(&mut self, fd: usize) -> Result<(), FsError> {
         let slot = self.slots.get_mut(fd).ok_or(FsError::BadDescriptor)?;
-        if slot.take().is_none() {
-            return Err(FsError::BadDescriptor);
-        }
+        let file = slot.take().ok_or(FsError::BadDescriptor)?;
+        unregister(&file);
         OPEN_FILES.fetch_sub(1, Ordering::Relaxed);
         Ok(())
     }
@@ -438,7 +631,8 @@ impl Default for FileTable {
 impl Drop for FileTable {
     fn drop(&mut self) {
         for slot in self.slots.iter_mut() {
-            if slot.take().is_some() {
+            if let Some(file) = slot.take() {
+                unregister(&file);
                 OPEN_FILES.fetch_sub(1, Ordering::Relaxed);
             }
         }
@@ -682,5 +876,192 @@ mod tests {
         assert_eq!(volume_status(VolumeId::Disco), Err(Reason::NoDisk));
         assert_eq!(lookup(b"/disco/qualquer").err(), Some(FsError::Unavailable(Reason::NoDisk)));
         replace_volume(VolumeId::Disco, old);
+    }
+
+    // ---- escrita (Marco 10) ----
+
+    /// Os nomes da raiz do `/ram`, para conferir que um teste deixou tudo como estava.
+    fn raiz_do_ram() -> Vec<alloc::string::String> {
+        let (volume, node) = lookup(b"/ram").unwrap();
+        let mut names = Vec::new();
+        let mut i = 0;
+        while let Some(e) = dir_entry(volume, &node, i).unwrap() {
+            names.push(alloc::string::String::from(e.name_str()));
+            i += 1;
+        }
+        names
+    }
+
+    /// Roda `f` e devolve o `/ram` ao estado de antes, conferindo-o.
+    fn com_ram_limpo(f: impl FnOnce()) {
+        reset_ramdisk();
+        let livres = free_clusters(VolumeId::Ram).unwrap();
+        let raiz = raiz_do_ram();
+        f();
+        reset_ramdisk();
+        assert_eq!(free_clusters(VolumeId::Ram).unwrap(), livres);
+        assert_eq!(raiz_do_ram(), raiz);
+    }
+
+    #[test_case]
+    fn criar_acrescentar_e_remover_no_ram() {
+        com_ram_limpo(|| {
+            let livres = free_clusters(VolumeId::Ram).unwrap();
+            let mut file = OpenFile::create(b"/ram/nota.txt").unwrap();
+            assert_eq!(file.write(b"ola").unwrap(), 3);
+            drop(file);
+            let mut file = OpenFile::open_append(b"/ram/nota.txt").unwrap();
+            file.write(b" mundo").unwrap();
+            assert_eq!(read_whole(b"/ram/nota.txt", 100).unwrap(), b"ola mundo");
+            assert_eq!(free_clusters(VolumeId::Ram).unwrap(), livres - 1);
+            remove(b"/ram/nota.txt").unwrap();
+            assert_eq!(free_clusters(VolumeId::Ram).unwrap(), livres);
+            assert_eq!(lookup(b"/ram/nota.txt").err(), Some(FsError::NotFound));
+        });
+    }
+
+    #[test_case]
+    fn reset_ramdisk_restaura_o_conteudo_e_a_listagem() {
+        com_ram_limpo(|| {
+            OpenFile::create(b"/ram/lixo.txt").unwrap().write(b"x").unwrap();
+            remove(b"/ram/ola.txt").unwrap();
+            assert_eq!(lookup(b"/ram/ola.txt").err(), Some(FsError::NotFound));
+            reset_ramdisk();
+            assert!(lookup(b"/ram/ola.txt").is_ok());
+            assert_eq!(lookup(b"/ram/lixo.txt").err(), Some(FsError::NotFound));
+        });
+    }
+
+    #[test_case]
+    fn criar_e_remover_com_nome_que_existe_ou_nao() {
+        com_ram_limpo(|| {
+            assert_eq!(OpenFile::create(b"/ram/ola.txt").err(), Some(FsError::AlreadyExists));
+            assert_eq!(OpenFile::create(b"/RAM/OLA.TXT").err(), Some(FsError::AlreadyExists));
+            assert_eq!(OpenFile::create(b"/ram/docs").err(), Some(FsError::AlreadyExists));
+            assert_eq!(OpenFile::create(b"/ram").err(), Some(FsError::AlreadyExists));
+            assert_eq!(OpenFile::create(b"/ram/nada/x.txt").err(), Some(FsError::NotFound));
+            assert_eq!(OpenFile::create(b"/ram/ola.txt/x").err(), Some(FsError::NotADirectory));
+            assert_eq!(remove(b"/ram/nada.txt").err(), Some(FsError::NotFound));
+            assert_eq!(remove(b"/ram/docs").err(), Some(FsError::IsADirectory));
+            assert_eq!(remove(b"/ram").err(), Some(FsError::IsADirectory));
+            assert_eq!(OpenFile::open_append(b"/ram/docs").err(), Some(FsError::IsADirectory));
+            assert_eq!(OpenFile::open_append(b"/ram").err(), Some(FsError::IsADirectory));
+            assert_eq!(OpenFile::open_append(b"/ram/nada.txt").err(), Some(FsError::NotFound));
+        });
+    }
+
+    #[test_case]
+    fn disco_recusa_escrita_antes_de_olhar_o_caminho() {
+        // Existindo ou não, o `/disco` é somente leitura. (Sem disco no QEMU
+        // dos testes, o volume está indisponível, e isso vem antes.)
+        let esperado = match volume_status(VolumeId::Disco) {
+            Ok(()) => FsError::ReadOnly,
+            Err(reason) => FsError::Unavailable(reason),
+        };
+        for path in [&b"/disco/x.txt"[..], b"/disco/leiame.txt", b"/disco/nada/x.txt"] {
+            assert_eq!(OpenFile::create(path).err(), Some(esperado));
+            assert_eq!(OpenFile::open_append(path).err(), Some(esperado));
+            assert_eq!(remove(path).err(), Some(esperado));
+        }
+        assert_eq!(OpenFile::create(b"/xyz/a").err(), Some(FsError::UnknownVolume));
+    }
+
+    #[test_case]
+    fn tabela_recusa_remover_arquivo_aberto_e_libera_ao_fechar_e_ao_destruir() {
+        com_ram_limpo(|| {
+            let mut tabela = FileTable::new();
+            let fd = tabela.open(b"/ram/ola.txt").unwrap();
+            assert_eq!(remove(b"/ram/ola.txt").err(), Some(FsError::Busy));
+            // O mesmo arquivo por outro caminho (caixa diferente) também é o mesmo.
+            assert_eq!(remove(b"/RAM/OLA.TXT").err(), Some(FsError::Busy));
+            assert!(lookup(b"/ram/ola.txt").is_ok());
+            tabela.close(fd).unwrap();
+            // Aberto para acrescentar também conta.
+            let fd = tabela.open_append(b"/ram/ola.txt").unwrap();
+            assert_eq!(remove(b"/ram/ola.txt").err(), Some(FsError::Busy));
+            tabela.close(fd).unwrap();
+            // Aberto duas vezes: só libera depois de fechar as duas.
+            let a = tabela.open(b"/ram/vazio.txt").unwrap();
+            let b = tabela.open(b"/ram/vazio.txt").unwrap();
+            tabela.close(a).unwrap();
+            assert_eq!(remove(b"/ram/vazio.txt").err(), Some(FsError::Busy));
+            tabela.close(b).unwrap();
+            // Um diretório aberto não impede nada (e não se apaga).
+            let dir = tabela.open(b"/ram/docs").unwrap();
+            assert_eq!(remove(b"/ram/docs").err(), Some(FsError::IsADirectory));
+            tabela.close(dir).unwrap();
+            // Ao destruir a tabela (fim do programa), os arquivos são liberados.
+            let _ = tabela.open(b"/ram/ola.txt").unwrap();
+            drop(tabela);
+            remove(b"/ram/ola.txt").unwrap();
+        });
+    }
+
+    #[test_case]
+    fn criar_com_tabela_cheia_nao_deixa_arquivo() {
+        com_ram_limpo(|| {
+            let mut tabela = FileTable::new();
+            for _ in 0..MAX_OPEN_FILES {
+                tabela.open(b"/ram/ola.txt").unwrap();
+            }
+            assert_eq!(tabela.create(b"/ram/novo.txt").err(), Some(FsError::TooManyOpen));
+            assert_eq!(lookup(b"/ram/novo.txt").err(), Some(FsError::NotFound));
+            // Nome que já existe vem antes da tabela cheia.
+            assert_eq!(tabela.create(b"/ram/ola.txt").err(), Some(FsError::AlreadyExists));
+            assert_eq!(tabela.open_append(b"/ram/ola.txt").err(), Some(FsError::TooManyOpen));
+        });
+    }
+
+    #[test_case]
+    fn modo_do_descritor_vale_para_leitura_e_escrita() {
+        com_ram_limpo(|| {
+            let mut tabela = FileTable::new();
+            let leitura = tabela.open(b"/ram/ola.txt").unwrap();
+            let dir = tabela.open(b"/ram/docs").unwrap();
+            let escrita = tabela.create(b"/ram/m.txt").unwrap();
+            assert_eq!(tabela.write(leitura, b"x").err(), Some(FsError::BadDescriptor));
+            assert_eq!(tabela.write(dir, b"x").err(), Some(FsError::BadDescriptor));
+            assert_eq!(tabela.write(3, b"x").err(), Some(FsError::BadDescriptor));
+            assert_eq!(tabela.write(99, b"x").err(), Some(FsError::BadDescriptor));
+            let mut buf = [0u8; 4];
+            assert_eq!(tabela.get_mut(escrita).unwrap().read(&mut buf).err(), Some(FsError::BadDescriptor));
+            assert_eq!(tabela.get_mut(escrita).unwrap().next_entry().err(), Some(FsError::NotADirectory));
+            assert_eq!(tabela.write(escrita, b"ok").unwrap(), 2);
+        });
+    }
+
+    #[test_case]
+    fn dois_escritores_acrescentando_alternadamente_nao_perdem_byte() {
+        com_ram_limpo(|| {
+            OpenFile::create(b"/ram/dois.txt").unwrap();
+            let mut a = FileTable::new();
+            let mut b = FileTable::new();
+            let fa = a.open_append(b"/ram/dois.txt").unwrap();
+            let fb = b.open_append(b"/ram/dois.txt").unwrap();
+            for _ in 0..700 {
+                assert_eq!(a.write(fa, b"a").unwrap(), 1);
+                assert_eq!(b.write(fb, b"b").unwrap(), 1);
+            }
+            let dados = read_whole(b"/ram/dois.txt", 4096).unwrap();
+            assert_eq!(dados.len(), 1400);
+            for par in dados.chunks(2) {
+                assert_eq!(par, b"ab");
+            }
+        });
+    }
+
+    #[test_case]
+    fn leitor_ve_o_tamanho_de_quando_abriu() {
+        com_ram_limpo(|| {
+            OpenFile::create(b"/ram/l.txt").unwrap().write(b"abc").unwrap();
+            let mut leitor = OpenFile::open(b"/ram/l.txt").unwrap();
+            OpenFile::open_append(b"/ram/l.txt").unwrap().write(b"def").unwrap();
+            let mut buf = [0u8; 16];
+            assert_eq!(leitor.read(&mut buf).unwrap(), 3);
+            assert_eq!(&buf[..3], b"abc");
+            assert_eq!(leitor.read(&mut buf).unwrap(), 0);
+            // Uma nova abertura vê tudo.
+            assert_eq!(read_whole(b"/ram/l.txt", 16).unwrap(), b"abcdef");
+        });
     }
 }

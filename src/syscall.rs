@@ -27,9 +27,10 @@ use crate::{gdt, memory, vga_buffer};
 // programas: os números nunca divergem entre kernel e programas. O texto do
 // contrato é o `SYSCALLS.md`.
 pub use abi::{
-    DateTime, DirEntryRaw, ERR_BADF, ERR_CLOCK, ERR_FAULT, ERR_INVAL, ERR_IO, ERR_MFILE,
-    ERR_NAMETOOLONG, ERR_NODEV, ERR_NOENT, ERR_NOMEM, ERR_TYPE, IO_MAX_LEN, SYS_ALLOC, SYS_CLOSE,
-    SYS_EXIT, SYS_OPEN, SYS_READ, SYS_READ_DIR, SYS_READ_LINE, SYS_TIME, SYS_WRITE, SYS_YIELD,
+    DateTime, DirEntryRaw, ERR_BADF, ERR_BUSY, ERR_CLOCK, ERR_EXIST, ERR_FAULT, ERR_INVAL, ERR_IO,
+    ERR_MFILE, ERR_NAMETOOLONG, ERR_NODEV, ERR_NOENT, ERR_NOMEM, ERR_NOSPC, ERR_ROFS, ERR_TYPE,
+    IO_MAX_LEN, SYS_ALLOC, SYS_CLOSE, SYS_CREATE, SYS_EXIT, SYS_OPEN, SYS_OPEN_APPEND, SYS_READ,
+    SYS_READ_DIR, SYS_READ_LINE, SYS_REMOVE, SYS_TIME, SYS_WRITE, SYS_WRITE_FILE, SYS_YIELD,
     TIME_SIZE,
 };
 use abi::{DIR_ENTRY_SIZE, KIND_DIR, KIND_FILE, MAX_PATH_LEN};
@@ -198,6 +199,10 @@ extern "C" fn syscall_dispatch(ctx: &mut TaskContext) {
         SYS_CLOSE => ctx.rax = sys_close(a1) as u64,
         SYS_READ_DIR => ctx.rax = sys_read_dir(a1, a2, a3) as u64,
         SYS_TIME => ctx.rax = sys_time(a1, a2) as u64,
+        SYS_CREATE => ctx.rax = sys_create(a1, a2) as u64,
+        SYS_OPEN_APPEND => ctx.rax = sys_open_append(a1, a2) as u64,
+        SYS_WRITE_FILE => ctx.rax = sys_write_file(a1, a2, a3) as u64,
+        SYS_REMOVE => ctx.rax = sys_remove(a1, a2) as u64,
         _ => scheduler::terminate_current(Termination::BadSyscall { number: nr }),
     }
 }
@@ -299,6 +304,10 @@ fn errno(error: FsError) -> i64 {
         FsError::InvalidPath => ERR_INVAL,
         FsError::BadDescriptor => ERR_BADF,
         FsError::TooManyOpen => ERR_MFILE,
+        FsError::AlreadyExists => ERR_EXIST,
+        FsError::NoSpace => ERR_NOSPC,
+        FsError::ReadOnly => ERR_ROFS,
+        FsError::Busy => ERR_BUSY,
         // `TooBig` só existe em `run`; se algum dia chegasse aqui, é falha de leitura.
         FsError::Io | FsError::TooBig { .. } => ERR_IO,
     }
@@ -315,15 +324,30 @@ fn descriptor(fd: u64) -> Result<usize, i64> {
 /// do kernel (sem heap) **antes** de ser interpretado: o programa não pode
 /// mudá-lo no meio da conversa.
 fn sys_open(ptr: u64, len: u64) -> i64 {
+    let (path, len) = match copy_path(ptr, len) {
+        Ok(copied) => copied,
+        Err(code) => return code,
+    };
+    match scheduler::with_current_files(|files| files.open(&path[..len])) {
+        Some(Ok(fd)) => fd as i64,
+        Some(Err(error)) => errno(error),
+        None => ERR_BADF,
+    }
+}
+
+/// Valida o caminho que o programa passou e o copia para um array na pilha do
+/// kernel (sem heap): `len == 0` é `ERR_INVAL`, `len > MAX_PATH_LEN` é
+/// `ERR_NAMETOOLONG` (nenhum dos dois olha o ponteiro) e um intervalo fora da
+/// região do usuário ou não mapeado é `ERR_FAULT`. Usada por `open`, `create`,
+/// `open_append` e `remove`: o caminho é tratado da mesma forma em todas.
+fn copy_path(ptr: u64, len: u64) -> Result<([u8; MAX_PATH_LEN], usize), i64> {
     if len == 0 {
-        return ERR_INVAL;
+        return Err(ERR_INVAL);
     }
     if len > MAX_PATH_LEN as u64 {
-        return ERR_NAMETOOLONG;
+        return Err(ERR_NAMETOOLONG);
     }
-    if let Err(code) = validate_user_range(ptr, len, false) {
-        return code;
-    }
+    validate_user_range(ptr, len, false)?;
     let mut path = [0u8; MAX_PATH_LEN];
     let len = len as usize;
     // SAFETY: `validate_user_range` conferiu que todas as páginas de
@@ -332,8 +356,99 @@ fn sys_open(ptr: u64, len: u64) -> i64 {
     // CPU só e interrupções desligadas, então nada muda esses bytes durante a
     // cópia. `len <= MAX_PATH_LEN` cabe em `path`.
     path[..len].copy_from_slice(unsafe { core::slice::from_raw_parts(ptr as *const u8, len) });
-    match scheduler::with_current_files(|files| files.open(&path[..len])) {
+    Ok((path, len))
+}
+
+/// `create(path_ptr, path_len)`: cria um arquivo **vazio** e o abre para
+/// acrescentar. Ordem de verificação (`SYSCALLS.md`): caminho (como `open`),
+/// volume desconhecido ou indisponível, volume somente leitura, diretório pai,
+/// nome já existente, tabela cheia (antes de criar) e diretório sem posição
+/// livre. A ordem das últimas vem de `FileTable::create`.
+fn sys_create(ptr: u64, len: u64) -> i64 {
+    let (path, len) = match copy_path(ptr, len) {
+        Ok(copied) => copied,
+        Err(code) => return code,
+    };
+    match scheduler::with_current_files(|files| files.create(&path[..len])) {
         Some(Ok(fd)) => fd as i64,
+        Some(Err(error)) => errno(error),
+        None => ERR_BADF,
+    }
+}
+
+/// `open_append(path_ptr, path_len)`: abre um arquivo **existente** para
+/// acrescentar bytes ao fim.
+fn sys_open_append(ptr: u64, len: u64) -> i64 {
+    let (path, len) = match copy_path(ptr, len) {
+        Ok(copied) => copied,
+        Err(code) => return code,
+    };
+    match scheduler::with_current_files(|files| files.open_append(&path[..len])) {
+        Some(Ok(fd)) => fd as i64,
+        Some(Err(error)) => errno(error),
+        None => ERR_BADF,
+    }
+}
+
+/// `remove(path_ptr, path_len)`: apaga um arquivo que nenhum programa tem
+/// aberto (nem o que chama: `ERR_BUSY`).
+fn sys_remove(ptr: u64, len: u64) -> i64 {
+    let (path, len) = match copy_path(ptr, len) {
+        Ok(copied) => copied,
+        Err(code) => return code,
+    };
+    match crate::fs::remove(&path[..len]) {
+        Ok(()) => 0,
+        Err(error) => errno(error),
+    }
+}
+
+/// `write_file(fd, ptr, len)`: grava `len` bytes de `ptr` no **fim atual** do
+/// arquivo aberto para acrescentar. O ponteiro é validado (basta ser legível)
+/// **antes** de gravar qualquer coisa. Os dados vão em pedaços de um setor,
+/// com um buffer na pilha do kernel (o espelho de `sys_read`); se um pedaço
+/// grava menos que o pedido ou falha depois de outros terem sido gravados,
+/// devolve o que já gravou, e a próxima chamada recebe o erro.
+fn sys_write_file(fd: u64, ptr: u64, len: u64) -> i64 {
+    if len == 0 {
+        return 0;
+    }
+    if len > IO_MAX_LEN {
+        return ERR_INVAL;
+    }
+    if let Err(code) = validate_user_range(ptr, len, false) {
+        return code;
+    }
+    let fd = match descriptor(fd) {
+        Ok(fd) => fd,
+        Err(code) => return code,
+    };
+    let len = len as usize;
+    let result = scheduler::with_current_files(|files| -> Result<usize, FsError> {
+        // O descritor é conferido antes de gravar qualquer byte.
+        files.get_mut(fd)?;
+        let mut chunk = [0u8; 512];
+        let mut total = 0usize;
+        while total < len {
+            let want = (len - total).min(chunk.len());
+            // SAFETY: `ptr..ptr + len` foi validado acima (mapeado e do
+            // usuário) e `total + want <= len`; o kernel roda no espaço de
+            // endereçamento do programa, uma CPU só, interrupções desligadas.
+            chunk[..want].copy_from_slice(unsafe { core::slice::from_raw_parts((ptr as *const u8).add(total), want) });
+            let n = match files.write(fd, &chunk[..want]) {
+                Ok(n) => n,
+                Err(error) if total == 0 => return Err(error),
+                Err(_) => break,
+            };
+            total += n;
+            if n < want {
+                break;
+            }
+        }
+        Ok(total)
+    });
+    match result {
+        Some(Ok(total)) => total as i64,
         Some(Err(error)) => errno(error),
         None => ERR_BADF,
     }
@@ -573,9 +688,30 @@ mod tests {
     }
 
     #[test_case]
-    fn contrato_declara_a_versao_5() {
-        assert!(CONTRATO.contains("**Versão do contrato**: 5"));
-        assert!(CONTRATO.contains("os-rust 0.9.0 (Marco 9)"));
+    fn contrato_declara_a_versao_6() {
+        assert!(CONTRATO.contains("**Versão do contrato**: 6"));
+        assert!(CONTRATO.contains("os-rust 0.10.0 (Marco 10)"));
+    }
+
+    #[test_case]
+    fn errno_traduz_os_erros_de_escrita() {
+        assert_eq!(errno(FsError::AlreadyExists), ERR_EXIST);
+        assert_eq!(errno(FsError::NoSpace), ERR_NOSPC);
+        assert_eq!(errno(FsError::ReadOnly), ERR_ROFS);
+        assert_eq!(errno(FsError::Busy), ERR_BUSY);
+    }
+
+    #[test_case]
+    fn contrato_descreve_as_syscalls_de_escrita() {
+        assert_eq!((SYS_CREATE, SYS_OPEN_APPEND, SYS_WRITE_FILE, SYS_REMOVE), (11, 12, 13, 14));
+        assert_eq!((ERR_EXIST, ERR_NOSPC, ERR_ROFS, ERR_BUSY), (-12, -13, -14, -15));
+        for nome in ["SYS_CREATE` (11)", "SYS_OPEN_APPEND` (12)", "SYS_WRITE_FILE` (13)", "SYS_REMOVE` (14)"] {
+            assert!(CONTRATO.contains(&format!("### `{}", nome)));
+        }
+        for erro in ["ERR_EXIST", "ERR_NOSPC", "ERR_ROFS", "ERR_BUSY"] {
+            assert!(CONTRATO.contains(erro));
+        }
+        assert!(CONTRATO.contains("**somente leitura**"));
     }
 
     #[test_case]

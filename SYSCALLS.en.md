@@ -1,8 +1,8 @@
 # os-rust syscall contract
 
-**Contract version**: 5
+**Contract version**: 6
 
-**Valid since**: os-rust 0.9.0 (Milestone 9)
+**Valid since**: os-rust 0.10.0 (Milestone 10)
 
 This document is everything a program needs to know to run on os-rust.
 The kernel and the programs never depend on anything that is not here. An
@@ -100,7 +100,7 @@ unsafe {
 
 ## 5. Syscalls
 
-Contract v5 numbers. **Any other number** (including `0`) terminates the
+Contract v6 numbers. **Any other number** (including `0`) terminates the
 program (§7).
 
 | No. | Name | Arguments | Result |
@@ -115,6 +115,10 @@ program (§7).
 | 8 | `SYS_CLOSE` | `rdi = fd` | `0` or error (`< 0`) |
 | 9 | `SYS_READ_DIR` | `rdi = fd`, `rsi = ptr`, `rdx = len` | `1` (one entry written), `0` (end of directory) or error (`< 0`) |
 | 10 | `SYS_TIME` | `rdi = ptr`, `rsi = len` | `0` (a `DateTime` written) or error (`< 0`) |
+| 11 | `SYS_CREATE` | `rdi = path_ptr`, `rsi = path_len` | append descriptor (`≥ 0`) or error (`< 0`) |
+| 12 | `SYS_OPEN_APPEND` | `rdi = path_ptr`, `rsi = path_len` | append descriptor (`≥ 0`) or error (`< 0`) |
+| 13 | `SYS_WRITE_FILE` | `rdi = fd`, `rsi = ptr`, `rdx = len` | bytes written (`≥ 0`) or error (`< 0`) |
+| 14 | `SYS_REMOVE` | `rdi = path_ptr`, `rsi = path_len` | `0` or error (`< 0`) |
 
 ### `SYS_WRITE` (1)
 
@@ -216,6 +220,10 @@ being interpreted.
 - Error reading the volume (disk that does not respond, corrupted
   structure): `ERR_IO`.
 
+Descriptors opened by `SYS_CREATE` and `SYS_OPEN_APPEND` are **append-only**:
+they accept `SYS_WRITE_FILE` and `SYS_CLOSE`, and `SYS_READ` on them gives
+`ERR_BADF`.
+
 ### `SYS_READ` (7)
 
 Reads up to `len` bytes from the file open at `fd`, starting at its
@@ -230,7 +238,7 @@ returns `0` on the very first call.
   **writable**; otherwise `ERR_FAULT`, before reading anything from the
   volume.
 - `fd` outside `0..=3`, never opened or already closed: `ERR_BADF`.
-- `fd` of a directory: `ERR_TYPE`.
+- `fd` of a directory: `ERR_TYPE`. `fd` opened for appending: `ERR_BADF`.
 - If the read fails after already having delivered bytes in this call, the
   call returns the delivered bytes, and the **next** one returns the error
   (`ERR_IO`).
@@ -250,7 +258,8 @@ Returns `1` when it wrote an entry and `0` when the entries have run out
 - `len < 20` or `len > 4096`: `ERR_INVAL`.
 - `[ptr, ptr + 20)` must be in the user region, mapped and **writable**;
   otherwise `ERR_FAULT`.
-- Invalid `fd`: `ERR_BADF`. `fd` of a file: `ERR_TYPE`.
+- Invalid `fd`: `ERR_BADF`. `fd` of a file (including one opened for
+  appending): `ERR_TYPE`.
 - Deleted entries, long-name entries, volume labels, `.` and `..` do not
   appear.
 
@@ -283,6 +292,63 @@ The checks happen in this order:
 There is no time zone: the result is always UTC. In the runtime library:
 `time::now()`.
 
+### `SYS_CREATE` (11)
+
+Creates an **empty** file and opens it for appending, on the lowest free
+descriptor. Only `/ram` accepts writes. The path is handled exactly as in
+`SYS_OPEN`; after the path checks, the order is:
+
+1. Unknown or unavailable volume: `ERR_NODEV`.
+2. Volume that does not accept writes (`/disco`; or a volume with more than 1
+   sector per cluster): `ERR_ROFS`. This comes **before** looking at the path:
+   `/disco/anything` gives `ERR_ROFS`, whether it exists or not.
+3. Parent directory (all components but the last) nonexistent: `ERR_NOENT`; a
+   file in the middle of the path: `ERR_TYPE`.
+4. The name already exists (file, directory or the volume root): `ERR_EXIST`.
+5. The program already has 4 open files: `ERR_MFILE`, **before** creating
+   anything: a creation that fails never leaves a file behind.
+6. The parent directory has no free entry (directories do not grow):
+   `ERR_NOSPC`.
+7. Error reading or writing the volume, or inconsistent FAT: `ERR_IO` (at any
+   step).
+
+The new entry has the file attribute, no cluster, size `0` and zeroed date and
+time.
+
+### `SYS_OPEN_APPEND` (12)
+
+Opens an **existing** file for appending, on the lowest free descriptor. Same
+path, volume (`ERR_NODEV`, `ERR_ROFS`) and parent checks as `SYS_CREATE`.
+Nonexistent: `ERR_NOENT`. The target is a directory (including the root):
+`ERR_TYPE`. 4 open files: `ERR_MFILE`. Volume error: `ERR_IO`.
+
+### `SYS_WRITE_FILE` (13)
+
+Writes `len` bytes from `ptr` at the **current end** of the file open at `fd`;
+the size is read from the volume on every call. Checks, in this order:
+
+- `len == 0`: returns `0` without looking at `ptr` or `fd`. `len > 4096`:
+  `ERR_INVAL`.
+- `[ptr, ptr + len)` must be in the user region and mapped (being readable is
+  enough); otherwise `ERR_FAULT`, before writing anything.
+- `fd` outside `0..=3`, closed, open for reading only, or of a directory:
+  `ERR_BADF`.
+
+Returns the number of bytes written. It is `len`, unless the volume runs out
+or fails midway: then it returns the bytes it wrote (`1 ≤ n < len`), and the
+**next** call returns the error (`ERR_NOSPC` or `ERR_IO`). If no byte could be
+written, the call itself returns the error. On return, the data, the FAT chain
+and the size are already on the volume: there is no cache and no `flush`, and
+`SYS_CLOSE` writes nothing.
+
+### `SYS_REMOVE` (14)
+
+Deletes a file and returns `0`. Same path, volume and parent checks as
+`SYS_CREATE`. Nonexistent: `ERR_NOENT`. The target is a directory (including
+the root): `ERR_TYPE`. Open by **any** program, including the caller:
+`ERR_BUSY`, changing nothing. Inconsistent cluster chain: `ERR_IO`, changing
+nothing (such a file cannot be deleted). The file's clusters become free again.
+
 ## 6. Result and error codes
 
 The result in `rax` is a signed 64-bit integer: `≥ 0` is success (the
@@ -295,12 +361,16 @@ meaning depends on the syscall); `< 0` is an error, with the code below.
 | `ERR_NOMEM` | `-3` | `SYS_ALLOC` could not give the requested memory (1 MiB heap limit or lack of physical memory). |
 | `ERR_NOENT` | `-4` | The path, or a component of it, does not exist. |
 | `ERR_NODEV` | `-5` | Unknown volume, or known but unavailable (no disk, invalid volume). |
-| `ERR_TYPE` | `-6` | Wrong type: `SYS_READ` on a directory, `SYS_READ_DIR` on a file, or a file in the middle of the path. |
-| `ERR_BADF` | `-7` | Invalid descriptor: outside `0..=3`, not open or already closed. |
+| `ERR_TYPE` | `-6` | Wrong type: `SYS_READ` on a directory, `SYS_READ_DIR` on a file, a file in the middle of the path, or appending to or removing a directory. |
+| `ERR_BADF` | `-7` | Invalid descriptor: outside `0..=3`, not open or already closed, or used in the wrong mode (`SYS_READ` on an append descriptor, `SYS_WRITE_FILE` on a read descriptor). |
 | `ERR_MFILE` | `-8` | The program already has 4 open files. |
 | `ERR_NAMETOOLONG` | `-9` | Path longer than 64 bytes, or with more than 8 components. |
 | `ERR_IO` | `-10` | Error reading the volume: disk that does not respond, disk error or corrupted FAT structure. |
 | `ERR_CLOCK` | `-11` | `SYS_TIME`: the clock returned impossible values, did not stabilize or did not respond. |
+| `ERR_EXIST` | `-12` | `SYS_CREATE`: the name already exists (file, directory or the volume root). |
+| `ERR_NOSPC` | `-13` | No free cluster in the volume, or directory with no free entry. |
+| `ERR_ROFS` | `-14` | The volume exists, is mounted and does not accept writes (`/disco`; or a volume with more than 1 sector per cluster). |
+| `ERR_BUSY` | `-15` | `SYS_REMOVE` of a file that some program has open. |
 
 There is no errno: the program receives only the value in `rax`.
 
@@ -312,7 +382,7 @@ There is no errno: the program receives only the value in `rax`.
 | `SYS_EXIT(n)`, `n ≠ 0` | `[run] <nome> terminou com codigo <n>` | same |
 | Invalid memory access (`#PF`) in ring 3 | `[run] <nome> encerrado por erro de memoria: #PF (Page Fault) em <rip>` + `codigo de erro: <código>` + `endereco de falha: <endereço>` | same |
 | Other CPU exception in ring 3 (`#DE`, `#UD`, `#GP`, `#SS`, `#NP`) | `[run] <nome> encerrado por erro: <sigla> (<nome da exceção>) em <rip>` (+ error code, when there is one) | same |
-| Nonexistent syscall number (anything outside 1 to 10) | `[run] <nome> encerrado: syscall inexistente (<n>)` | same |
+| Nonexistent syscall number (anything outside 1 to 14) | `[run] <nome> encerrado: syscall inexistente (<n>)` | same |
 
 The message appears **at the moment** that program ends, on screen and
 serial, even if others keep running. A program failure **never** brings down
@@ -388,19 +458,44 @@ typed afterwards appears in it without loss.
 
 ## 9. File system
 
-The file system is **read-only**. There is no syscall to create, write,
-rename or delete: no file changes while os-rust runs.
+There are two volumes. `/ram` is **read and write**: you can create files,
+append bytes to their end and delete them. `/disco` is still
+**read-only**. There is no syscall to rename, seek, overwrite in the middle,
+truncate or create or remove directories.
 
 ### Volumes
 
-| Prefix | What it is | Available |
-|--------|------------|-----------|
-| `/ram` | FAT16 ramdisk embedded in the boot image | always |
-| `/disco` | ATA disk (primary channel, slave) with a FAT16 volume | only if QEMU attached a disk with a valid volume |
+| Prefix | What it is | Available | Writes |
+|--------|------------|-----------|--------|
+| `/ram` | FAT16 ramdisk: an in-memory copy of the image embedded in the boot image | always | **yes** (back to the original contents on reboot) |
+| `/disco` | ATA disk (primary channel, slave) with a FAT16 volume | only if QEMU attached a disk with a valid volume | no: **read-only** |
 
 An unavailable volume (no disk, device that is not an ATA disk, invalid boot
 sector, read error) makes operations on it return `ERR_NODEV`; the other
 volume keeps working and the kernel is not affected.
+
+### Writing
+
+- **Only at the end.** A file is born empty (`SYS_CREATE`) and only grows via
+  `SYS_WRITE_FILE`, always at the current end. To replace the contents, delete
+  and create again.
+- **No cache.** Every write ends with the data, the FAT and the size already on
+  the volume. If an operation is interrupted between two sectors, the volume
+  stays readable; at worst some clusters are left used with no owner.
+- **An open file is not deleted.** `SYS_REMOVE` of a file open by any program
+  (in any mode) gives `ERR_BUSY`. When a program ends (by `exit` or by a fault)
+  it stops holding its files.
+- **Size seen at open time.** A file open for reading shows the size it had when
+  opened; what is appended later only shows up in a new open.
+- **Listing during writes.** A directory listing open while a file is created or
+  removed in it may skip or repeat an entry (the listing walks by position).
+- **Full volume.** The bytes that fit stay written; the error (`ERR_NOSPC`)
+  comes on the next call.
+- **Directories do not grow.** With no free entry in the sectors it already has,
+  the error is `ERR_NOSPC`. Only 1-sector-per-cluster volumes accept writes
+  (the only layout the project generates); any other value is still readable,
+  but writing is `ERR_ROFS`.
+- Nothing is protected: any file in `/ram` can be deleted.
 
 ### Paths
 
@@ -444,7 +539,9 @@ is `ERR_IO`, never an infinite loop.
 Descriptors and read positions belong **to the program**: two programs that
 open the same file have independent positions, and a program never sees
 another's descriptors. In the runtime library: `File::open`, `File::read`,
-`Dir::open`, `Dir::next` (descriptors are closed automatically).
+`Dir::open`, `Dir::next`, `FileWriter::create`, `FileWriter::append`,
+`FileWriter::write`, `FileWriter::write_all` and `remove` (descriptors are
+closed automatically).
 
 ## 10. History
 
@@ -455,3 +552,4 @@ another's descriptors. In the runtime library: `File::open`, `File::read`,
 | 3 | 7 (os-rust 0.7.0) | `SYS_YIELD` (5); several programs at the same time (up to 4, each in its own memory, 5-tick slice, timer at 100 Hz); termination message at the moment the program ends; keyboard to the program that asked first. v1 and v2 programs keep working. |
 | 4 | 8 (os-rust 0.8.0) | `SYS_OPEN` (6), `SYS_READ` (7), `SYS_CLOSE` (8), `SYS_READ_DIR` (9); errors `ERR_NOENT` (`-4`) to `ERR_IO` (`-10`); `/ram` and `/disco` volumes (FAT16, read-only); per-program file table (up to 4); `run` accepts file paths (executable of up to 64 KiB). v1, v2 and v3 programs keep working. |
 | 5 | 9 (os-rust 0.9.0) | `SYS_TIME` (10); `ERR_CLOCK` error (`-11`); 8-byte `DateTime`, always in UTC. v1 to v4 programs keep working. |
+| 6 | 10 (os-rust 0.10.0) | `SYS_CREATE` (11), `SYS_OPEN_APPEND` (12), `SYS_WRITE_FILE` (13), `SYS_REMOVE` (14); errors `ERR_EXIST` (`-12`) to `ERR_BUSY` (`-15`); `/ram` now accepts writes (only at the end); `/disco` stays read-only; `ERR_TYPE` and `ERR_BADF` also cover the wrong descriptor mode. v1 to v5 programs keep working. |

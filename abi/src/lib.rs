@@ -39,6 +39,19 @@ pub const SYS_READ_DIR: u64 = 9;
 /// `DateTime` (`len` tem de ser `TIME_SIZE`). Devolve `0`.
 pub const SYS_TIME: u64 = 10;
 
+/// `create(path_ptr, path_len)`: cria um arquivo vazio e o abre para
+/// acrescentar. Devolve um descritor. O nome não pode existir.
+pub const SYS_CREATE: u64 = 11;
+/// `open_append(path_ptr, path_len)`: abre um arquivo existente para
+/// acrescentar bytes ao fim. Devolve um descritor.
+pub const SYS_OPEN_APPEND: u64 = 12;
+/// `write_file(fd, ptr, len)`: grava `len` bytes no fim do arquivo aberto para
+/// acrescentar. Devolve os bytes gravados.
+pub const SYS_WRITE_FILE: u64 = 13;
+/// `remove(path_ptr, path_len)`: apaga um arquivo que ninguém tem aberto.
+/// Devolve `0`.
+pub const SYS_REMOVE: u64 = 14;
+
 /// Máximo de programas que `run` carrega ao mesmo tempo. Pedir mais que isso
 /// é recusado antes de iniciar qualquer programa.
 pub const MAX_TASKS: usize = 4;
@@ -95,6 +108,15 @@ pub const ERR_IO: i64 = -10;
 /// O relógio devolveu valores impossíveis, não se estabilizou ou não
 /// respondeu (`SYS_TIME`).
 pub const ERR_CLOCK: i64 = -11;
+/// `SYS_CREATE`: o nome já existe (arquivo, diretório ou a raiz do volume).
+pub const ERR_EXIST: i64 = -12;
+/// Sem cluster livre no volume, ou diretório sem entrada livre.
+pub const ERR_NOSPC: i64 = -13;
+/// O volume existe e está montado, mas não aceita escrita (`/disco`, ou um
+/// volume com mais de 1 setor por cluster).
+pub const ERR_ROFS: i64 = -14;
+/// `SYS_REMOVE` de um arquivo que algum programa tem aberto.
+pub const ERR_BUSY: i64 = -15;
 
 /// Maior caminho aceito por `SYS_OPEN`, em bytes.
 pub const MAX_PATH_LEN: usize = 64;

@@ -5,6 +5,50 @@ at a time. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/), and the versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] - 2026-10-23
+
+Milestone 10: writing to the ramdisk. The kernel can now **create, append to
+and delete files** on the `/ram` volume, from the prompt and from user
+programs. `/disco` stays read-only (Milestone 11 opens it). Syscall contract:
+version 6.
+
+### Added
+
+- FAT16 write layer (`src/fat.rs`): create an empty file, append bytes at the
+  end (lowest free cluster, both FAT copies, size written last) and delete
+  (directory entry first, clusters after). No cache; an interruption between
+  two sectors leaves the volume readable. The writer treats the volume as
+  untrusted data.
+- `grava`, `anexa` and `apaga` prompt commands, with the new error messages
+  (`ja existe`, `sem espaco`, `volume somente leitura`, `arquivo em uso`).
+- Syscalls `SYS_CREATE` (11), `SYS_OPEN_APPEND` (12), `SYS_WRITE_FILE` (13) and
+  `SYS_REMOVE` (14), and the errors `ERR_EXIST` (`-12`), `ERR_NOSPC` (`-13`),
+  `ERR_ROFS` (`-14`) and `ERR_BUSY` (`-15`).
+- Runtime library: `FileWriter` (`create`, `append`, `write`, `write_all`),
+  `remove` and four new `FsError` variants.
+- Programs `gravador` (creates and extends `/ram/gravado.txt`) and `apagador`
+  (shows the file and deletes it).
+- Tests: unit tests in `blockdev`, `fat` (including the simulated interruption
+  at every failure point), `fs`, `shell` and `syscall`;
+  `tests/escrita_no_ramdisk.rs` (programs end to end, 100 cycles, every error
+  of every syscall, `ERR_BUSY`, full volume, `/disco` unchanged, contract and
+  guide).
+- Hidden test helpers: `fs::reset_ramdisk()` and `fs::free_clusters()`.
+
+### Changed
+
+- `/ram` now lives in writable memory (a copy, made in `fs::init`, of the
+  embedded image, which is never written); rebooting restores the original
+  contents.
+- Syscall contract at version 6 (`SYSCALLS.md`): section 9 rewritten (`/ram`
+  read and write, `/disco` read-only); `ERR_TYPE` and `ERR_BADF` also cover the
+  wrong descriptor mode. Programs of versions 1 to 5 keep working.
+- Two existing tests that held for contract version 5:
+  `contrato_declara_a_versao_5` (now `contrato_declara_a_versao_6`) and the
+  `tests/sistema_de_arquivos.rs` test that used number `11` as a nonexistent
+  syscall (now `15`).
+- Project version: `0.9.2` → `0.10.0`.
+
 ## [0.9.2] - 2026-10-22
 
 Maintenance release: no new milestone, no kernel change and no syscall

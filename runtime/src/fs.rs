@@ -1,10 +1,12 @@
-//! Arquivos: abrir, ler e listar, somente leitura.
+//! Arquivos: abrir, ler, listar, criar, acrescentar e apagar.
 //!
 //! Um programa nunca fala com o disco: ele pede ao kernel, por syscalls
 //! (`SYSCALLS.md`, seção "Sistema de arquivos"), e o kernel lê do volume. Esta
 //! biblioteca esconde as syscalls atrás de tipos de Rust: [`File`] e [`Dir`]
 //! fecham o descritor sozinhos quando saem de escopo, e os códigos de erro
-//! viram [`FsError`].
+//! viram [`FsError`]. [`File`] e [`Dir`] só leem; para escrever há
+//! [`FileWriter`] (criar e acrescentar ao fim) e [`remove`]. Só o volume
+//! `/ram` aceita escrita; `/disco` é somente leitura.
 //!
 //! Caminhos: `/<volume>/<componente>/...`, com os volumes `/ram` e `/disco`,
 //! nomes 8.3 (até 8 caracteres, ponto e até 3 de extensão), sem diferenciar
@@ -12,8 +14,8 @@
 //! programa pode ter [`abi::MAX_OPEN_FILES`] arquivos abertos ao mesmo tempo.
 
 use abi::{
-    DIR_ENTRY_SIZE, ERR_BADF, ERR_FAULT, ERR_INVAL, ERR_IO, ERR_MFILE, ERR_NAMETOOLONG,
-    ERR_NODEV, ERR_NOENT, ERR_TYPE, KIND_DIR,
+    DIR_ENTRY_SIZE, ERR_BADF, ERR_BUSY, ERR_EXIST, ERR_FAULT, ERR_INVAL, ERR_IO, ERR_MFILE,
+    ERR_NAMETOOLONG, ERR_NODEV, ERR_NOENT, ERR_NOSPC, ERR_ROFS, ERR_TYPE, IO_MAX_LEN, KIND_DIR,
 };
 
 use crate::sys;
@@ -41,6 +43,14 @@ pub enum FsError {
     Invalid,
     /// Ponteiro inválido passado ao kernel (não acontece com fatias vivas).
     Fault,
+    /// Criar: o nome já existe.
+    Exists,
+    /// O volume (ou o diretório) não tem mais espaço.
+    NoSpace,
+    /// O volume não aceita escrita (por exemplo, `/disco`).
+    ReadOnly,
+    /// O arquivo está aberto por algum programa e não pode ser apagado.
+    Busy,
 }
 
 impl FsError {
@@ -56,6 +66,10 @@ impl FsError {
             ERR_IO => FsError::Io,
             ERR_INVAL => FsError::Invalid,
             ERR_FAULT => FsError::Fault,
+            ERR_EXIST => FsError::Exists,
+            ERR_NOSPC => FsError::NoSpace,
+            ERR_ROFS => FsError::ReadOnly,
+            ERR_BUSY => FsError::Busy,
             // Um código que este contrato não conhece (de uma versão futura).
             _ => FsError::Io,
         }
@@ -74,6 +88,10 @@ impl core::fmt::Display for FsError {
             FsError::Io => "erro de leitura",
             FsError::Invalid => "caminho invalido",
             FsError::Fault => "ponteiro invalido",
+            FsError::Exists => "ja existe",
+            FsError::NoSpace => "sem espaco",
+            FsError::ReadOnly => "volume somente leitura",
+            FsError::Busy => "arquivo em uso",
         };
         f.write_str(text)
     }
@@ -114,6 +132,61 @@ impl Drop for File {
         // quando o programa termina.
         sys::close(self.fd);
     }
+}
+
+/// Um arquivo aberto para **acrescentar**: tudo o que se grava vai para o fim
+/// dele, nunca para o meio. Fecha o descritor ao sair de escopo. Só o `/ram`
+/// aceita escrita. Cada `write` já deixa os dados no volume: não há `flush`.
+pub struct FileWriter {
+    fd: i64,
+}
+
+impl FileWriter {
+    /// Cria o arquivo `path` (vazio). Se o nome já existe, o erro é
+    /// [`FsError::Exists`]: nada é sobrescrito.
+    pub fn create(path: &str) -> Result<FileWriter, FsError> {
+        Ok(FileWriter { fd: check(sys::create(path.as_bytes()))? })
+    }
+
+    /// Abre um arquivo que já existe para acrescentar ao fim dele.
+    pub fn append(path: &str) -> Result<FileWriter, FsError> {
+        Ok(FileWriter { fd: check(sys::open_append(path.as_bytes()))? })
+    }
+
+    /// Grava até `buf.len()` bytes no fim do arquivo. Devolve quantos gravou:
+    /// pode ser menos que o pedido se o volume encheu; a chamada seguinte
+    /// devolve o erro. `buf` deve ter no máximo [`abi::IO_MAX_LEN`] bytes.
+    pub fn write(&mut self, buf: &[u8]) -> Result<usize, FsError> {
+        Ok(check(sys::write_file(self.fd, buf))? as usize)
+    }
+
+    /// Grava `buf` inteiro, repetindo `write` (em pedaços de até
+    /// [`abi::IO_MAX_LEN`] bytes) até acabar.
+    pub fn write_all(&mut self, buf: &[u8]) -> Result<(), FsError> {
+        let mut rest = buf;
+        while !rest.is_empty() {
+            let chunk = &rest[..rest.len().min(IO_MAX_LEN as usize)];
+            match self.write(chunk)? {
+                // O kernel nunca devolve 0 para um pedido não vazio; se
+                // devolvesse, repetir seria um laço sem fim.
+                0 => return Err(FsError::NoSpace),
+                n => rest = &rest[n..],
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for FileWriter {
+    fn drop(&mut self) {
+        sys::close(self.fd);
+    }
+}
+
+/// Apaga o arquivo `path`. Um arquivo aberto (por este ou por outro programa)
+/// não é apagado: o erro é [`FsError::Busy`]. Feche-o antes.
+pub fn remove(path: &str) -> Result<(), FsError> {
+    check(sys::remove(path.as_bytes())).map(|_| ())
 }
 
 /// Um diretório aberto para listagem. Fecha o descritor ao sair de escopo.

@@ -10,7 +10,9 @@
 //! - um alocador global, que permite usar `Box`, `Vec` e `String` (com
 //!   `extern crate alloc;` no programa);
 //! - [`File`], [`Dir`] e [`FsError`]: abrir e ler arquivos e listar diretórios
-//!   (somente leitura; volumes `/ram` e `/disco`);
+//!   (volumes `/ram` e `/disco`);
+//! - [`FileWriter`] e [`remove`]: criar, acrescentar ao fim e apagar arquivos
+//!   (só o `/ram` aceita escrita);
 //! - [`time::now`]: a data e a hora atuais, em UTC;
 //! - [`exit`]: encerra o programa mais cedo;
 //! - [`yield_now`]: cede a CPU a outro programa (multitarefa);
@@ -29,7 +31,7 @@ pub mod io;
 pub mod sys;
 pub mod time;
 
-pub use fs::{Dir, DirEntry, File, FsError};
+pub use fs::{remove, Dir, DirEntry, File, FileWriter, FsError};
 pub use io::read_line;
 pub use sys::{exit, yield_now};
 pub use time::{DateTime, TimeError};
