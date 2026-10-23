@@ -11,6 +11,7 @@ use crate::fs::FileTable;
 use crate::gdt::{USER_CODE_SELECTOR_BITS, USER_DATA_SELECTOR_BITS};
 use crate::keyboard::LINE_CAPACITY;
 use crate::memory::AddressSpace;
+use crate::net::socket::{PendingNet, SocketTable};
 
 /// Tamanho máximo do nome de um programa, em bytes. O maior nome embutido
 /// (`falha_memoria`) tem 13; nomes de arquivo 8.3 têm no máximo 12.
@@ -136,6 +137,9 @@ pub enum TaskState {
     Running,
     /// Pediu uma linha ao teclado e espera ela ficar completa; não é escolhida.
     WaitingKeyboard,
+    /// Espera a rede (`accept`, `connect`, `send` com buffer cheio ou `recv`);
+    /// não é escolhida até a pilha poder atender o pedido ou o prazo vencer.
+    WaitingNet,
 }
 
 /// Um `SYS_READ_LINE` em andamento: onde a linha deve ser entregue (já
@@ -169,6 +173,11 @@ pub struct Task {
     pub read: Option<PendingRead>,
     /// Os arquivos abertos desta tarefa; fechados quando ela é destruída.
     pub files: FileTable,
+    /// Os sockets desta tarefa; fechados (como `SYS_TCP_CLOSE`) quando ela é
+    /// destruída.
+    pub sockets: SocketTable,
+    /// O pedido de rede em andamento, se está em `WaitingNet`.
+    pub pending_net: Option<PendingNet>,
     /// Quantas vezes foi colocada na CPU (os testes usam para provar que cada
     /// tarefa rodou em mais de uma fatia).
     pub slices: u32,
@@ -185,6 +194,8 @@ impl Task {
             heap_pages: 0,
             read: None,
             files: FileTable::new(),
+            sockets: SocketTable::new(),
+            pending_net: None,
             slices: 0,
         }
     }

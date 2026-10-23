@@ -76,6 +76,9 @@ pub enum FatError {
     /// O volume não aceita escrita (dispositivo somente leitura, ou mais de
     /// 1 setor por cluster).
     ReadOnly,
+    /// `rmdir` de um diretório que tem alguma entrada além de `.`, `..`,
+    /// apagadas e o fim do diretório.
+    NotEmpty,
 }
 
 impl From<BlockError> for FatError {
@@ -696,6 +699,24 @@ impl<'a> Fat<'a> {
         }
     }
 
+    /// A entrada de um diretório (não a raiz, que não tem entrada): onde ela
+    /// mora e o nó. Um nome que não existe é `NotFound`; um arquivo é
+    /// `NotADirectory`. A raiz (`components` vazio) também é `NotFound`: quem
+    /// chama trata a raiz antes, porque ela não pode ser removida nem aberta
+    /// com identidade.
+    pub fn locate_dir(&self, components: &[[u8; 11]]) -> Result<(EntryLoc, Node), FatError> {
+        if components.is_empty() {
+            return Err(FatError::NotFound);
+        }
+        let parent = self.parent_dir(components)?;
+        let name = components[components.len() - 1];
+        match self.scan_dir_for(&parent, &name)?.0 {
+            None => Err(FatError::NotFound),
+            Some((_, entry)) if entry.kind == Kind::File => Err(FatError::NotADirectory),
+            Some((loc, entry)) => Ok((loc, entry.node())),
+        }
+    }
+
     /// Primeira metade de criar um arquivo, **sem escrever nada**: confere que
     /// o volume aceita escrita, que o pai existe e é diretório, que o nome não
     /// existe (`Exists`, inclusive a raiz) e acha a primeira posição livre.
@@ -895,6 +916,129 @@ impl<'a> Fat<'a> {
             }
         }
     }
+
+    /// Cria o diretório vazio cujo último componente é `components[n - 1]`.
+    ///
+    /// Antes de qualquer escrita confere tudo o que pode falhar por falta de
+    /// espaço: o nome não existe (`Exists`, inclusive a raiz), o pai existe e é
+    /// diretório, há posição livre nele e há cluster livre (`NoSpace`). Depois a
+    /// ordem das escritas é: (1) o cluster vira fim de cadeia em todas as
+    /// cópias da FAT; (2) o setor do cluster é gravado inteiro (`.`, `..` e
+    /// zeros, para não sobrar lixo de um cluster reaproveitado); (3) **por
+    /// último**, a entrada no pai. Uma interrupção antes do passo 3 deixa, no
+    /// pior caso, um cluster usado sem dono; o diretório só existe para o
+    /// leitor quando a entrada do pai aparece, e nesse ponto já está completo.
+    pub fn mkdir(&self, components: &[[u8; 11]]) -> Result<(), FatError> {
+        self.check_writable()?;
+        if components.is_empty() {
+            return Err(FatError::Exists);
+        }
+        let parent = self.parent_dir(components)?;
+        let name = components[components.len() - 1];
+        let (found, slot) = self.scan_dir_for(&parent, &name)?;
+        if found.is_some() {
+            return Err(FatError::Exists);
+        }
+        let slot = slot.ok_or(FatError::NoSpace)?;
+        let cluster = self.find_free_cluster()?;
+        // A partir daqui o volume começa a mudar.
+        self.set_fat_entry(cluster, END_OF_CHAIN)?;
+        let mut dir_sector = [0u8; SECTOR_SIZE];
+        let mut dot = [0u8; ENTRY_SIZE];
+        dot[..11].copy_from_slice(b".          ");
+        dot[11] = 0x10;
+        dot[26..28].copy_from_slice(&cluster.to_le_bytes());
+        dir_sector[..ENTRY_SIZE].copy_from_slice(&dot);
+        // `..` aponta para o pai; para a raiz do volume o número é 0.
+        let mut dotdot = [0u8; ENTRY_SIZE];
+        dotdot[..11].copy_from_slice(b"..         ");
+        dotdot[11] = 0x10;
+        dotdot[26..28].copy_from_slice(&parent.first_cluster.to_le_bytes());
+        dir_sector[ENTRY_SIZE..2 * ENTRY_SIZE].copy_from_slice(&dotdot);
+        self.dev.write_sector(self.cluster_sector(cluster)?, &dir_sector)?;
+        // Por último, a entrada no pai (atributo diretório, tamanho 0, data e
+        // hora zeradas).
+        let mut parent_sector = [0u8; SECTOR_SIZE];
+        self.dev.read_sector(slot.lba, &mut parent_sector)?;
+        let at = slot.offset as usize;
+        let mut entry = [0u8; ENTRY_SIZE];
+        entry[..11].copy_from_slice(&name);
+        entry[11] = 0x10;
+        entry[26..28].copy_from_slice(&cluster.to_le_bytes());
+        parent_sector[at..at + ENTRY_SIZE].copy_from_slice(&entry);
+        self.dev.write_sector(slot.lba, &parent_sector)?;
+        Ok(())
+    }
+
+    /// Remove o diretório cuja entrada está em `loc` (ver `locate_dir`).
+    ///
+    /// Antes de alterar qualquer coisa: confere que `loc` é uma entrada viva
+    /// de diretório, percorre a cadeia com o limite de `cluster_count` passos
+    /// (ciclo, número fora do volume, entrada livre ou reservada no meio:
+    /// `Corrupt`), confere que está vazio em **todos** os setores da cadeia
+    /// (`NotEmpty` com qualquer entrada além de `.`, `..`, apagadas e fim; nome
+    /// longo e rótulo de volume contam) e que a cadeia tem um só cluster (os
+    /// diretórios deste volume não crescem; outro comprimento é `Corrupt`).
+    /// Depois, na ordem: (1) a entrada do pai vira apagada (`0xE5`); (2) o
+    /// cluster volta a ser livre em todas as cópias da FAT. A entrada vai
+    /// primeiro: uma interrupção entre as duas deixa um cluster sem dono,
+    /// nunca um diretório visível com a cadeia livre.
+    pub fn rmdir(&self, loc: EntryLoc) -> Result<(), FatError> {
+        self.check_writable()?;
+        let at = loc.offset as usize;
+        if at % ENTRY_SIZE != 0 || at + ENTRY_SIZE > SECTOR_SIZE {
+            return Err(FatError::Corrupt);
+        }
+        let mut parent_sector = [0u8; SECTOR_SIZE];
+        self.dev.read_sector(loc.lba, &mut parent_sector)?;
+        let raw = &parent_sector[at..at + ENTRY_SIZE];
+        if raw[0] == 0x00 || raw[0] == 0xE5 || raw[11] & 0x10 == 0 || raw[11] & 0x08 != 0 || raw[11] & 0x3F == 0x0F {
+            return Err(FatError::Corrupt);
+        }
+        let first = u16::from_le_bytes([raw[26], raw[27]]);
+        self.check_cluster(first)?;
+        // Percorre a cadeia: no máximo `cluster_count` passos, senão é ciclo.
+        let mut cluster = first;
+        let mut count = 1u32;
+        let mut sector = [0u8; SECTOR_SIZE];
+        loop {
+            let lba = self.cluster_sector(cluster)?;
+            for s in 0..self.geo.sectors_per_cluster {
+                self.dev.read_sector(lba + s, &mut sector)?;
+                for entry in sector.chunks_exact(ENTRY_SIZE) {
+                    if !is_dot_entry(entry) && entry[0] != 0x00 && entry[0] != 0xE5 {
+                        return Err(FatError::NotEmpty);
+                    }
+                }
+            }
+            match self.next_cluster(cluster)? {
+                None => break,
+                Some(next) => {
+                    count += 1;
+                    if count > self.geo.cluster_count {
+                        return Err(FatError::Corrupt);
+                    }
+                    cluster = next;
+                }
+            }
+        }
+        if count != 1 {
+            return Err(FatError::Corrupt);
+        }
+        parent_sector[at] = 0xE5;
+        self.dev.write_sector(loc.lba, &parent_sector)?;
+        self.set_fat_entry(first, 0)?;
+        Ok(())
+    }
+}
+
+/// Se a entrada bruta de 32 bytes é exatamente `.` ou `..` de um diretório
+/// (nome com espaços de preenchimento e atributo de diretório). Um nome que
+/// apenas começa por ponto não é: conta como entrada para `rmdir`.
+fn is_dot_entry(raw: &[u8]) -> bool {
+    let dot = raw[0] == b'.' && raw[1..11].iter().all(|&b| b == b' ');
+    let dotdot = raw[0] == b'.' && raw[1] == b'.' && raw[2..11].iter().all(|&b| b == b' ');
+    (dot || dotdot) && raw[11] & 0x10 != 0
 }
 
 /// Traduz uma entrada bruta de 32 bytes. Nome com byte de controle ou fora do
@@ -1926,6 +2070,375 @@ mod tests {
                 // O arquivo ou continua inteiro, ou sumiu.
                 if let Some(dados) = depois.get("/multi.bin") {
                     assert_eq!(dados, &antes["/multi.bin"]);
+                }
+            },
+        );
+    }
+
+    // ---- mkdir e rmdir (Marco 11) ----
+
+    /// A mesma imagem de `image()`, fabricada uma única vez: os testes novos
+    /// são muitos e o `fatimg` é lento dentro do QEMU (o limite de tempo dos
+    /// testes é do binário inteiro).
+    fn imagem_base() -> Vec<u8> {
+        static BASE: spin::Once<Vec<u8>> = spin::Once::new();
+        BASE.call_once(image).clone()
+    }
+
+    fn mkdir_ok(fat: &Fat, path: &[&str]) {
+        fat.mkdir(&comps(path)).unwrap();
+    }
+
+    /// Os 32 bytes da entrada de `path` (um diretório) no setor do pai.
+    fn entrada_de(disk: &RwDisk, fat: &Fat, path: &[&str]) -> [u8; 32] {
+        let (loc, _) = fat.locate_dir(&comps(path)).unwrap();
+        let bytes = disk.bytes();
+        let at = loc.lba as usize * SECTOR_SIZE + loc.offset as usize;
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&bytes[at..at + 32]);
+        out
+    }
+
+    #[test_case]
+    fn mkdir_na_raiz_grava_ponto_e_pontoponto_exatos() {
+        let disk = RwDisk::new(imagem_base());
+        let fat = Fat::mount(&disk).unwrap();
+        let livres = fat.free_clusters().unwrap();
+        mkdir_ok(&fat, &["novo"]);
+        assert_eq!(fat.free_clusters().unwrap(), livres - 1);
+        assert!(copias_iguais(&disk));
+        // A entrada no pai: atributo diretório, tamanho 0, data e hora zeradas.
+        let entrada = entrada_de(&disk, &fat, &["novo"]);
+        let cluster = u16::from_le_bytes([entrada[26], entrada[27]]);
+        let mut esperada = [0u8; 32];
+        esperada[..11].copy_from_slice(b"NOVO       ");
+        esperada[11] = 0x10;
+        esperada[26..28].copy_from_slice(&cluster.to_le_bytes());
+        assert_eq!(entrada, esperada);
+        // O setor do cluster: `.` e `..` (que aponta para 0, a raiz) e zeros.
+        let mut setor = [0u8; SECTOR_SIZE];
+        disk.read_sector(fat.cluster_sector(cluster).unwrap(), &mut setor).unwrap();
+        let mut ponto = [0u8; 32];
+        ponto[..11].copy_from_slice(b".          ");
+        ponto[11] = 0x10;
+        ponto[26..28].copy_from_slice(&cluster.to_le_bytes());
+        let mut pontoponto = [0u8; 32];
+        pontoponto[..11].copy_from_slice(b"..         ");
+        pontoponto[11] = 0x10;
+        assert_eq!(&setor[..32], &ponto);
+        assert_eq!(&setor[32..64], &pontoponto);
+        assert!(setor[64..].iter().all(|&b| b == 0));
+        // O leitor: está na listagem como diretório, vazio (sem `.` e `..`).
+        let node = lookup(&fat, &["novo"]).unwrap();
+        assert_eq!(node.kind, Kind::Dir);
+        assert!(list(&fat, &node).unwrap().is_empty());
+        assert!(list(&fat, &fat.root()).unwrap().contains(&String::from("novo")));
+    }
+
+    #[test_case]
+    fn mkdir_em_subdiretorio_aponta_o_pontoponto_para_o_pai() {
+        let disk = RwDisk::new(imagem_base());
+        let fat = Fat::mount(&disk).unwrap();
+        let docs = lookup(&fat, &["docs"]).unwrap();
+        mkdir_ok(&fat, &["docs", "notas"]);
+        let entrada = entrada_de(&disk, &fat, &["docs", "notas"]);
+        let cluster = u16::from_le_bytes([entrada[26], entrada[27]]);
+        let mut setor = [0u8; SECTOR_SIZE];
+        disk.read_sector(fat.cluster_sector(cluster).unwrap(), &mut setor).unwrap();
+        assert_eq!(u16::from_le_bytes([setor[26], setor[27]]), cluster);
+        assert_eq!(u16::from_le_bytes([setor[32 + 26], setor[32 + 27]]), docs.first_cluster);
+        assert_eq!(list(&fat, &lookup(&fat, &["docs"]).unwrap()).unwrap(), ["a.txt", "sub", "notas"]);
+        // E dá para criar dentro dele.
+        criar(&fat, &["docs", "notas", "a.txt"]);
+        assert_eq!(list(&fat, &lookup(&fat, &["docs", "notas"]).unwrap()).unwrap(), ["a.txt"]);
+    }
+
+    #[test_case]
+    fn mkdir_repetido_e_exists_e_pai_ruim_e_not_found() {
+        let disk = RwDisk::new(imagem_base());
+        let fat = Fat::mount(&disk).unwrap();
+        for path in [&["docs"][..], &["DOCS"], &["curto.txt"], &["docs", "sub"]] {
+            assert_eq!(fat.mkdir(&comps(path)).err(), Some(FatError::Exists));
+        }
+        // A raiz do volume também existe.
+        assert_eq!(fat.mkdir(&[]).err(), Some(FatError::Exists));
+        assert_eq!(fat.mkdir(&comps(&["nada", "x"])).err(), Some(FatError::NotFound));
+        assert_eq!(fat.mkdir(&comps(&["curto.txt", "x"])).err(), Some(FatError::NotADirectory));
+        assert_eq!(disk.writes(), 0);
+        // Nada mudou.
+        assert!(walk_all(&fat).is_ok());
+    }
+
+    #[test_case]
+    fn mkdir_com_pai_cheio_ou_volume_cheio_nao_escreve_nada() {
+        // Pai cheio: um subdiretório novo recebe 14 arquivos; o 15º nome é NoSpace.
+        let disk = RwDisk::new(imagem_base());
+        let fat = Fat::mount(&disk).unwrap();
+        mkdir_ok(&fat, &["cheio2"]);
+        for i in 0..14 {
+            criar(&fat, &["cheio2", &format!("f{:02}.txt", i)]);
+        }
+        let escritas = disk.writes();
+        assert_eq!(fat.plan_create(&comps(&["cheio2", "g.txt"])).and_then(|p| fat.commit_create(p)).err(), Some(FatError::NoSpace));
+        assert_eq!(fat.mkdir(&comps(&["cheio2", "sub"])).err(), Some(FatError::NoSpace));
+        assert_eq!(disk.writes(), escritas);
+        // Volume cheio: marca como ocupado todo cluster livre, setor da FAT a
+        // setor da FAT (as duas cópias), em vez de um `set_fat_entry` por cluster.
+        let geo = fat.geometry();
+        for copia in 0..2 {
+            for sf in 0..geo.fat_sectors {
+                let lba = geo.fat_start + copia * geo.fat_sectors + sf;
+                let mut setor = [0u8; SECTOR_SIZE];
+                disk.read_sector(lba, &mut setor).unwrap();
+                for i in 0..SECTOR_SIZE / 2 {
+                    let cluster = sf * (SECTOR_SIZE as u32 / 2) + i as u32;
+                    if cluster >= 2 && cluster <= geo.cluster_count + 1 && setor[i * 2] == 0 && setor[i * 2 + 1] == 0 {
+                        setor[i * 2..i * 2 + 2].copy_from_slice(&END_OF_CHAIN.to_le_bytes());
+                    }
+                }
+                disk.write_sector(lba, &setor).unwrap();
+            }
+        }
+        assert_eq!(fat.free_clusters().unwrap(), 0);
+        let escritas = disk.writes();
+        assert_eq!(fat.mkdir(&comps(&["semvaga"])).err(), Some(FatError::NoSpace));
+        assert_eq!(disk.writes(), escritas);
+        assert_eq!(fat.locate_dir(&comps(&["semvaga"])).err(), Some(FatError::NotFound));
+    }
+
+    #[test_case]
+    fn mkdir_e_rmdir_recusam_dispositivo_sem_escrita() {
+        // O volume de 2 setores por cluster (que também recusa) é provado em
+        // `tests/escrita_no_disco.rs`: montá-lo aqui custa 8 MiB de heap e 1 s
+        // do orçamento de tempo do binário de unidades.
+        let ro = MemDisk(imagem_base());
+        let fat = Fat::mount(&ro).unwrap();
+        assert_eq!(fat.mkdir(&comps(&["novo"])).err(), Some(FatError::ReadOnly));
+        let (loc, _) = fat.locate_dir(&comps(&["docs"])).unwrap();
+        assert_eq!(fat.rmdir(loc).err(), Some(FatError::ReadOnly));
+    }
+
+    #[test_case]
+    fn subdiretorio_novo_aceita_14_arquivos_e_recusa_o_15() {
+        let disk = RwDisk::new(imagem_base());
+        let fat = Fat::mount(&disk).unwrap();
+        mkdir_ok(&fat, &["lote"]);
+        for i in 0..14 {
+            criar(&fat, &["lote", &format!("a{:02}.txt", i)]);
+        }
+        let plano = fat.plan_create(&comps(&["lote", "a14.txt"])).unwrap();
+        assert_eq!(fat.commit_create(plano).err(), Some(FatError::NoSpace));
+        assert_eq!(list(&fat, &lookup(&fat, &["lote"]).unwrap()).unwrap().len(), 14);
+    }
+
+    #[test_case]
+    fn rmdir_marca_a_entrada_e_libera_o_cluster_nas_duas_copias() {
+        let disk = RwDisk::new(imagem_base());
+        let fat = Fat::mount(&disk).unwrap();
+        let livres = fat.free_clusters().unwrap();
+        mkdir_ok(&fat, &["novo"]);
+        let (loc, _) = fat.locate_dir(&comps(&["novo"])).unwrap();
+        fat.rmdir(loc).unwrap();
+        let bytes = disk.bytes();
+        assert_eq!(bytes[loc.lba as usize * SECTOR_SIZE + loc.offset as usize], 0xE5);
+        assert_eq!(fat.free_clusters().unwrap(), livres);
+        assert!(copias_iguais(&disk));
+        assert_eq!(fat.locate_dir(&comps(&["novo"])).err(), Some(FatError::NotFound));
+        assert!(!list(&fat, &fat.root()).unwrap().contains(&String::from("novo")));
+        // O nome pode ser criado de novo.
+        mkdir_ok(&fat, &["novo"]);
+    }
+
+    #[test_case]
+    fn rmdir_de_diretorio_com_entrada_e_not_empty_e_nao_escreve() {
+        let disk = RwDisk::new(imagem_base());
+        let fat = Fat::mount(&disk).unwrap();
+        let antes = disk.bytes();
+        // `docs` tem arquivo e subdiretório; `docs/sub` tem um arquivo.
+        for path in [&["docs"][..], &["docs", "sub"]] {
+            let (loc, _) = fat.locate_dir(&comps(path)).unwrap();
+            assert_eq!(fat.rmdir(loc).err(), Some(FatError::NotEmpty));
+        }
+        // Um diretório novo com só um subdiretório também não está vazio.
+        mkdir_ok(&fat, &["pai"]);
+        mkdir_ok(&fat, &["pai", "filho"]);
+        let (loc, _) = fat.locate_dir(&comps(&["pai"])).unwrap();
+        let escritas = disk.writes();
+        assert_eq!(fat.rmdir(loc).err(), Some(FatError::NotEmpty));
+        assert_eq!(disk.writes(), escritas);
+        assert_ne!(disk.bytes(), antes); // as criações mudaram o volume
+    }
+
+    #[test_case]
+    fn rmdir_com_so_entrada_apagada_funciona() {
+        let disk = RwDisk::new(imagem_base());
+        let fat = Fat::mount(&disk).unwrap();
+        let livres = fat.free_clusters().unwrap();
+        mkdir_ok(&fat, &["tmp"]);
+        let arquivo = criar(&fat, &["tmp", "x.txt"]);
+        acrescentar_tudo(&fat, arquivo, b"conteudo");
+        let (loc, _) = fat.locate_dir(&comps(&["tmp"])).unwrap();
+        assert_eq!(fat.rmdir(loc).err(), Some(FatError::NotEmpty));
+        let (arq, _) = fat.locate(&comps(&["tmp", "x.txt"])).unwrap();
+        fat.remove(arq).unwrap();
+        fat.rmdir(loc).unwrap();
+        assert_eq!(fat.free_clusters().unwrap(), livres);
+    }
+
+    #[test_case]
+    fn rmdir_com_entrada_de_nome_longo_ou_rotulo_e_not_empty() {
+        for atributo in [0x0Fu8, 0x08] {
+            let disk = RwDisk::new(imagem_base());
+            let fat = Fat::mount(&disk).unwrap();
+            mkdir_ok(&fat, &["tmp"]);
+            let (loc, node) = fat.locate_dir(&comps(&["tmp"])).unwrap();
+            // Injeta uma entrada que o leitor ignora na posição 2 do setor.
+            let lba = fat.cluster_sector(node.first_cluster).unwrap();
+            let mut setor = [0u8; SECTOR_SIZE];
+            disk.read_sector(lba, &mut setor).unwrap();
+            setor[64..75].copy_from_slice(b"ABCDEFGH   ");
+            setor[64 + 11] = atributo;
+            disk.write_sector(lba, &setor).unwrap();
+            assert!(list(&fat, &lookup(&fat, &["tmp"]).unwrap()).unwrap().is_empty());
+            assert_eq!(fat.rmdir(loc).err(), Some(FatError::NotEmpty), "atributo {:#x}", atributo);
+        }
+    }
+
+    #[test_case]
+    fn rmdir_com_cadeia_adulterada_e_corrupt_e_nao_escreve() {
+        // Ciclo: o diretório aponta para si mesmo na FAT, mas está vazio.
+        let disk = RwDisk::new(imagem_base());
+        let fat = Fat::mount(&disk).unwrap();
+        mkdir_ok(&fat, &["tmp"]);
+        let (loc, node) = fat.locate_dir(&comps(&["tmp"])).unwrap();
+        let c = node.first_cluster;
+        fat.set_fat_entry(c, c).unwrap();
+        let escritas = disk.writes();
+        assert_eq!(fat.rmdir(loc).err(), Some(FatError::Corrupt));
+        assert_eq!(disk.writes(), escritas);
+        // Cluster seguinte fora do volume.
+        fat.set_fat_entry(c, 0xFFEF).unwrap();
+        assert_eq!(fat.rmdir(loc).err(), Some(FatError::Corrupt));
+        // Entrada livre no meio da cadeia: aponta para um cluster livre.
+        let livre = fat.find_free_cluster().unwrap();
+        fat.set_fat_entry(c, livre).unwrap();
+        assert_eq!(fat.rmdir(loc).err(), Some(FatError::Corrupt));
+        // Um diretório vazio de dois clusters (cadeia válida) também não é removido.
+        fat.set_fat_entry(livre, END_OF_CHAIN).unwrap();
+        let mut zeros = [0u8; SECTOR_SIZE];
+        zeros.fill(0);
+        disk.write_sector(fat.cluster_sector(livre).unwrap(), &zeros).unwrap();
+        let escritas = disk.writes();
+        assert_eq!(fat.rmdir(loc).err(), Some(FatError::Corrupt));
+        assert_eq!(disk.writes(), escritas);
+        // Entrada de pai que não é diretório vivo.
+        let (arq, _) = fat.locate(&comps(&["curto.txt"])).unwrap();
+        assert_eq!(fat.rmdir(arq).err(), Some(FatError::Corrupt));
+    }
+
+    #[test_case]
+    fn rmdir_de_diretorio_com_varios_clusters_e_entradas_e_not_empty() {
+        let disk = RwDisk::new(imagem_base());
+        let fat = Fat::mount(&disk).unwrap();
+        let (loc, _) = fat.locate_dir(&comps(&["cheio"])).unwrap();
+        assert_eq!(fat.rmdir(loc).err(), Some(FatError::NotEmpty));
+        assert_eq!(disk.writes(), 0);
+    }
+
+    #[test_case]
+    fn locate_dir_distingue_arquivo_inexistente_e_raiz() {
+        let disk = RwDisk::new(imagem_base());
+        let fat = Fat::mount(&disk).unwrap();
+        assert_eq!(fat.locate_dir(&comps(&["curto.txt"])).err(), Some(FatError::NotADirectory));
+        assert_eq!(fat.locate_dir(&comps(&["nada"])).err(), Some(FatError::NotFound));
+        assert_eq!(fat.locate_dir(&[]).err(), Some(FatError::NotFound));
+        assert!(fat.locate_dir(&comps(&["docs", "sub"])).is_ok());
+    }
+
+    // ---- interrupção simulada: mkdir e rmdir ----
+
+    #[test_case]
+    fn interrupcao_ao_criar_diretorio_deixa_o_volume_consistente() {
+        interrompe(
+            &imagem_base(),
+            |fat| fat.mkdir(&comps(&["docs", "novo"])).is_ok(),
+            |antes, depois| anteriores_intactos(antes, depois, ""),
+        );
+    }
+
+    #[test_case]
+    fn o_diretorio_criado_so_aparece_completo() {
+        // Em cada ponto de corte, o diretório ou não existe, ou existe vazio e navegável.
+        let base = imagem_base();
+        let mut n = 0;
+        loop {
+            let disk = RwDisk::flaky(base.clone(), n);
+            let completa = Fat::mount(&disk).unwrap().mkdir(&comps(&["novo"])).is_ok();
+            let depois = RwDisk::new(disk.bytes());
+            let fat = Fat::mount(&depois).unwrap();
+            match lookup(&fat, &["novo"]) {
+                Ok(node) => {
+                    assert_eq!(node.kind, Kind::Dir);
+                    assert!(list(&fat, &node).unwrap().is_empty());
+                    // `..` e `.` estão no lugar: dá para criar dentro dele.
+                    criar(&fat, &["novo", "a.txt"]);
+                }
+                Err(e) => assert_eq!(e, FatError::NotFound),
+            }
+            if completa {
+                assert!(lookup(&fat, &["novo"]).is_ok() || n > 0);
+                break;
+            }
+            n += 1;
+            assert!(n < 50);
+        }
+    }
+
+    #[test_case]
+    fn interrupcao_ao_remover_diretorio_deixa_o_volume_consistente() {
+        // Parte de um volume que já tem o diretório vazio `tmp`.
+        let disk = RwDisk::new(imagem_base());
+        {
+            let fat = Fat::mount(&disk).unwrap();
+            mkdir_ok(&fat, &["tmp"]);
+        }
+        let base = disk.bytes();
+        interrompe(
+            &base,
+            |fat| {
+                let (loc, _) = fat.locate_dir(&comps(&["tmp"])).unwrap();
+                fat.rmdir(loc).is_ok()
+            },
+            |antes, depois| anteriores_intactos(antes, depois, ""),
+        );
+    }
+
+    #[test_case]
+    fn interrupcao_ao_criar_com_acrescimo_em_volume_com_diretorios_deixa_o_volume_consistente() {
+        let disk = RwDisk::new(imagem_base());
+        {
+            let fat = Fat::mount(&disk).unwrap();
+            mkdir_ok(&fat, &["lote"]);
+        }
+        let dados = pattern(1500, 11);
+        interrompe(
+            &disk.bytes(),
+            |fat| {
+                let plano = match fat.plan_create(&comps(&["lote", "n.bin"])) {
+                    Ok(p) => p,
+                    Err(_) => return false,
+                };
+                let loc = match fat.commit_create(plano) {
+                    Ok(l) => l,
+                    Err(_) => return false,
+                };
+                matches!(fat.append(loc, &dados), Ok(n) if n == dados.len())
+            },
+            |antes, depois| {
+                anteriores_intactos(antes, depois, "/lote/n.bin");
+                if let Some(x) = depois.get("/lote/n.bin") {
+                    assert!(x.len() <= dados.len());
+                    assert_eq!(x[..], dados[..x.len()]);
                 }
             },
         );

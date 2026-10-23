@@ -1803,3 +1803,252 @@ Posicionar, sobrescrever no meio e truncar, criar e remover diretórios, data e
 hora nas entradas, atributos, nomes longos e qualquer cache ou escrita atrasada.
 E o disco de verdade: o Marco 11 leva a mesma camada ao `/disco`, com a escrita de
 setores no driver ATA.
+
+## Marco 11: escrita no disco ATA
+
+O Marco 10 ensinou o kernel a escrever num volume que vive na memória. O Marco 11
+leva **a mesma camada** ao disco de verdade. A ideia cabe em uma frase: **o mesmo
+escritor do `/ram` passa a gravar no `/disco`, setor a setor, com a descarga do
+cache a cada setor; diretórios nascem com um cluster; e preservar dados é um passo
+manual**. Quase nada muda em `src/fat.rs` e em `src/fs.rs` para o `/disco` virar
+gravável: o que muda é o driver, que passa a saber gravar, e o fato de o disco
+mentir sobre quando um setor "está gravado".
+
+### Gravar um setor: `WRITE SECTORS`
+
+É a leitura ao contrário (`src/ata.rs`, `AtaDisk::write_sector`). Sob a trava do
+controlador e com as interrupções desligadas, como a leitura:
+
+1. escolher o disco e os 4 bits altos do LBA, e esperar o disco largar `BSY`;
+2. escrever a contagem (1) e os três bytes do LBA, e mandar o comando
+   `WRITE SECTORS` (`0x30`);
+3. esperar `DRQ`: o disco está pronto para **receber** dados;
+4. **escrever** 256 palavras de 16 bits na porta de dados (`outw`, o espelho do
+   `inw` da leitura);
+5. esperar `BSY` limpar e `DRQ` zerar: o disco aceitou o setor.
+
+Toda espera usa a mesma função `wait` da leitura, com limite de leituras de status:
+um disco que não responde dá `Timeout`, nunca um laço infinito. Um `lba` além do
+fim do disco devolve `OutOfRange` **antes** de qualquer acesso às portas.
+
+### Por que o cache do disco precisa ser descarregado a cada setor
+
+Terminar o passo 5 não quer dizer que o setor está na mídia. O disco guarda o que
+recebe num **cache de escrita** e leva à mídia quando lhe convém, e não
+necessariamente na ordem em que recebeu. Isso quebraria a argumentação do Marco 10:
+a ordem das escritas do `Fat::append` (cluster novo na FAT, ligação, dados, e só
+por fim o tamanho) só protege o volume se cada setor já estiver na mídia **antes**
+de o próximo começar. Se o disco reordenar, uma queda de energia pode deixar o
+tamanho novo na mídia sem os dados. Por isso, depois de cada setor, o driver manda
+`FLUSH CACHE` (`0xE7`) e espera `BSY` sair; só então `write_sector` devolve `Ok`.
+A descarga pode demorar bem mais do que a transferência de 512 bytes, então ela
+tem o seu próprio limite, `FLUSH_MAX_POLLS`, dez vezes o `MAX_POLLS` das outras
+esperas. O custo é conhecido e aceito: uma escrita grande faz dezenas de gravações
+com descarga, tudo dentro da syscall, com as interrupções desligadas. Ticks do
+timer podem se perder, o que só encurta a fatia do rodízio; a hora, que vem do
+RTC, não é afetada.
+
+### Nada mais muda para o `/disco` virar gravável
+
+`fs::with_fat_write` já chamava `Fat::check_writable`, que pergunta ao dispositivo
+`writable()`. O `AtaDisk` passou a responder `true`, e pronto: criar, acrescentar e
+apagar arquivos no `/disco` usam o mesmo código do `/ram`, sem um segundo escritor.
+Um disco indisponível continua dando `Unavailable` antes de qualquer outro erro.
+
+### Diretório novo: `.` e `..`
+
+`Fat::mkdir` cria um diretório de **um cluster** (um setor, 16 entradas) que não
+cresce. A ordem das escritas segue o mesmo raciocínio do `append`:
+
+1. conferir tudo o que pode falhar por falta de espaço **sem escrever nada**: o
+   nome não existe, o pai existe, há posição livre no pai e há cluster livre;
+2. marcar o cluster como fim de cadeia (`0xFFFF`) nas duas cópias da FAT;
+3. gravar o setor do cluster inteiro: a entrada `.` (aponta para o próprio
+   cluster), a entrada `..` (aponta para o pai, ou para `0` quando o pai é a raiz
+   do volume) e zeros até o fim;
+4. **por último**, gravar a entrada no pai.
+
+O diretório só existe para o leitor quando a entrada do pai aparece, e nesse
+ponto ele já está completo. Uma parada antes disso deixa, no pior caso, um cluster
+usado sem dono. O leitor de FAT ignora `.` e `..` ao listar, então `ls` de um
+diretório novo não mostra nada. O teste de interrupção simulada roda `mkdir` com o
+dispositivo falhando na N-ésima escrita, para cada N, e confere que o volume
+continua montável e legível.
+
+### Remover um diretório
+
+`Fat::rmdir` confere tudo **antes** de alterar qualquer coisa: a entrada é de um
+diretório vivo, a cadeia não tem ciclo nem sai do volume, e o diretório está vazio
+em todos os setores (`.` e `..`, entradas apagadas e o fim não contam; qualquer
+outra coisa, inclusive uma entrada de nome longo que o leitor ignoraria, é
+`NotEmpty`). Só então vêm as escritas, na ordem de `remove`: a entrada do pai vira
+apagada (`0xE5`), e depois o cluster volta a ser livre nas duas cópias da FAT. A
+entrada vai primeiro porque uma parada entre as duas deixa um cluster sem dono, e
+nunca um diretório visível com a cadeia livre.
+
+O kernel também recusa remover um diretório que algum programa tem aberto: o
+registro de itens abertos do Marco 10 passou a guardar a posição da entrada de
+diretórios abertos com `SYS_OPEN`, e `fs::rmdir` devolve `Busy` se encontrar a
+entrada ali (ou se o alvo é a raiz de um volume). Sem isso, um leitor poderia
+passar a ler um cluster já reaproveitado.
+
+### Do prompt ao programa
+
+`mkdir` e `rmdir` são comandos do prompt (`src/shell.rs`) e as syscalls 15 e 16
+(`SYS_MKDIR`, `SYS_RMDIR`) do contrato versão 7. `SYS_MKDIR` não usa descritor: não
+abre nada. O programa `caderno` mostra tudo junto: acrescenta uma linha com a hora a
+`/disco/caderno.txt` a cada execução e mostra o arquivo.
+
+### Por que o `cargo run` não guarda o que você grava
+
+Os argumentos do QEMU no `Cargo.toml` anexam o disco com `snapshot=on`: o QEMU
+manda as escritas para um arquivo temporário e a imagem original nunca muda. É
+assim que o `cargo test` pode gravar no `/disco` à vontade sem estragar nada, e é
+por isso que, no `cargo run`, o que você grava some quando fecha o QEMU. O
+`build.rs` continua regerando `target/imagens/disco.img` sempre que roda. Para
+**preservar** dados, copia-se a imagem para fora de `target/` e dá-se boot no QEMU
+à mão, sem `snapshot=on`, sobre a cópia (README, "Preservando o disco entre boots").
+Se o QEMU for morto no meio de uma gravação, cada setor já gravado e descarregado
+está no arquivo, e a ordem das escritas deixa o volume consistente.
+
+### O que ficou de fora
+
+Diretório que cresce, mais de 1 setor por cluster, posicionar, sobrescrever no meio,
+truncar, renomear e mover; data e hora nas entradas, atributos e nomes longos;
+cache de blocos, escrita atrasada e journaling; DMA, LBA48 e SATA nativo. E a rede,
+que veio no Marco 12.
+
+## Marco 12: rede básica com TCP/IP
+
+Até o Marco 11 o os-rust lia e escrevia arquivos, mas não falava com o mundo. O
+Marco 12 dá a ele uma pilha de rede **mínima e inteira**, toda escrita no
+projeto. A ideia cabe em uma frase: **um quadro Ethernet chega pela placa, sobe
+por ARP, IP e TCP até um socket, e a resposta desce o mesmo caminho; sem placa,
+o `127.0.0.1` ainda leva dois programas a conversar por TCP**. Este capítulo
+segue esse caminho, de baixo para cima.
+
+### Achar a placa: o barramento PCI
+
+Uma placa de rede não tem endereço fixo. O PCI é o barramento onde ela mora, e
+cada dispositivo tem um espaço de configuração de 256 bytes, endereçado por
+barramento (0 a 255), dispositivo (0 a 31) e função (0 a 7). Há duas portas de
+E/S para ler esse espaço (`src/pci.rs`): escreve-se o endereço em `0xCF8` e lê-se
+o dado em `0xCFC`. O primeiro registrador de toda função diz o fabricante e o
+modelo; `0xFFFF` de fabricante quer dizer "nada aqui". A varredura olha a função
+0 de cada dispositivo (e as funções 1 a 7 só se o dispositivo declara várias), com
+um limite fixo de leituras, procurando `10EC:8139`, a Realtek RTL8139. Achada a
+placa, o kernel liga no registrador de comando o acesso às portas de E/S e o
+**bus mastering** (a permissão para a placa fazer DMA) e lê o BAR0, que diz a
+porta base dos registradores dela.
+
+### DMA e por que o endereço é físico
+
+A RTL8139 não recebe os quadros pela CPU: ela os **escreve na memória sozinha**
+(DMA). Como ela não passa pela tabela de páginas, só entende endereços
+**físicos**. Por isso os buffers dela são `static` alinhados em página
+(`src/rtl8139.rs`), e na inicialização o driver traduz cada página pela tabela
+de páginas ativa e confere que o bloco é contíguo na memória física e termina
+abaixo de 4 GiB (o registrador do anel tem 32 bits). Se a conferência falhar, a
+placa fica "indisponível" e o kernel sobe do mesmo jeito.
+
+### O anel de recepção e os quatro buffers de envio
+
+A placa grava cada quadro recebido num **anel** de 8 KiB, precedido de 4 bytes
+(`status` e `tamanho`). O driver guarda onde parou de ler e avisa a placa de
+quanto já leu. Com o bit `WRAP` ligado, a placa deixa o último quadro passar do
+fim do anel, e por isso o buffer tem 1536 bytes de folga: o driver nunca costura
+um quadro partido. Para enviar, há quatro buffers de 1536 bytes usados em
+rodízio: escreve-se o endereço físico do buffer e depois o tamanho do quadro, e a
+placa devolve o buffer quando termina. Nenhuma interrupção da placa é usada
+(`IMR = 0`): o kernel **pergunta** se chegou algo.
+
+### As camadas e o caminho de um quadro
+
+```text
+placa  ->  Ethernet  ->  ARP
+                     \->  IPv4  ->  ICMP (eco)
+                               \->  TCP  ->  socket do programa
+```
+
+Cada camada é um arquivo de `src/net/` que só sabe montar e interpretar bytes
+(`eth.rs`, `arp.rs`, `ip.rs`, `icmp.rs`, `tcp.rs`): o **Ethernet** diz quem envia,
+quem recebe e o que vem dentro; o **IPv4** diz de onde para onde, e confere
+versão, tamanho, soma de verificação e se o pacote está fragmentado (a pilha não
+remonta fragmentos); o **ICMP** só responde ao eco, que é o `ping`; o **TCP**
+entrega uma sequência de bytes confiável. A resposta desce o mesmo caminho. Para
+`127.0.0.1` o pacote nem chega à Ethernet: volta para a própria pilha por uma fila
+de 8 posições, e é por isso que o loopback funciona sem placa.
+
+### ARP: de IP para MAC
+
+Para mandar um pacote a alguém na mesma rede é preciso o endereço físico (MAC)
+dessa pessoa. O ARP pergunta a todos "quem tem o IP X?", e o dono responde. As
+respostas ficam num cache de 8 entradas (a mais antiga sai quando enche). Quem
+está fora da sub-rede é alcançado pelo MAC do gateway. Enquanto a resposta não
+vem, **um** pacote espera; o pedido é repetido até 3 vezes, uma por segundo, e
+depois o pacote é descartado (o TCP o retransmite).
+
+### A soma de verificação
+
+O IP, o ICMP e o TCP protegem seus cabeçalhos com a mesma conta (RFC 1071): somar
+o dado em palavras de 16 bits, dobrar o "vai-um" de volta e inverter. Quem confere
+soma tudo, **incluindo** o campo da soma, e deve obter zero. O TCP inclui na conta
+um "pseudocabeçalho" com os endereços IP, para que um segmento entregue ao
+destino errado seja detectado (`src/net/checksum.rs`).
+
+### TCP: o aperto de mão, o para-e-espera e a retransmissão
+
+O TCP numera cada byte; quem recebe confirma até onde recebeu (ACK). A conexão
+nasce com o **aperto de mão de três vias**: quem conecta manda `SYN`, o servidor
+responde `SYN+ACK`, e o primeiro confirma com `ACK`. Os estados de cada ponta
+(`LISTEN`, `SYN_SENT`, ..., `TIME_WAIT`) estão em `src/net/tcp.rs`.
+
+Esta versão é propositalmente simples: **um segmento sem confirmação por vez**
+(até 1024 bytes). Só quando ele é confirmado sai o próximo. Se a confirmação não
+vem em 100 ticks (1 s), o mesmo segmento é reenviado, no máximo 5 vezes; depois a
+conexão cai com `ERR_TIMEDOUT`. Quem recebe só aceita o que chega **em ordem**:
+um segmento adiantado ou repetido é descartado e o último byte em ordem é
+confirmado de novo. A janela que se anuncia é o espaço livre do buffer; com a
+janela do par em zero, sonda-se com 1 byte a cada segundo. Os números de sequência
+têm 32 bits e **dão a volta**: toda comparação usa aritmética com envolvimento
+(`seq_lt`). Fechar a conexão leva um `FIN` em cada sentido, e o estado final
+(`TIME_WAIT`), que na norma dura minutos, dura 1 s aqui, um atalho documentado.
+
+### Por que a pilha roda por polling, em pontos seguros
+
+Como o ATA e o RTC, a rede não usa interrupção da placa. Quem anda a pilha é
+`net::poll()`: recebe os quadros que a placa já tem, esvazia o loopback e vence os
+temporizadores (retransmissão, ARP, `TIME_WAIT`). Ela **nunca** roda dentro de um
+handler de IRQ (um handler em ring 0 não aloca nem pega lock), e sim nos mesmos
+pontos seguros em que o kernel já olhava o teclado: o laço ocioso do prompt, o
+escalonador (bloqueio, `yield`, tick vindo de ring 3, volta do laço ocioso) e
+dentro das syscalls e dos comandos de rede. Nada na pilha aloca no heap: oito
+blocos de conexão, buffers de 2048 bytes e a fila do loopback são `static`.
+
+Para provar a máquina de estados sem esperar segundos de verdade, a pilha é
+genérica sobre a placa (`Nic`) e recebe o tempo como argumento. Os testes usam
+uma placa falsa e um relógio injetado: a retransmissão em exatamente 100 ticks e
+a queda depois da quinta saem de uma conta, não de um `sleep`.
+
+### Como uma tarefa bloqueia na rede
+
+`SYS_TCP_ACCEPT`, `SYS_TCP_CONNECT`, `SYS_TCP_RECV` e `SYS_TCP_SEND` (com o buffer
+cheio) esperam sem gastar CPU, com o mesmo desenho do `SYS_READ_LINE`. A syscall
+tenta a operação; se não dá, guarda um `PendingNet` na tarefa (qual operação, qual
+socket, o ponteiro já validado, o prazo) e a tarefa passa ao estado
+`WaitingNet`: o escalonador não a escolhe. A cada volta de `run_next`, depois de
+andar a pilha, ele pergunta a cada tarefa em espera se o pedido já pode andar
+(`net::ready`: chegou dado, apareceu conexão, abriu espaço, a conexão caiu ou o
+prazo venceu); se sim, ela volta a `Ready`. O resultado só é calculado quando o
+espaço de endereçamento dela é ativado, como no `deliver_line`: é aí que os bytes
+são copiados para o buffer do programa e o valor entra em `rax`. Se todos os
+programas esperam, o kernel dorme em `hlt` até o próximo tick. Cada tarefa tem a
+sua tabela de 4 sockets, que é fechada quando a tarefa termina, por qualquer motivo.
+
+### O que ficou de fora
+
+UDP, DHCP, DNS, IPv6, TLS, fragmentação de IP, opções do IP e do TCP, controle de
+congestionamento, janela deslizante com vários segmentos no ar, mais de uma placa
+e proteção contra ataques (o número de sequência inicial é previsível). Hardware
+real não foi testado. E um HTTP de verdade: o `servidor` devolve sempre a mesma
+página mínima.

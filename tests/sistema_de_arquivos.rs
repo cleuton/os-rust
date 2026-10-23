@@ -578,12 +578,12 @@ fn arquivos_abertos_sao_liberados_no_exit_e_no_erro_e_os_outros_seguem() {
 
 #[test_case]
 fn primeiro_numero_fora_do_contrato_continua_encerrando_so_o_programa() {
-    // O contrato v6 vai até `SYS_REMOVE` (14); o 15 é o primeiro número livre.
+    // O contrato v8 vai até `SYS_TCP_TIMEOUT` (23); o 24 é o primeiro número livre.
     let mut a = Asm::new();
-    a.mov32(Rax, 15);
+    a.mov32(Rax, 24);
     a.syscall();
     let elf = synth_elf(&a.0);
-    assert_eq!(rodar_sintetico("fs_quinze", &elf), Termination::BadSyscall { number: 15 });
+    assert_eq!(rodar_sintetico("fs_dezessete", &elf), Termination::BadSyscall { number: 24 });
 }
 
 /// A imagem ELF de um programa embutido.

@@ -1,6 +1,6 @@
 [package]
 name = "os-rust"
-version = "0.10.0"
+version = "0.12.0"
 edition = "2021"
 
 [dependencies]
@@ -39,16 +39,29 @@ harness = false
 # `index=2` é o secundário-mestre, com uma imagem de volume corrompido; o
 # secundário-escravo (`index=3`) fica **vazio** de propósito, para os testes
 # provarem que a ausência de disco não trava o kernel. `snapshot=on` manda as
-# escritas para um arquivo temporário do QEMU: a imagem nunca muda (o kernel
-# só lê; `readonly=on` o QEMU recusa em disco IDE). O caminho é relativo à raiz
-# do repositório, de onde `cargo run` e `cargo test` são sempre executados.
-run-args = ["-serial", "stdio", "-drive", "file=target/imagens/disco.img,format=raw,if=ide,index=1,snapshot=on"]
+# escritas para um arquivo temporário do QEMU: a imagem nunca muda, mesmo que o
+# kernel grave no `/disco` (`readonly=on` o QEMU recusa em disco IDE). Para
+# preservar o que se grava, rode o QEMU à mão sobre uma cópia da imagem (README,
+# "Preservando o disco entre boots"). O caminho é relativo à raiz do
+# repositório, de onde `cargo run` e `cargo test` são sempre executados.
+#
+# Rede (Marco 12): `-nic user,model=rtl8139` põe no QEMU a placa que o kernel
+# conhece (Realtek RTL8139) ligada à rede de usuário do próprio QEMU (SLIRP:
+# endereço 10.0.2.15, gateway 10.0.2.2, sem precisar de internet nem de
+# privilégio de administrador). Nos testes, `guestfwd=tcp:10.0.2.100:7-cmd:cat`
+# acrescenta um serviço de eco falso em 10.0.2.100:7 (o QEMU roda o utilitário
+# `cat` do computador): é com ele que se prova o TCP pela placa. O `run-args`
+# **não** leva `hostfwd`: uma porta já ocupada no computador impediria o QEMU de
+# abrir. Para o computador falar com o kernel, o README ensina o comando do QEMU
+# à mão (seção "Rede no QEMU").
+run-args = ["-serial", "stdio", "-drive", "file=target/imagens/disco.img,format=raw,if=ide,index=1,snapshot=on", "-nic", "user,model=rtl8139"]
 test-args = [
     "-serial", "stdio",
     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
     "-display", "none",
     "-drive", "file=target/imagens/disco.img,format=raw,if=ide,index=1,snapshot=on",
     "-drive", "file=target/imagens/corrompido.img,format=raw,if=ide,index=2,snapshot=on",
+    "-nic", "user,model=rtl8139,guestfwd=tcp:10.0.2.100:7-cmd:cat",
 ]
 test-success-exit-code = 33
 test-timeout = 60

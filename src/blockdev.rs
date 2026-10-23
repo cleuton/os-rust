@@ -7,8 +7,9 @@
 //! ATA, que mora no hardware.
 //!
 //! Não há cache nem leitura de vários setores. Escrever um setor é opcional:
-//! por padrão um dispositivo recusa (`BlockError::ReadOnly`), e só o ramdisk
-//! gravável (`WritableRam`) aceita. Assim o ATA e as imagens embutidas
+//! por padrão um dispositivo recusa (`BlockError::ReadOnly`), e só quem
+//! implementa `write_sector` aceita: o ramdisk gravável (`WritableRam`) e o disco
+//! ATA (que descarrega o cache a cada setor). Assim as imagens embutidas
 //! continuam somente leitura sem mudar uma linha.
 
 use alloc::vec::Vec;

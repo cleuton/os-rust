@@ -53,7 +53,7 @@ sistema de arquivos ou multitarefa completa.
 
 A documentação do projeto também está disponível em inglês (veja o link `ENGLISH VERSION` no início de cada arquivo `.md`).
 
-**Versão atual: 0.10.0.** Os Marcos 0 (boot em modo texto VGA, com
+**Versão atual: 0.12.0.** Os Marcos 0 (boot em modo texto VGA, com
 mensagem de boas-vindas, rolagem e tratamento de panic legível), 1
 (interrupções, teclado e prompt de comandos), 2 (infraestrutura de
 depuração: saída serial e testes automatizados dentro do QEMU), 3
@@ -72,17 +72,21 @@ ramdisk e um disco ATA, ambos FAT16 (somente leitura no Marco 8), com `ls`, `cat
 de arquivo e a execução de um programa lido do disco, demonstrada com `run
 /disco/bin/visita`) e 9 (driver de RTC: o kernel lê a data e a hora do
 relógio do computador, mostradas pelo comando `data` e oferecidas aos programas
-pela syscall `SYS_TIME`, com `run hora`) e 10 (escrita no ramdisk: criar,
+pela syscall `SYS_TIME`, com `run hora`), 10 (escrita no ramdisk: criar,
 acrescentar e apagar arquivos no `/ram`, pelo prompt e por programas de
-usuário, com `run gravador` e `run apagador`) estão concluídos e são o que este
-repositório executa hoje. O Marco 11 (escrita no disco ATA) está planejado. A demonstração original de palestra, no
+usuário, com `run gravador` e `run apagador`) e 11 (escrita no disco ATA: o
+`/disco` também grava, criar e remover diretórios, e os dados persistem entre
+boots quando o QEMU roda sobre uma cópia da imagem, com `run caderno`) e 12
+(rede básica com TCP/IP: placa RTL8139, ARP, IP, ICMP e TCP, com `rede`, `ping`
+e `run servidor cliente`) estão concluídos e são o que este repositório executa
+hoje. A demonstração original de palestra, no
 formato usado em aula, está preservada na tag git `v1.0-demo` e continua
 podendo ser usada como está.
 
 ## Roadmap
 
 O os-rust avança em marcos numerados, cada um terminando em algo visível
-no QEMU. A tabela abaixo resume os treze primeiros marcos planejados; os
+no QEMU. A tabela abaixo resume os catorze primeiros marcos planejados; os
 detalhes de cada um vêm na sequência.
 
 | Marco | Objetivo | Demonstrável | Status |
@@ -99,7 +103,8 @@ detalhes de cada um vêm na sequência.
 | 8. Sistema de arquivos | Ler arquivos de um sistema de arquivos, primeiro um ramdisk embutido e depois um driver de disco com leitura somente. | Listar arquivos e executar um programa lido do disco (`ls /ram`, `cat /ram/ola.txt`, `run /disco/bin/visita`). | Concluído |
 | 9. Driver de RTC | Ler a data e a hora do relógio de tempo real (chip CMOS) por polling e oferecê-las ao prompt e aos programas de usuário por uma syscall nova. | `data` mostra a data e a hora em UTC; `run hora` mostra o mesmo, pedido ao kernel por um programa. | Concluído |
 | 10. Escrita no ramdisk | Escrever em FAT16, criando, gravando, ampliando e apagando arquivos, aplicado ao volume `/ram`. | Criar um arquivo em `/ram`, mostrá-lo com `cat` e apagá-lo, também por programa de usuário. | Concluído |
-| 11. Escrita no disco ATA | Gravar setores no disco ATA e tornar o `/disco` gravável pela mesma camada de escrita, com persistência entre boots. | Gravar um arquivo em `/disco`, reiniciar o QEMU e ler o arquivo. | Planejado |
+| 11. Escrita no disco ATA | Gravar setores no disco ATA e tornar o `/disco` gravável pela mesma camada de escrita, com persistência entre boots. | Gravar um arquivo em `/disco`, reiniciar o QEMU e ler o arquivo. | Concluído |
+| 12. Rede básica com TCP/IP | Falar TCP/IP de forma básica, mas funcionando no QEMU: driver de placa de rede (RTL8139), ARP, IP, ICMP e TCP. | Trocar dados pela rede no QEMU (`rede`, `ping 10.0.2.2`, `run servidor cliente`); em hardware real (bare metal) deve funcionar com uma RTL8139, sem garantia. | Concluído |
 
 ### Detalhes dos marcos
 
@@ -179,7 +184,7 @@ peça a vez; `run falha_memoria contador_a` encerra só quem falhou.
 Depende do Marco 5.
 
 **Marco 8. Sistema de arquivos.** Concluído. O kernel passa a ler arquivos,
-**somente leitura** (no Marco 8; a escrita chegou ao `/ram` no Marco 10 e chega ao `/disco` no Marco 11), de dois volumes FAT16 fixos: `/ram`, um ramdisk
+**somente leitura** (no Marco 8; a escrita chegou ao `/ram` no Marco 10 e ao `/disco` no Marco 11), de dois volumes FAT16 fixos: `/ram`, um ramdisk
 embutido na imagem de boot, e `/disco`, um disco ATA lido por PIO (portas de
 E/S, por polling, sem DMA e sem interrupção de disco). O mesmo leitor de FAT
 lê os dois, através de uma abstração mínima de dispositivo de blocos. Os
@@ -187,8 +192,10 @@ comandos `ls` e `cat` listam e mostram arquivos; quatro syscalls novas
 (`SYS_OPEN`, `SYS_READ`, `SYS_CLOSE`, `SYS_READ_DIR`, contrato versão 4 do
 [`SYSCALLS.md`](SYSCALLS.md)) deixam um programa abrir, ler e listar, cada um
 com a sua tabela de arquivos; e `run` aceita o caminho de um executável.
-As imagens dos volumes são geradas dentro de `cargo run`/`cargo test` pela
-crate `fatimg`, a partir do diretório `discos/`, sem nenhuma ferramenta nova.
+As imagens dos volumes são geradas pelo `build.rs` (sempre que ele roda, o que
+inclui o `cargo run` e o `cargo test`, salvo quando o cargo o pula por nada ter
+mudado) com a crate `fatimg`, a partir do diretório `discos/`, sem nenhuma
+ferramenta nova.
 Demonstrável: `ls /ram` e `cat /ram/ola.txt` mostram o ramdisk; `run
 /disco/bin/visita` executa um programa que **existe só no disco** (o kernel
 nunca o viu em tempo de compilação); `run leitor` e `run listador` leem o
@@ -227,17 +234,41 @@ não pode ser apagado. O `/disco` continua somente leitura. Demonstrável: criar
 um arquivo em `/ram`, mostrá-lo com `cat` e apagá-lo, também por programa de
 usuário. Depende do Marco 8.
 
-**Marco 11. Escrita no disco ATA.** Planejado. A segunda metade: levar a mesma
-camada ao disco de verdade. Escopo: escrita de setores por PIO no driver ATA
-(incluindo o comando de descarga do cache do disco); o `/disco` gravável pela
-mesma camada do Marco 10; criação e remoção de diretórios; a ordem das escritas
-que mantém o volume consistente se for interrompida; e a persistência entre dois
-boots do QEMU sobre a mesma imagem, com a decisão de como o `build.rs` deixa de
-regenerar o disco quando o objetivo é preservá-lo (hoje ele o regenera a cada
-`cargo run`/`cargo test`, o que apagaria qualquer gravação). Os testes operam
-sempre sobre uma cópia da imagem. Contrato versão 7, se houver syscalls novas
-(por exemplo, de diretório). Demonstrável: gravar um arquivo em `/disco`,
-reiniciar o QEMU e ler o arquivo. Depende do Marco 10.
+**Marco 11. Escrita no disco ATA.** Concluído. A segunda metade da escrita:
+a mesma camada do Marco 10 passa a gravar no disco de verdade. Entregue: o
+driver ATA grava um setor por vez por PIO (`WRITE SECTORS`) e **descarrega o
+cache do disco depois de cada setor** (`FLUSH CACHE`), o que faz a ordem das
+escritas do Marco 10 valer na mídia; o `/disco` gravável pela mesma camada de
+FAT do `/ram`, sem um segundo escritor; criação e remoção de diretórios
+(`mkdir` e `rmdir` no prompt; `SYS_MKDIR`, `SYS_RMDIR` e o erro `ERR_NOTEMPTY`,
+contrato versão 7; `mkdir` e `rmdir` na biblioteca de runtime); o programa
+`caderno`, que anota a hora em `/disco/caderno.txt` e mostra a persistência; e
+as seções do README sobre **preservar o disco entre boots** e **criar um pen
+drive bootável**. Um diretório novo ocupa um cluster (14 entradas depois de `.` e
+`..`) e não cresce. O `build.rs` continua como estava: ele regera
+`target/imagens/disco.img` sempre que roda, e o `cargo run` e o `cargo test`
+usam `snapshot=on`, então o que se grava nessas execuções é descartado; para
+preservar dados, dá-se boot no QEMU à mão sobre uma **cópia** da imagem (veja
+[Preservando o disco entre boots](#preservando-o-disco-entre-boots)).
+Demonstrável: gravar um arquivo em `/disco`, reiniciar o QEMU e ler o arquivo.
+Depende do Marco 10. Foi o último marco do lote anterior; a rede veio no
+Marco 12.
+
+**Marco 12. Rede básica com TCP/IP.** Concluído. O kernel passou a falar
+TCP/IP: varre o barramento PCI, acha a placa Realtek RTL8139 (a que o QEMU
+emula) e a programa por polling, sem interrupção da placa; por cima dela rodam
+Ethernet II, ARP, IPv4, ICMP (só o eco, para o `ping`) e TCP, tudo escrito no
+projeto, sem crate de rede. Um loopback interno devolve à própria pilha os
+pacotes para `127.0.0.1`, e por isso dois programas conversam por TCP até sem
+placa. Os programas usam **sockets TCP** (sete syscalls novas, 17 a 23, contrato
+versão 8; `TcpListener` e `TcpStream` na biblioteca de runtime), e esperar a
+rede não gasta CPU: o programa fica bloqueado como no `read_line`, e o kernel
+dorme se todos esperam. O TCP é simples de propósito: um segmento sem
+confirmação por vez, só recebe em ordem, retransmite a cada 1 s, `TIME_WAIT` de
+1 s. O prompt ganhou `rede` e `ping`, e os programas `servidor` e `cliente`
+mostram dois programas conversando por TCP (`run servidor cliente`).
+Demonstrável no QEMU; em hardware real (bare metal) deve funcionar se houver uma
+RTL8139, mas isso não foi testado e não há garantia. Depende do Marco 11.
 
 ### Por que essa ordem
 
@@ -255,9 +286,10 @@ contrato de syscalls: números, semântica, convenções de registradores,
 códigos de erro, formato de executável, região de carga e pilha inicial)
 está documentada em um único arquivo versionado, [`SYSCALLS.md`](SYSCALLS.md),
 desde o Marco 5 (versão 1 do contrato: `write` e `exit`). A versão atual é a
-6, do Marco 10, que acrescenta ao que já havia (leitura de uma linha do
+7, do Marco 11, que acrescenta ao que já havia (leitura de uma linha do
 teclado e memória, no Marco 6; ceder a CPU, no Marco 7; leitura de arquivos,
-no Marco 8; a hora, `SYS_TIME`, no Marco 9) a escrita de arquivos no `/ram`. Ele é a única fonte dessa
+no Marco 8; a hora, `SYS_TIME`, no Marco 9; a escrita de arquivos no `/ram`, no
+Marco 10) criar e remover diretórios e a escrita no `/disco`. Ele é a única fonte dessa
 interface: nenhuma syscall existe sem estar nele, e um teste automatizado
 confere que o texto continua batendo com o código. Uma mudança incompatível
 no contrato aumenta a versão dele e exige atualizar, no mesmo marco, a
@@ -355,6 +387,10 @@ Confirme que o QEMU está acessível:
 qemu-system-x86_64 --version
 ```
 
+Os testes de rede (Marco 12) usam o `guestfwd` do QEMU, que roda o utilitário
+`cat` do computador para fazer um serviço de eco: ele existe no Linux e no
+macOS (no Windows esse teste de eco não roda).
+
 ## Compilando e rodando
 
 Com os três pré-requisitos acima instalados, a partir da raiz do
@@ -369,15 +405,15 @@ projeto (`x86_64-os_rust.json`), gerar uma imagem de boot com `bootimage`,
 e abrir uma janela do QEMU que dá boot via BIOS direto nesse binário. Em
 poucos segundos você deve ver o logo do os-rust (as 20 linhas do símbolo
 e do nome, no topo da tela), seguido da linha de identificação
-`os-rust v0.10.0` — a versão atual do projeto — e do prompt `os-rust> `
+`os-rust v0.12.0` — a versão atual do projeto — e do prompt `os-rust> `
 pronto para digitação, não um terminal comum.
 
 O mesmo `cargo run` também compila a biblioteca de runtime (`runtime/`) e
 os programas de usuário (a pasta `programs/`, para o target
 `x86_64-os_rust_user.json`) e os embute na imagem de boot, e também gera as
-imagens do ramdisk e do disco (`discos/`, pela crate `fatimg`) e anexa o disco
-ao QEMU (`target/imagens/disco.img`, pelos argumentos do `bootimage` no
-`Cargo.toml`): não há nenhum passo manual a mais, nem ferramenta nova. Rode
+imagens do ramdisk e do disco (`discos/`, pela crate `fatimg`, sempre que o
+`build.rs` roda) e anexa o disco ao QEMU (`target/imagens/disco.img`, com
+`snapshot=on`, pelos argumentos do `bootimage` no `Cargo.toml`): não há nenhum passo manual a mais, nem ferramenta nova. Rode
 `cargo run` e `cargo test` sempre a partir da raiz do repositório: o caminho do
 disco é relativo a ela. Se um programa de
 usuário não compilar, o `cargo run` para com o erro do compilador em vez
@@ -409,13 +445,17 @@ Não é preciso nenhum passo manual adicional para isso: é o mesmo
 | `falha <tipo>` | Provoca uma exceção de CPU de propósito: `pagina` (`#PF`), `pilha` (`#DF`), `opcode` (`#UD`), `protecao` (`#GP`) ou `breakpoint` (`#BP`); sem argumento ou com um tipo desconhecido, lista os tipos disponíveis |
 | `ls <caminho>` | Lista as entradas de um diretório (tipo, tamanho e nome), por exemplo `ls /ram` ou `ls /disco/docs`; sem argumento mostra o uso e o estado dos volumes; caminho inexistente, arquivo no lugar de diretório e volume indisponível dão uma mensagem clara |
 | `cat <caminho>` | Mostra o conteúdo de um arquivo, por exemplo `cat /ram/ola.txt` (bytes fora do ASCII imprimível aparecem como `■`); mesmas mensagens de erro de `ls` |
-| `grava <caminho> [<texto>]` | Cria um arquivo no `/ram` (por exemplo `grava /ram/nota.txt ola`); com texto, grava o texto mais uma quebra de linha. Mostra `grava: criado <caminho> (<N> bytes)`. Nunca sobrescreve: um nome que já existe dá `ja existe` |
-| `anexa <caminho> <texto>` | Acrescenta o texto, mais uma quebra de linha, ao fim de um arquivo que já existe no `/ram`; mostra o tamanho novo. Nunca cria |
-| `apaga <caminho>` | Apaga um arquivo do `/ram` e devolve o espaço dele; um arquivo aberto por algum programa dá `arquivo em uso`. No `/disco`, os três comandos dizem `volume somente leitura: /disco` |
+| `grava <caminho> [<texto>]` | Cria um arquivo no `/ram` ou no `/disco` (por exemplo `grava /ram/nota.txt ola`); com texto, grava o texto mais uma quebra de linha. Mostra `grava: criado <caminho> (<N> bytes)`. Nunca sobrescreve: um nome que já existe dá `ja existe` |
+| `anexa <caminho> <texto>` | Acrescenta o texto, mais uma quebra de linha, ao fim de um arquivo que já existe no `/ram` ou no `/disco`; mostra o tamanho novo. Nunca cria |
+| `apaga <caminho>` | Apaga um arquivo do `/ram` ou do `/disco` e devolve o espaço dele; um arquivo aberto por algum programa dá `arquivo em uso`. Só um volume que não aceita escrita (mais de 1 setor por cluster) dá `volume somente leitura` |
+| `mkdir <caminho>` | Cria um diretório vazio (`mkdir: criado <caminho>`); o pai precisa existir, e o diretório ocupa um cluster e não cresce (14 entradas). Um nome que já existe dá `ja existe` |
+| `rmdir <caminho>` | Remove um diretório vazio (`rmdir: removido <caminho>`); com entradas dá `diretorio nao vazio`, e a raiz de um volume ou um diretório aberto por algum programa dá `diretorio em uso` |
+| `rede [<ip> <mascara> <gateway>]` | Sem argumentos, mostra em quatro linhas a placa de rede (RTL8139 e o MAC), o endereço, os contadores de quadros e as conexões TCP em uso; com três argumentos, troca o endereço (só em memória; endereço inválido não muda nada). Veja [Rede no QEMU](#rede-no-qemu) |
+| `ping <ip>` | Manda 4 pedidos de eco ICMP (um por segundo) e mostra as respostas, por exemplo `ping 10.0.2.2` ou `ping 127.0.0.1`. **Não é o programa `ping` de `run ping pong`** (Marco 7), que só se alterna com o `pong` |
 | `data` | Mostra a data e a hora do relógio do computador, em UTC, no formato `AAAA-MM-DD HH:MM:SS UTC`; se o relógio estiver inválido ou não responder, mostra uma mensagem clara. Argumentos extras são ignorados |
 | `run <alvo> [<alvo>...]` | Executa programas de usuário em modo usuário (ring 3), até 4 ao mesmo tempo (o mesmo alvo pode se repetir), e volta ao prompt quando o último termina. Um alvo que começa com `/` é o caminho de um executável ELF64 (até 64 KiB) lido de um volume, como `/disco/bin/visita`; qualquer outro é o nome de um programa embutido na imagem. Os dois se misturam (`run /disco/bin/visita hello`). Sem argumento, com um alvo inválido ou com mais de 4 alvos, não inicia nenhum |
 
-### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `visita` e `labirint`
+### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `visita` e `labirint`
 
 O comando `run` executa programas escritos fora do kernel. Cada um vive em
 `programs/src/bin/` (exceto `visita` e `labirint`, em
@@ -478,6 +518,62 @@ O comando `run` executa programas escritos fora do kernel. Cada um vive em
   apagador: removi /ram/gravado.txt
   ```
 
+- **`caderno`** (`run caderno`): anota a hora (UTC) em `/disco/caderno.txt`, uma
+  linha de 20 bytes (`AAAA-MM-DD HH:MM:SS` mais a quebra de linha) por
+  execução: cria o arquivo na primeira vez e acrescenta nas seguintes. Depois
+  mostra o arquivo inteiro e conta as linhas. Sem o disco, escreve `caderno: nao
+  gravou /disco/caderno.txt: <erro>` e sai com o código 1. Demonstração:
+
+  ```text
+  os-rust> mkdir /disco/diario
+  mkdir: criado /disco/diario
+  os-rust> grava /disco/diario/nota.txt gravado no disco
+  grava: criado /disco/diario/nota.txt (17 bytes)
+  os-rust> mkdir /disco/docs/notas
+  mkdir: criado /disco/docs/notas
+  os-rust> rmdir /disco/docs/notas
+  rmdir: removido /disco/docs/notas
+  os-rust> rmdir /disco/docs
+  rmdir: diretorio nao vazio: /disco/docs
+  os-rust> run caderno
+  2026-10-23 14:05:09
+  caderno: 1 linha em /disco/caderno.txt
+  os-rust> run caderno
+  2026-10-23 14:05:09
+  2026-10-23 14:05:31
+  caderno: 2 linhas em /disco/caderno.txt
+  ```
+
+  Com o `cargo run`, tudo isso vale até fechar o QEMU (`snapshot=on`). Para os
+  dados sobreviverem a um reinício, siga [Preservando o disco entre
+  boots](#preservando-o-disco-entre-boots): no segundo boot, `cat
+  /disco/diario/nota.txt` mostra `gravado no disco` e o terceiro `run caderno`
+  mostra 3 linhas.
+- **`servidor`** e **`cliente`** (`run servidor cliente`): dois programas
+  conversam por TCP. O `servidor` ouve na porta 8000 e responde a uma
+  requisição com uma página HTTP/1.0 mínima (88 bytes: 65 de cabeçalho e 23 de
+  corpo); o `cliente` pergunta o endereço (Enter = `127.0.0.1`), manda um pedido
+  de 33 bytes e escreve a resposta na tela, sem os `\r`:
+
+  ```text
+  os-rust> run servidor cliente
+  servidor: ouvindo na porta 8000
+  cliente: endereco do servidor (vazio = 127.0.0.1):
+  servidor: recebi 33 bytes
+  HTTP/1.0 200 OK
+  Content-Type: text/plain
+  Content-Length: 23
+
+  ola da rede do os-rust
+  cliente: 88 bytes recebidos
+  servidor: respondi 23 bytes de corpo
+  ```
+
+  (a ordem das linhas dos dois programas pode variar). O tráfego vai pelo
+  loopback, sem rede. `run servidor` sozinho desiste em 30 s (`servidor: ninguem
+  se conectou em 30 s`); `run cliente` sem servidor mostra `cliente: nao
+  conectou em 127.0.0.1:8000: recusado`. Com o QEMU do passo a passo de [Rede no
+  QEMU](#rede-no-qemu), o computador de verdade também conversa com eles.
 - **`leitor`** (`run leitor`): abre `/disco/docs/longo.txt`, um arquivo que
   ocupa mais de um cluster do disco, e escreve o conteúdo na tela, lendo em
   pedaços de 128 bytes pelas syscalls de arquivo. O programa nunca fala com o
@@ -515,8 +611,8 @@ O comando `run` executa programas escritos fora do kernel. Cada um vive em
 ### Arquivos: os volumes `/ram` e `/disco`
 
 O conteúdo dos dois volumes vem do diretório `discos/` do repositório
-(`discos/ram/` e `discos/disco/`), transformado em imagem FAT16 durante o
-`cargo run`/`cargo test`; o disco ainda recebe os executáveis `visita` e `labirint` e um
+(`discos/ram/` e `discos/disco/`), transformado em imagem FAT16 pelo
+`build.rs` (que regera `target/imagens/disco.img` sempre que roda); o disco ainda recebe os executáveis `visita` e `labirint` e um
 arquivo de 65 537 bytes (`docs/grande.bin`) que existe só para provar a recusa
 de um executável grande demais. Um caminho é `/<volume>/<componente>/...`, com
 nomes 8.3 (até 8 caracteres, ponto e até 3 de extensão), sem diferenciar
@@ -539,15 +635,23 @@ os-rust> run /disco/bin/visita hello
 Para ver o kernel sem o disco, rode o QEMU à mão sem o segundo `-drive`
 (`bootimage run`... ou `qemu-system-x86_64 -drive format=raw,file=<imagem do
 bootimage>`): o boot é normal, `ls /ram` funciona e `ls /disco` diz `volume
-indisponivel: /disco (sem disco)`. Escrita: o `/ram` é de **leitura e
-escrita** (`grava`, `anexa`, `apaga` e as syscalls de escrita); o `/disco` é
-**somente leitura** até o Marco 11. Reiniciar o QEMU restaura o `/ram` ao
-conteúdo inicial: a imagem embutida nunca é alterada. Limitações da escrita: um
-arquivo só cresce pelo fim (sem posicionar, sobrescrever no meio nem truncar),
-não se criam nem se removem diretórios, o diretório não cresce (sem posição
-livre, `sem espaco`), e um arquivo aberto não se apaga. Limitações gerais: só
-nomes curtos 8.3 (entradas de nome longo do FAT são
-ignoradas), um volume FAT16 por fonte, sem cache de blocos nem partições.
+indisponivel: /disco (sem disco)`.
+
+Escrita: o `/ram` e o `/disco` são de **leitura e escrita** (`grava`, `anexa`,
+`apaga`, `mkdir`, `rmdir` e as syscalls de escrita), pela mesma camada de FAT.
+Reiniciar o QEMU restaura o `/ram` ao conteúdo inicial: a imagem embutida nunca
+é alterada. O `/disco` guarda o que foi gravado **na imagem em que o QEMU está
+rodando**: no `cargo run` e no `cargo test` (`snapshot=on`) isso é descartado
+ao fechar o QEMU, e só persiste entre boots pelo passo a passo de
+[Preservando o disco entre boots](#preservando-o-disco-entre-boots). Nada no
+disco é protegido: qualquer arquivo, até `/disco/bin/visita`, pode ser apagado
+(numa cópia, basta copiar de novo). Limitações da escrita: um arquivo só cresce
+pelo fim (sem posicionar, sobrescrever no meio nem truncar, renomear ou mover),
+um diretório novo ocupa um cluster e não cresce (14 entradas; sem posição livre,
+`sem espaco`), só se remove diretório vazio e que não esteja aberto, e um
+arquivo aberto não se apaga. Limitações gerais: só nomes curtos 8.3 (entradas de
+nome longo do FAT são ignoradas), um volume FAT16 por fonte, sem cache de
+blocos nem partições, e só volumes com 1 setor por cluster aceitam escrita.
 
 Para ver a multitarefa à mão, rode `cargo run` e digite `run ping pong`,
 `run contador_a contador_b`, `run eco eco2` e `run falha_memoria contador_a`
@@ -563,6 +667,150 @@ comando não reconhecido mostra uma mensagem de erro sugerindo `help`.
 
 Para encerrar a demonstração, digite `panic` ou simplesmente feche a
 janela do QEMU. Ambos são um fim normal da execução, não um erro.
+
+### Preservando o disco entre boots
+
+O `cargo run` e o `cargo test` rodam o QEMU com `snapshot=on` no disco de dados:
+as gravações vão para um arquivo temporário e a imagem original nunca muda. É
+por isso que, com o `cargo run`, o que você grava em `/disco` some quando fecha o
+QEMU. Para **preservar** o que se grava, dê boot no QEMU à mão, com uma **cópia**
+da imagem do disco e sem `snapshot=on`:
+
+```sh
+cargo bootimage
+cp target/imagens/disco.img ~/os-rust-disco.img
+qemu-system-x86_64 -drive format=raw,if=ide,index=0,file=target/x86_64-os_rust/debug/bootimage-os-rust.bin -drive format=raw,if=ide,index=1,file=$HOME/os-rust-disco.img -serial stdio
+```
+
+No Windows (prompt de comando), a cópia é `copy target\imagens\disco.img
+%USERPROFILE%\os-rust-disco.img`, e o `file=` do segundo `-drive` aponta para
+essa cópia (por exemplo `file=%USERPROFILE%\os-rust-disco.img`); o resto é
+igual, com `target\x86_64-os_rust\debug\bootimage-os-rust.bin` no primeiro.
+
+O que cada argumento faz: `index=0` é o disco de boot (a imagem que o
+`bootimage` fabricou) e `index=1` é o disco que o kernel monta como `/disco`;
+`-serial stdio` manda a saída serial do kernel para o terminal. A linha **não**
+tem `snapshot=on`, então o QEMU grava de verdade no arquivo `~/os-rust-disco.img`.
+Grave algo, feche o QEMU e rode **o mesmo comando** de novo: o `/disco` mostra o
+que foi gravado (`cat /disco/diario/nota.txt`, `ls /disco`, `run caderno`).
+
+- **A cópia fica fora de `target/`** para sobreviver a novos builds e ao `cargo
+  clean`: o `build.rs` regera `target/imagens/disco.img` sempre que roda, e o
+  `cargo run` e o `cargo test` descartam o que gravam. Rodar `cargo bootimage`
+  de novo não toca na cópia.
+- **Para recomeçar de um disco limpo**, copie a imagem de novo (`cp
+  target/imagens/disco.img ~/os-rust-disco.img`). A cópia guarda os programas
+  do `/disco` (como `labirint`) da época em que foi feita; para pegar os novos,
+  faça outra cópia, e as gravações da antiga se perdem.
+- **Não abra a mesma imagem em dois QEMUs ao mesmo tempo**: o QEMU recusa o
+  segundo.
+- Se o QEMU for morto no meio de uma gravação, cada setor já gravado e
+  descarregado está no arquivo, e a ordem das escritas deixa o volume
+  consistente (no pior caso sobram clusters usados sem dono).
+
+### Criando um pen drive bootável
+
+A imagem de boot (`bootimage-os-rust.bin`) pode ser gravada num pen drive para
+dar boot num computador de verdade. **Isto apaga tudo no dispositivo e, se você
+errar o dispositivo, destrói dados do seu computador.** Confira duas vezes.
+No Linux:
+
+```sh
+cargo bootimage
+lsblk
+sudo dd if=target/x86_64-os_rust/debug/bootimage-os-rust.bin of=/dev/sdX bs=4M conv=fsync status=progress
+```
+
+O caminho da imagem é o que o `cargo bootimage` imprime ao terminar
+(`target/x86_64-os_rust/debug/bootimage-os-rust.bin`). Para achar o dispositivo,
+rode `lsblk` com o pen drive **desligado** e de novo com ele ligado: o que
+apareceu é ele; confira pelo tamanho. **Desmonte** as partições dele antes
+(`sudo umount /dev/sdX*`) e troque `sdX` pelo dispositivo certo (o disco inteiro,
+como `/dev/sdb`, não uma partição como `/dev/sdb1`). O `conv=fsync` garante que
+tudo foi escrito quando o `dd` termina.
+
+- **macOS**: `diskutil list` mostra os discos; `diskutil unmountDisk
+  /dev/diskN` desmonta; depois `sudo dd if=target/x86_64-os_rust/debug/bootimage-os-rust.bin
+  of=/dev/rdiskN bs=4m` (em minúsculas, no dispositivo `rdiskN`, e sem
+  `status=progress`, que o `dd` do macOS não tem).
+- **Windows**: use um programa que grave imagens cruas em um dispositivo
+  (por exemplo, o Rufus no modo imagem DD, ou o Win32 Disk Imager). Esta nota
+  não afirma que algum deles foi testado com este projeto.
+
+Limites: o kernel só dá boot por **BIOS** (modo legado ou CSM), **não** por UEFI;
+o teclado precisa ser PS/2 ou emulado como PS/2 pela BIOS (um teclado USB que a
+BIOS não emula não funciona); o `/ram` funciona; o `/disco` provavelmente
+aparece como indisponível (`ls /disco` diz `volume indisponivel`), porque o
+kernel só procura o disco ATA primário-escravo; e isto **não foi testado em
+hardware real**: é uma instrução de uso, sem garantia.
+
+### Rede no QEMU
+
+O Marco 12 dá ao os-rust uma pilha de rede. O `cargo run` já liga ao QEMU uma
+placa Realtek RTL8139 na rede de usuário do próprio QEMU (`-nic
+user,model=rtl8139`): o kernel recebe o endereço `10.0.2.15`, e o gateway
+`10.0.2.2` responde a ARP e a `ping` sozinho. Não precisa de internet nem de
+privilégio de administrador. Dentro do os-rust:
+
+```text
+os-rust> rede
+placa: RTL8139 mac 52:54:00:12:34:56
+ip: 10.0.2.15 mascara: 255.255.255.0 gateway: 10.0.2.2
+quadros: recebidos=0 enviados=0 descartados=0
+tcp: 0 de 8 conexoes em uso
+os-rust> ping 10.0.2.2
+ping 10.0.2.2: 4 pedidos
+resposta de 10.0.2.2: seq=1 tempo<10 ms
+...
+ping: 4 enviados, 4 recebidos
+os-rust> run servidor cliente
+```
+
+`rede <ip> <mascara> <gateway>` troca o endereço (só em memória). `run servidor
+cliente` (basta apertar Enter no endereço) leva dois programas a conversar por
+TCP pelo `127.0.0.1`, **sem nenhuma rede**: o loopback funciona até sem placa.
+
+**Falar com o computador de verdade.** O `cargo run` não abre nenhuma porta do
+computador (uma porta já ocupada impediria o QEMU de abrir). Para o computador
+falar com o os-rust, suba o QEMU à mão com `hostfwd`:
+
+```sh
+cargo bootimage
+qemu-system-x86_64 -drive format=raw,if=ide,index=0,file=target/x86_64-os_rust/debug/bootimage-os-rust.bin -drive format=raw,if=ide,index=1,file=target/imagens/disco.img,snapshot=on -nic user,model=rtl8139,hostfwd=tcp:127.0.0.1:8080-:8000 -serial stdio
+```
+
+O `hostfwd=tcp:127.0.0.1:8080-:8000` encaminha a porta 8080 do computador para a
+porta 8000 do os-rust (a do `servidor`). Duas demonstrações:
+
+- **O computador acessa o os-rust.** No prompt do os-rust, `run servidor`; no
+  computador, em outro terminal:
+
+  ```sh
+  curl http://127.0.0.1:8080/
+  ```
+
+  O `curl` mostra `ola da rede do os-rust` e o `servidor` escreve `servidor:
+  respondi 23 bytes de corpo`.
+- **O os-rust acessa o computador.** No computador, sirva a pasta atual na porta
+  8000:
+
+  ```sh
+  python3 -m http.server 8000
+  ```
+
+  No os-rust, `run cliente` e digite `10.0.2.2` (é o computador, visto de dentro
+  do QEMU): a listagem aparece, até 1024 bytes, seguida de `cliente: 1024 bytes
+  recebidos (cortado)`.
+
+Esse modo cobre **só TCP**: o `ping` do computador para o os-rust não funciona
+(precisaria de rede em ponte, fora do escopo). O comando `ping` do os-rust é
+outra coisa que o programa `ping` de `run ping pong` (Marco 7): o comando
+manda ecos ICMP; o programa só se alterna com o `pong`.
+
+**Hardware real.** O kernel só conhece a placa Realtek RTL8139 (PCI). Se o
+computador tiver uma, o `rede <ip> <mascara> <gateway>` configura o endereço da
+sua rede (não há DHCP). Nada disso foi testado fora do QEMU: é uma instrução de
+uso, sem garantia.
 
 ## Rodando os testes automatizados
 
@@ -702,6 +950,66 @@ QEMU para ver o `/ram` voltar ao conteúdo inicial. A suíte automatizada
   de falha, escrita parcial com o volume cheio, dois programas acrescentando ao
   mesmo arquivo, o `/disco` que não muda, volume indisponível, FAT adulterada,
   o `/ram` restaurado e o contrato e o guia (código literal dos programas).
+
+### O que os testes do Marco 12 cobrem
+
+Para conferir à mão, siga [Rede no QEMU](#rede-no-qemu). A suíte automatizada
+(`cargo test`) cobre, além dos testes anteriores. Os testes de rede ficam em
+cinco binários de `tests/` (cada um cabe nos 60 s do `test-timeout`); nenhum usa
+a internet, privilégio de administrador ou porta aberta no computador. A rede de
+usuário do QEMU responde a ARP e a `ping`, e os testes de TCP pela placa usam o
+`guestfwd` do QEMU, que roda o utilitário `cat` do computador (Linux e macOS):
+
+- `tests/rede_pilha.rs` (sem hardware, com uma placa falsa e o relógio injetado):
+  a soma de verificação (vetores da RFC 1071), Ethernet, ARP, IPv4 e ICMP byte a
+  byte e cada rejeição, o cache de ARP, o roteamento, o loopback, e a máquina de
+  estados do TCP: aperto de mão ativo e passivo, dados nos dois sentidos, segmento
+  fora de ordem e duplicado, retransmissão em exatamente 100 ticks e a queda
+  depois da quinta, RST, fechamento nos dois sentidos, `TIME_WAIT`, janela zero,
+  volta do número de sequência, limite de 8 conexões e fila de aceitação de 2;
+- `tests/rede.rs` (QEMU, placa de verdade): o PCI acha a RTL8139, `rede` e
+  `ping 10.0.2.2` (4 de 4), o `ping` no loopback e num endereço sem dono, a
+  configuração, o comportamento sem placa e o eco de TCP pelo `guestfwd`;
+- `tests/rede_syscalls.rs`: cada erro das sete syscalls na ordem do contrato
+  (ELFs montados à mão), `accept` bloqueando e acordando, o tempo limite exato, o
+  programa bloqueado que não atrasa o que computa, os limites de 4 sockets e de 8
+  conexões, o término por `exit` e por falha, e o envio com o buffer cheio;
+- `tests/rede_programas.rs`: `servidor` e `cliente` ponta a ponta (33 bytes
+  enviados, 88 recebidos), a recusa, o endereço inválido, 50 execuções sem vazar
+  nada, a versão 0.12.0, o contrato versão 8, o guia (código literal), o README
+  e os argumentos do QEMU no `Cargo.toml`;
+- `tests/rede_espera.rs`: o `servidor` sozinho desiste depois de 30 s.
+
+### O que os testes do Marco 11 cobrem
+
+Para conferir à mão, siga a demonstração do `caderno` e o passo a passo de
+[Preservando o disco entre boots](#preservando-o-disco-entre-boots). A suíte
+automatizada (`cargo test`, com `snapshot=on`) cobre, além dos testes
+anteriores:
+
+- `src/ata.rs`: o limite próprio da descarga (`FLUSH_MAX_POLLS`, 10 vezes o
+  limite comum) e a espera do fim da escrita;
+- `src/fat.rs` (sobre volumes fabricados em memória): `mkdir` (os bytes exatos
+  de `.` e `..`, `..` apontando para `0` na raiz e para o pai fora dela, a
+  entrada no pai, as duas cópias da FAT iguais, nome repetido, pai inexistente,
+  pai ou volume cheio sem escrever nada, 14 arquivos e o 15º recusado); `rmdir`
+  (entrada `0xE5`, cluster livre nas duas cópias, diretório com entrada, só com
+  entrada apagada, com nome longo ou rótulo, com cadeia adulterada) e a
+  **interrupção simulada** de `mkdir`, de `rmdir` e de uma criação com
+  acréscimo, em todos os pontos de falha;
+- `tests/disco_ata.rs` (QEMU): gravar um padrão e ler de volta, o último setor,
+  gravar além do fim (`OutOfRange`), vizinhos intactos;
+- `tests/escrita_no_disco.rs` (QEMU): sem cache no kernel (detectar o disco de
+  novo e montar um `Fat` do zero), `grava`, `anexa`, `apaga`, `mkdir` e
+  `rmdir` nos dois volumes com cada mensagem, `help`, cada erro de `SYS_MKDIR`
+  e `SYS_RMDIR` na ordem do contrato (ELFs montados à mão), `ERR_BUSY` por
+  diretório aberto e a liberação depois de `close`, de `exit` e de falha,
+  `mkdir` com 4 arquivos abertos, o número 17, `caderno` ponta a ponta, o volume
+  de 2 setores por cluster que continua somente leitura, disco ausente, 50
+  ciclos sem vazar clusters, frames nem descritores, a versão 0.12.0, o
+  contrato versão 8, o guia (código literal do `caderno`), o README (os
+  comandos de preservar o disco e do pen drive) e `snapshot=on` no
+  `Cargo.toml`.
 
 ### O que os testes do Marco 9 cobrem
 
@@ -861,8 +1169,8 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   tempo) e a entrada e saída de ring 3 (`enter_user`, `resume_task`,
   `leave_user`).
 - `src/task.rs`: o que o kernel guarda de cada programa carregado: o estado
-  dele em ring 3 (`TaskContext`), em que ponto da vida está e o pedido de
-  teclado em andamento.
+  dele em ring 3 (`TaskContext`), em que ponto da vida está, o pedido de
+  teclado ou de rede em andamento e os sockets abertos.
 - `src/scheduler.rs`: o escalonador em rodízio: escolhe a próxima tarefa, troca
   de contexto (por `SYS_YIELD`, pelo timer ou por espera de teclado), entrega a
   linha digitada a quem pediu primeiro, dorme com `hlt` quando todos esperam, e
@@ -872,12 +1180,13 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
 - `src/blockdev.rs`: o dispositivo de blocos (ler um setor de 512 bytes por
   endereço de bloco, e, opcionalmente, gravar um), implementado pelo ramdisk
   embutido (`RamDisk`, somente leitura), pelo ramdisk gravável (`WritableRam`) e
-  pelo disco ATA (somente leitura).
-- `src/fat.rs`: o FAT16 (leitura e escrita simples: criar, acrescentar, apagar),
+  pelo disco ATA (que grava um setor por vez, descarregando o cache a cada setor).
+- `src/fat.rs`: o FAT16 (leitura e escrita simples: criar, acrescentar, apagar, `mkdir`, `rmdir`),
   que trata o volume como dado não confiável (cadeias com limite de passos,
   números de cluster validados).
-- `src/ata.rs`: o driver de disco ATA por PIO e polling, com limite de espera e
-  detecção de ausência, atômico em relação ao escalonador.
+- `src/ata.rs`: o driver de disco ATA por PIO e polling (lê e grava um setor por
+  vez, com `FLUSH CACHE` a cada setor), com limite de espera e detecção de
+  ausência, atômico em relação ao escalonador.
 - `src/rtc.rs`: o driver do relógio de tempo real (portas `0x70`/`0x71`, BCD e
   binário, 12 e 24 horas, janela de atualização, século), por polling.
 - `src/fs.rs`: os volumes `/ram` e `/disco`, os caminhos e a tabela de arquivos
@@ -885,22 +1194,29 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
 - `src/syscall.rs`: o mecanismo `syscall` (entrada pela instrução, retorno por
   `iretq`), o despachante e as syscalls `write`, `exit`, `read_line`, `alloc`,
   `yield`, `open`, `read`, `close`, `read_dir`, `time`, `create`, `open_append`,
-  `write_file` e `remove`.
+  `write_file`, `remove`, `mkdir`, `rmdir`, `tcp_listen`, `tcp_accept`, `tcp_connect`, `tcp_send`, `tcp_recv`, `tcp_close` e `tcp_timeout`.
+- `src/pci.rs`: a varredura do barramento PCI (portas `0xCF8`/`0xCFC`) que acha a
+  placa de rede.
+- `src/rtl8139.rs`: o driver da placa Realtek RTL8139, por polling: anel de
+  recepção e quatro buffers de transmissão em memória de DMA.
+- `src/net.rs` e `src/net/`: a pilha de rede escrita no projeto: a soma de
+  verificação, Ethernet, ARP, IPv4, ICMP, TCP, o loopback e os sockets de cada
+  programa.
 - `src/programs.rs`: a tabela dos programas embutidos, gerada pelo
   `build.rs`.
 - `src/allocator.rs`: a faixa fixa de endereços virtuais do heap, o
   alocador global (`Box`, `Vec`, `String`, ...) e o tratamento de heap
   esgotado.
 - `src/shell.rs`: o buffer de linha e o prompt de comandos (`help`,
-  `clear`, `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `ls`, `cat`, `grava`, `anexa`, `apaga`, `data`, `run <alvo>`).
+  `clear`, `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `ls`, `cat`, `grava`, `anexa`, `apaga`, `mkdir`, `rmdir`, `data`, `rede`, `ping`, `run <alvo>`).
 - `abi/`: as constantes do contrato de syscalls (números, erros, limites),
   compartilhadas pelo kernel e pela biblioteca de runtime.
 - `runtime/`: a biblioteca de runtime dos programas de usuário (`entry!`,
-  `print!`/`println!`, `read_line`, `yield_now`, `File`/`Dir` para ler arquivos, `FileWriter`/`remove` para escrevê-los, `time::now()`,
+  `print!`/`println!`, `read_line`, `yield_now`, `File`/`Dir` para ler arquivos, `FileWriter`/`remove`/`mkdir`/`rmdir` para escrevê-los, `time::now()`,
   alocador global, tratador de `panic`).
 - `programs/`: a crate dos programas de usuário (`hello`, `crash`, `eco`,
   `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`,
-  `listador`, `hora`, `gravador`, `apagador`, um arquivo por programa em `src/bin/`, mais `visita` e `labirint` em
+  `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, um arquivo por programa em `src/bin/`, mais `visita` e `labirint` em
   `src/disco/`, que só vão para o disco), com o linker
   script (`link.ld`); compilada para o target de usuário pelo `build.rs` da
   raiz, nunca diretamente.
@@ -911,9 +1227,9 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
 - `discos/`: o conteúdo dos volumes (`discos/ram/` e `discos/disco/`).
 - `build.rs`: compila `programs/` (com um `cargo` aninhado), embute os ELFs no
   kernel, gera as imagens do ramdisk (embutida no kernel) e do disco
-  (`target/imagens/`, anexada ao QEMU) e a lista de arquivos entregues que
+  (`target/imagens/`, anexada ao QEMU com `snapshot=on`; regerada sempre que roda) e a lista de arquivos entregues que
   `tests/artefatos.rs` confere.
-- `SYSCALLS.md`: o contrato de syscalls (versão 6).
+- `SYSCALLS.md`: o contrato de syscalls (versão 8).
 - `tests/`: os testes de integração, cada um iniciando o kernel do zero
   em seu próprio binário — um teste de boot (que também confere a versão
   na mensagem de boas-vindas), um teste cujo resultado esperado é um
@@ -925,7 +1241,8 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   `multitarefa.rs` (vários programas ao mesmo tempo: troca de contexto,
   preempção, isolamento e teclado), `disco_ata.rs` (o driver ATA),
   `escrita_no_ramdisk.rs` (escrita no `/ram`: comandos, syscalls, `gravador` e
-  `apagador`), `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
+  `apagador`), `escrita_no_disco.rs` (escrita no `/disco`, `mkdir`, `rmdir`,
+  `caderno`, o contrato versão 8 e o README), `rede.rs`, `rede_pilha.rs`, `rede_syscalls.rs`, `rede_programas.rs` e `rede_espera.rs` (a rede do Marco 12), `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
   e volumes inválidos) e `artefatos.rs` (higiene dos arquivos entregues).
 - `x86_64-os_rust.json`: a especificação do target bare-metal customizado
   (sem sistema operacional por baixo).

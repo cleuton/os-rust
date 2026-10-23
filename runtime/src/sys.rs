@@ -8,8 +8,10 @@
 use core::arch::asm;
 
 use abi::{
-    DateTime, SYS_ALLOC, SYS_CLOSE, SYS_CREATE, SYS_EXIT, SYS_OPEN, SYS_OPEN_APPEND, SYS_READ,
-    SYS_READ_DIR, SYS_READ_LINE, SYS_REMOVE, SYS_TIME, SYS_WRITE, SYS_WRITE_FILE, SYS_YIELD,
+    DateTime, SYS_ALLOC, SYS_CLOSE, SYS_CREATE, SYS_EXIT, SYS_MKDIR, SYS_OPEN, SYS_OPEN_APPEND,
+    SYS_READ, SYS_READ_DIR, SYS_READ_LINE, SYS_REMOVE, SYS_RMDIR, SYS_TIME, SYS_WRITE,
+    SYS_TCP_ACCEPT, SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_LISTEN, SYS_TCP_RECV, SYS_TCP_SEND,
+    SYS_TCP_TIMEOUT, SYS_WRITE_FILE, SYS_YIELD,
     TIME_SIZE,
 };
 
@@ -216,4 +218,74 @@ pub fn write_file(fd: i64, buf: &[u8]) -> i64 {
 pub fn remove(path: &[u8]) -> i64 {
     // SAFETY: como em `create`: fatia viva do programa.
     unsafe { syscall2(SYS_REMOVE, path.as_ptr() as u64, path.len() as u64) }
+}
+
+/// Cria o diretório `path` (vazio). Não abre nada: não usa descritor. Devolve
+/// `0` ou um código de erro (`abi::ERR_EXIST`, `abi::ERR_NOSPC`, ...).
+pub fn mkdir(path: &[u8]) -> i64 {
+    // SAFETY: como em `create`: fatia viva do programa.
+    unsafe { syscall2(SYS_MKDIR, path.as_ptr() as u64, path.len() as u64) }
+}
+
+/// Remove o diretório vazio `path`. Devolve `0` ou um código de erro
+/// (`abi::ERR_NOTEMPTY` se tem entradas, `abi::ERR_BUSY` se está aberto).
+pub fn rmdir(path: &[u8]) -> i64 {
+    // SAFETY: como em `create`: fatia viva do programa.
+    unsafe { syscall2(SYS_RMDIR, path.as_ptr() as u64, path.len() as u64) }
+}
+
+/// Abre um socket de escuta TCP na porta `port` (1 a 65535). Devolve o número
+/// do socket (`0..abi::MAX_SOCKETS`) ou um código de erro (`abi::ERR_ADDRINUSE`,
+/// `abi::ERR_NOBUFS`, `abi::ERR_MFILE`, ...).
+pub fn tcp_listen(port: u16) -> i64 {
+    // SAFETY: `SYS_TCP_LISTEN` não recebe ponteiros.
+    unsafe { syscall2(SYS_TCP_LISTEN, u64::from(port), 0) }
+}
+
+/// Espera uma conexão no socket de escuta `sock` e devolve o socket novo dela,
+/// ou um código de erro (`abi::ERR_TIMEDOUT` quando o tempo limite do socket
+/// acaba). O programa fica bloqueado sem gastar CPU.
+pub fn tcp_accept(sock: i64) -> i64 {
+    // SAFETY: `SYS_TCP_ACCEPT` não recebe ponteiros; qualquer `sock` é válido
+    // (o kernel devolve erro para um número que não existe).
+    unsafe { syscall2(SYS_TCP_ACCEPT, sock as u64, 0) }
+}
+
+/// Conecta em `ip:port` (`ip` como `a<<24 | b<<16 | c<<8 | d`) e espera o
+/// aperto de mão de até 3 s. Devolve o socket ou um código de erro
+/// (`abi::ERR_CONNREFUSED`, `abi::ERR_TIMEDOUT`, `abi::ERR_NODEV`, ...).
+pub fn tcp_connect(ip: u32, port: u16) -> i64 {
+    // SAFETY: `SYS_TCP_CONNECT` não recebe ponteiros.
+    unsafe { syscall2(SYS_TCP_CONNECT, u64::from(ip), u64::from(port)) }
+}
+
+/// Copia `data` para o buffer de envio do socket. Devolve quantos bytes
+/// entraram (`≥ 1`, pode ser menos que `data.len()`) ou um código de erro.
+/// `data.len()` deve ser no máximo `abi::IO_MAX_LEN`.
+pub fn tcp_send(sock: i64, data: &[u8]) -> i64 {
+    // SAFETY: o ponteiro e o tamanho vêm de uma fatia viva do programa (memória
+    // mapeada para ele), que é o que `SYS_TCP_SEND` exige do intervalo.
+    unsafe { syscall3(SYS_TCP_SEND, sock as u64, data.as_ptr() as u64, data.len() as u64) }
+}
+
+/// Lê bytes recebidos do socket para `buf`. Devolve quantos (`0` quando o par
+/// fechou a conexão) ou um código de erro. `buf.len()` deve ser no máximo
+/// `abi::IO_MAX_LEN`.
+pub fn tcp_recv(sock: i64, buf: &mut [u8]) -> i64 {
+    // SAFETY: o ponteiro e o tamanho vêm de uma fatia mutável viva do programa
+    // (memória mapeada e gravável), que é o que `SYS_TCP_RECV` exige.
+    unsafe { syscall3(SYS_TCP_RECV, sock as u64, buf.as_mut_ptr() as u64, buf.len() as u64) }
+}
+
+/// Fecha o socket, sem esperar. Devolve `0` ou um código de erro.
+pub fn tcp_close(sock: i64) -> i64 {
+    // SAFETY: `SYS_TCP_CLOSE` não recebe ponteiros.
+    unsafe { syscall2(SYS_TCP_CLOSE, sock as u64, 0) }
+}
+
+/// Define o tempo limite, em milissegundos (0 a 60 000), das esperas do socket.
+/// Devolve `0` ou um código de erro.
+pub fn tcp_timeout(sock: i64, ms: u32) -> i64 {
+    // SAFETY: `SYS_TCP_TIMEOUT` não recebe ponteiros.
+    unsafe { syscall2(SYS_TCP_TIMEOUT, sock as u64, u64::from(ms)) }
 }

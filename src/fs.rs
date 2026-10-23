@@ -5,11 +5,16 @@
 //! | Prefixo  | O que é                                   | Acesso              |
 //! |----------|-------------------------------------------|---------------------|
 //! | `/ram`   | o ramdisk: cópia, em memória gravável, da imagem embutida na imagem de boot | leitura e escrita |
-//! | `/disco` | o disco ATA (canal primário, escravo)     | somente leitura     |
+//! | `/disco` | o disco ATA (canal primário, escravo)     | leitura e escrita   |
 //!
-//! A escrita é simples: criar um arquivo vazio, acrescentar bytes ao fim e
-//! apagar. Reiniciar restaura o `/ram`: a imagem embutida nunca é escrita.
-//! Um arquivo aberto por algum programa não pode ser apagado (`Busy`).
+//! A escrita é simples: criar um arquivo vazio, acrescentar bytes ao fim,
+//! apagar, e criar e remover diretórios (que ocupam um cluster e não crescem).
+//! Reiniciar restaura o `/ram`: a imagem embutida nunca é escrita. O `/disco`
+//! guarda o que foi gravado **na imagem em que o QEMU está rodando**: com
+//! `snapshot=on` (`cargo run` e `cargo test`) isso é descartado ao fechar o
+//! QEMU; rodando à mão sobre uma cópia da imagem, persiste entre boots.
+//! Um arquivo ou diretório aberto por algum programa não pode ser apagado
+//! (`Busy`).
 //!
 //! Um caminho é `/<volume>/<componente>/...`, sem diferenciar maiúsculas de
 //! minúsculas, com componentes no formato 8.3. `.` e `..` são **inválidos**:
@@ -140,8 +145,11 @@ pub enum FsError {
     NoSpace,
     /// O volume está montado mas não aceita escrita.
     ReadOnly,
-    /// Apagar um arquivo que algum programa tem aberto.
+    /// Apagar um arquivo ou diretório que algum programa tem aberto (ou a
+    /// raiz de um volume).
     Busy,
+    /// Remover um diretório que tem alguma entrada.
+    NotEmpty,
 }
 
 impl From<FatError> for FsError {
@@ -156,6 +164,7 @@ impl From<FatError> for FsError {
             FatError::Exists => FsError::AlreadyExists,
             FatError::NoSpace => FsError::NoSpace,
             FatError::ReadOnly => FsError::ReadOnly,
+            FatError::NotEmpty => FsError::NotEmpty,
         }
     }
 }
@@ -324,7 +333,8 @@ fn with_fat<R>(id: VolumeId, f: impl FnOnce(&Fat<'_>) -> Result<R, FatError>) ->
 }
 
 /// Como `with_fat`, para operações que escrevem: um volume que não aceita
-/// escrita (`/disco`, ou mais de 1 setor por cluster) é recusado com `ReadOnly`
+/// escrita (dispositivo que não sabe gravar, ou mais de 1 setor por cluster)
+/// é recusado com `ReadOnly`
 /// **antes** de qualquer consulta ao caminho. Um volume indisponível continua
 /// sendo reportado primeiro.
 fn with_fat_write<R>(id: VolumeId, f: impl FnOnce(&Fat<'_>) -> Result<R, FatError>) -> Result<R, FsError> {
@@ -388,7 +398,8 @@ pub struct OpenFile {
     cursor: Option<Cursor>,
     /// Quantas entradas de diretório já foram entregues (só diretórios).
     entries_read: u32,
-    /// A entrada de diretório do arquivo (só arquivos): a identidade dele.
+    /// A entrada de diretório do arquivo ou do diretório (menos a raiz do
+    /// volume, que não tem): a identidade dele.
     loc: Option<EntryLoc>,
 }
 
@@ -434,8 +445,38 @@ pub fn remove(path: &[u8]) -> Result<(), FsError> {
     with_fat_write(parsed.volume, |fat| fat.remove(loc))
 }
 
+/// Cria o diretório `path` (vazio, com um cluster). Não é recursivo: o pai
+/// precisa existir. Ordem de verificação (`SYSCALLS.md`): volume desconhecido
+/// ou indisponível, volume que não aceita escrita, pai, nome já existente
+/// (inclusive a raiz) e falta de espaço (entrada no pai ou cluster), tudo
+/// **antes** de escrever.
+pub fn mkdir(path: &[u8]) -> Result<(), FsError> {
+    let parsed = parse(path)?;
+    with_fat_write(parsed.volume, |fat| fat.mkdir(parsed.components()))
+}
+
+/// Remove o diretório `path`. Ordem de verificação: volume (como `mkdir`),
+/// pai, inexistente, arquivo, a raiz do volume e diretório aberto por algum
+/// programa (`Busy`: um leitor poderia passar a ler um cluster reaproveitado),
+/// e por fim diretório não vazio ou cadeia inconsistente.
+pub fn rmdir(path: &[u8]) -> Result<(), FsError> {
+    let parsed = parse(path)?;
+    // Volume indisponível e volume somente leitura vêm antes de tudo.
+    with_fat_write(parsed.volume, |_| Ok(()))?;
+    if parsed.components().is_empty() {
+        return Err(FsError::Busy);
+    }
+    let (loc, _) = with_fat_write(parsed.volume, |fat| fat.locate_dir(parsed.components()))?;
+    if is_open(parsed.volume, loc) {
+        return Err(FsError::Busy);
+    }
+    with_fat_write(parsed.volume, |fat| fat.rmdir(loc))
+}
+
 impl OpenFile {
-    /// Abre o arquivo ou diretório `path`.
+    /// Abre o arquivo ou diretório `path`. A entrada de diretório, com a
+    /// posição dela, vale também para um diretório que não é a raiz: é isso que
+    /// deixa `rmdir` recusar um diretório aberto.
     pub fn open(path: &[u8]) -> Result<OpenFile, FsError> {
         let parsed = parse(path)?;
         let volume = parsed.volume;
@@ -443,7 +484,9 @@ impl OpenFile {
             let node = fat.lookup(parsed.components())?;
             let loc = match node.kind {
                 Kind::File => Some(fat.locate(parsed.components())?.0),
-                Kind::Dir => None,
+                // A raiz não tem entrada de diretório (`rmdir` a trata antes).
+                Kind::Dir if parsed.components().is_empty() => None,
+                Kind::Dir => Some(fat.locate_dir(parsed.components())?.0),
             };
             Ok((node, loc))
         })?;
@@ -526,10 +569,10 @@ pub fn open_files_in_use() -> usize {
     OPEN_FILES.load(Ordering::Relaxed)
 }
 
-/// Os arquivos abertos neste instante, por qualquer tarefa: o volume e a
-/// entrada de diretório de cada abertura (um item por abertura, então o mesmo
-/// arquivo aberto duas vezes aparece duas vezes). É o que deixa `remove`
-/// recusar um arquivo em uso. Só descritores de `FileTable` entram aqui: o
+/// Os arquivos e diretórios abertos neste instante, por qualquer tarefa: o
+/// volume e a entrada de diretório de cada abertura (um item por abertura, então
+/// o mesmo arquivo aberto duas vezes aparece duas vezes). É o que deixa
+/// `remove` e `rmdir` recusarem um item em uso. Só descritores de `FileTable` entram aqui: o
 /// shell lê e escreve de forma síncrona, sem troca de tarefa no meio.
 static OPEN_REGISTRY: Mutex<Vec<(VolumeId, EntryLoc)>> = Mutex::new(Vec::new());
 
@@ -951,17 +994,25 @@ mod tests {
     }
 
     #[test_case]
-    fn disco_recusa_escrita_antes_de_olhar_o_caminho() {
-        // Existindo ou não, o `/disco` é somente leitura. (Sem disco no QEMU
-        // dos testes, o volume está indisponível, e isso vem antes.)
-        let esperado = match volume_status(VolumeId::Disco) {
-            Ok(()) => FsError::ReadOnly,
-            Err(reason) => FsError::Unavailable(reason),
-        };
-        for path in [&b"/disco/x.txt"[..], b"/disco/leiame.txt", b"/disco/nada/x.txt"] {
-            assert_eq!(OpenFile::create(path).err(), Some(esperado));
-            assert_eq!(OpenFile::open_append(path).err(), Some(esperado));
-            assert_eq!(remove(path).err(), Some(esperado));
+    fn disco_aceita_escrita_e_so_olha_o_caminho_depois() {
+        // O `/disco` grava como o `/ram`: o que resta a conferir é o caminho.
+        // Indisponível (sem disco), o volume vem antes de qualquer outro erro.
+        match volume_status(VolumeId::Disco) {
+            Ok(()) => {
+                assert_eq!(OpenFile::create(b"/disco/nada/x.txt").err(), Some(FsError::NotFound));
+                assert_eq!(OpenFile::open_append(b"/disco/nada/x.txt").err(), Some(FsError::NotFound));
+                assert_eq!(remove(b"/disco/nada/x.txt").err(), Some(FsError::NotFound));
+                assert_eq!(OpenFile::create(b"/disco").err(), Some(FsError::AlreadyExists));
+                assert_eq!(OpenFile::create(b"/disco/leiame.txt").err(), Some(FsError::AlreadyExists));
+            }
+            Err(reason) => {
+                let esperado = FsError::Unavailable(reason);
+                for path in [&b"/disco/x.txt"[..], b"/disco/leiame.txt", b"/disco/nada/x.txt"] {
+                    assert_eq!(OpenFile::create(path).err(), Some(esperado));
+                    assert_eq!(OpenFile::open_append(path).err(), Some(esperado));
+                    assert_eq!(remove(path).err(), Some(esperado));
+                }
+            }
         }
         assert_eq!(OpenFile::create(b"/xyz/a").err(), Some(FsError::UnknownVolume));
     }

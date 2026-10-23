@@ -7,9 +7,9 @@
 //! tenta criar primeiro; se o nome já existe (`Exists`), abre o arquivo para
 //! acrescentar em vez de sobrescrevê-lo.
 //!
-//! Só o `/ram` aceita escrita (o `/disco` é somente leitura), e reiniciar o
-//! sistema devolve o `/ram` ao conteúdo original. O caminho é fixo porque
-//! programas não recebem argumentos de linha de comando.
+//! O `/ram` volta ao conteúdo original a cada boot (o `/disco` também aceita
+//! escrita, mas só persiste se o QEMU roda sem `snapshot=on`). O caminho é fixo
+//! porque programas não recebem argumentos de linha de comando.
 //!
 //! Rode com `run gravador` (cria), de novo (amplia) e `run apagador` (remove).
 

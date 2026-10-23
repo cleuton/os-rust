@@ -1,4 +1,4 @@
-//! Buffer de linha e prompt de comandos mínimo (`help`, `clear`, `echo`, `sobre`, `panic`, `mem`, `falha`, `ls`, `cat`, `grava`, `anexa`, `apaga`, `run`, `data`).
+//! Buffer de linha e prompt de comandos mínimo (`help`, `clear`, `echo`, `sobre`, `panic`, `mem`, `falha`, `ls`, `cat`, `grava`, `anexa`, `apaga`, `mkdir`, `rmdir`, `run`, `data`, `rede`, `ping`).
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -10,6 +10,7 @@ use abi::{DateTime, MAX_TASKS};
 use crate::fat::Kind;
 use crate::fs::{self, FsError, OpenFile, VolumeId};
 use crate::keyboard::LINE_CAPACITY;
+use crate::net::{self, CardStatus};
 use crate::rtc::{self, RtcError};
 use crate::user::{self, Finished, RunError, Termination};
 use crate::{
@@ -42,10 +43,20 @@ const COMMANDS: &[(&str, &str)] = &[
     ),
     ("ls", "lista um diretorio (ex.: ls /ram, ls /disco)"),
     ("cat", "mostra o conteudo de um arquivo (ex.: cat /ram/ola.txt)"),
-    ("grava", "cria um arquivo no /ram (ex.: grava /ram/nota.txt ola)"),
-    ("anexa", "acrescenta texto ao fim de um arquivo do /ram (ex.: anexa /ram/nota.txt mais)"),
-    ("apaga", "apaga um arquivo do /ram (ex.: apaga /ram/nota.txt)"),
+    ("grava", "cria um arquivo no /ram ou /disco (ex.: grava /ram/nota.txt ola)"),
+    ("anexa", "acrescenta texto ao fim de um arquivo do /ram ou /disco (ex.: anexa /ram/nota.txt mais)"),
+    ("apaga", "apaga um arquivo do /ram ou /disco (ex.: apaga /ram/nota.txt)"),
+    ("mkdir", "cria um diretorio no /ram ou /disco (ex.: mkdir /ram/docs/novo)"),
+    ("rmdir", "remove um diretorio vazio (ex.: rmdir /ram/docs/novo)"),
     ("data", "mostra a data e a hora (UTC) do relogio"),
+    (
+        "rede",
+        "mostra a placa e o endereco, ou configura (ex.: rede, rede 10.0.2.15 255.255.255.0 10.0.2.2)",
+    ),
+    (
+        "ping",
+        "envia 4 pedidos de eco a um IP (ex.: ping 10.0.2.2); nao e o programa ping de run",
+    ),
     (
         "run",
         "executa programas embutidos ou arquivos, juntos (ex.: run hello, run ping pong, run /disco/bin/visita)",
@@ -182,9 +193,13 @@ fn execute(line: &str) {
         "grava" => cmd_grava(rest),
         "anexa" => cmd_anexa(rest),
         "apaga" => cmd_apaga(rest),
+        "mkdir" => cmd_mkdir(rest),
+        "rmdir" => cmd_rmdir(rest),
         "run" => cmd_run(rest),
         // Argumentos extras em `rest` são ignorados, como em `sobre`.
         "data" => cmd_data(),
+        "rede" => cmd_rede(rest),
+        "ping" => cmd_ping(rest),
         _ => println!("comando desconhecido: {} (digite help)", name),
     }
 }
@@ -218,6 +233,132 @@ fn format_clock(result: Result<DateTime, RtcError>) -> String {
         Ok(time) => alloc::format!("{} UTC", time),
         Err(error) => alloc::format!("data: {}", error),
     }
+}
+
+/// O texto `a.b.c.d` de um endereço.
+fn ip_text(ip: [u8; 4]) -> String {
+    alloc::format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
+}
+
+/// `rede`: sem argumentos mostra a placa, o endereço, os contadores e as
+/// conexões TCP; com três (`ip mascara gateway`) troca a configuração, só em
+/// memória. Argumentos inválidos não mudam nada.
+fn cmd_rede(rest: &str) {
+    let args: Vec<&str> = rest.split_whitespace().collect();
+    match args.len() {
+        0 => {
+            net::poll();
+            match net::card_status() {
+                CardStatus::Ready(m) => println!(
+                    "placa: RTL8139 mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    m[0], m[1], m[2], m[3], m[4], m[5]
+                ),
+                CardStatus::Absent => println!("placa: nenhuma (RTL8139 nao encontrada)"),
+                CardStatus::Unavailable(reason) => println!("placa: indisponivel ({})", reason),
+            }
+            let config = net::config();
+            println!(
+                "ip: {} mascara: {} gateway: {}",
+                ip_text(config.ip),
+                ip_text(config.mask),
+                ip_text(config.gateway)
+            );
+            let stats = net::stats();
+            println!(
+                "quadros: recebidos={} enviados={} descartados={}",
+                stats.rx, stats.tx, stats.dropped
+            );
+            println!("tcp: {} de {} conexoes em uso", net::tcp_in_use(), abi::MAX_TCP_CONNECTIONS);
+        }
+        3 => {
+            let mut parsed = [[0u8; 4]; 3];
+            for (i, text) in args.iter().enumerate() {
+                match net::parse_ipv4(text) {
+                    Some(ip) => parsed[i] = ip,
+                    None => return println!("rede: endereco invalido: {}", text),
+                }
+            }
+            match net::configure(parsed[0], parsed[1], parsed[2]) {
+                Ok(()) => println!(
+                    "rede: configurado ip {} mascara {} gateway {}",
+                    args[0], args[1], args[2]
+                ),
+                Err(which) => println!("rede: endereco invalido: {}", args[which]),
+            }
+        }
+        _ => println!("uso: rede [<ip> <mascara> <gateway>]"),
+    }
+}
+
+/// Quantos ticks o `ping` espera cada resposta (1 s).
+const PING_WAIT_TICKS: u64 = 100;
+
+/// Espera até `until` ticks, andando a pilha, e devolve cedo se `done` disser
+/// que já chegou o que se esperava. Gira alguns instantes antes de dormir (a
+/// resposta do QEMU costuma chegar logo) e depois dorme até a próxima
+/// interrupção. Roda com as interrupções desligadas, menos durante o `hlt`.
+fn wait_net(until: u64, mut done: impl FnMut() -> bool) -> bool {
+    for _ in 0..2000 {
+        net::poll();
+        if done() {
+            return true;
+        }
+    }
+    while crate::timer::ticks() < until {
+        x86_64::instructions::interrupts::disable();
+        net::poll();
+        if done() {
+            return true;
+        }
+        x86_64::instructions::interrupts::enable_and_hlt();
+    }
+    x86_64::instructions::interrupts::disable();
+    net::poll();
+    done()
+}
+
+/// `ping <ip>`: quatro pedidos de eco, um por segundo. Não é o programa `ping`
+/// de `run ping pong`. Durante o comando o prompt não aceita outra coisa; as
+/// teclas ficam na fila do teclado.
+fn cmd_ping(rest: &str) {
+    let mut args = rest.split_whitespace();
+    let Some(text) = args.next() else {
+        return println!("uso: ping <ip>");
+    };
+    if args.next().is_some() {
+        return println!("uso: ping <ip>");
+    }
+    let Some(ip) = net::parse_ipv4(text) else {
+        return println!("ping: endereco invalido: {}", text);
+    };
+    if !net::can_reach(ip) {
+        return println!("ping: sem placa de rede");
+    }
+    println!("ping {}: 4 pedidos", text);
+    let mut received = 0;
+    for seq in 1..=4u16 {
+        let sent = crate::timer::ticks();
+        if net::ping_send(ip, seq).is_err() {
+            return println!("ping: sem placa de rede");
+        }
+        let until = sent + PING_WAIT_TICKS;
+        if wait_net(until, || net::ping_reply(seq).is_some()) {
+            let elapsed = net::ping_reply(seq).unwrap_or(sent).saturating_sub(sent);
+            if elapsed == 0 {
+                println!("resposta de {}: seq={} tempo<10 ms", text, seq);
+            } else {
+                println!("resposta de {}: seq={} tempo={} ms", text, seq, elapsed * 10);
+            }
+            received += 1;
+            // Um pedido por segundo: espera o resto do intervalo.
+            if seq < 4 {
+                wait_net(until, || false);
+            }
+        } else {
+            println!("sem resposta de {}: seq={}", text, seq);
+        }
+    }
+    println!("ping: 4 enviados, {} recebidos", received);
 }
 
 fn cmd_panic() {
@@ -422,7 +563,10 @@ fn report_fs_error(command: &str, path: &str, error: FsError) {
             let volume = fs::parse(path.as_bytes()).map(|p| p.volume.name()).unwrap_or("?");
             say(format_args!("{}: volume somente leitura: /{}", command, volume));
         }
+        // O mesmo erro serve a arquivo e a diretório; a mensagem diz qual.
+        FsError::Busy if command == "rmdir" => say(format_args!("{}: diretorio em uso: {}", command, path)),
         FsError::Busy => say(format_args!("{}: arquivo em uso: {}", command, path)),
+        FsError::NotEmpty => say(format_args!("{}: diretorio nao vazio: {}", command, path)),
         FsError::BadDescriptor | FsError::TooManyOpen => {
             say(format_args!("{}: erro interno de arquivo: {}", command, path))
         }
@@ -529,9 +673,9 @@ fn write_line(file: &mut OpenFile, text: &str) -> Result<usize, FsError> {
     Ok(total)
 }
 
-/// `grava <caminho> [<texto>]`: cria um arquivo no volume gravável (`/ram`) e,
-/// se houver texto, grava o texto mais uma quebra de linha. Nunca sobrescreve:
-/// um nome que já existe é erro.
+/// `grava <caminho> [<texto>]`: cria um arquivo num volume gravável (`/ram` ou
+/// `/disco`) e, se houver texto, grava o texto mais uma quebra de linha. Nunca
+/// sobrescreve: um nome que já existe é erro.
 fn cmd_grava(rest: &str) {
     let (path, text) = split_path_and_text(rest);
     if path.is_empty() {
@@ -584,6 +728,26 @@ fn cmd_apaga(rest: &str) {
     match fs::remove(path.as_bytes()) {
         Ok(()) => say(format_args!("apaga: removido {}", path)),
         Err(error) => report_fs_error("apaga", path, error),
+    }
+}
+
+/// `mkdir <caminho>`: cria um diretório vazio. Não é recursivo: o pai precisa
+/// existir. O diretório ocupa um cluster e não cresce (14 entradas).
+fn cmd_mkdir(rest: &str) {
+    let Some(path) = single_path("mkdir", rest) else { return };
+    match fs::mkdir(path.as_bytes()) {
+        Ok(()) => say(format_args!("mkdir: criado {}", path)),
+        Err(error) => report_fs_error("mkdir", path, error),
+    }
+}
+
+/// `rmdir <caminho>`: remove um diretório vazio e devolve o cluster dele ao
+/// volume.
+fn cmd_rmdir(rest: &str) {
+    let Some(path) = single_path("rmdir", rest) else { return };
+    match fs::rmdir(path.as_bytes()) {
+        Ok(()) => say(format_args!("rmdir: removido {}", path)),
+        Err(error) => report_fs_error("rmdir", path, error),
     }
 }
 
@@ -1210,13 +1374,21 @@ mod tests {
     }
 
     #[test_case]
-    fn escrita_no_disco_e_recusada_e_volume_desconhecido_e_reportado() {
-        let disco_ok = fs::volume_status(VolumeId::Disco).is_ok();
-        for comando in ["grava /disco/x.txt a", "anexa /disco/leiame.txt a", "apaga /disco/leiame.txt"] {
-            tela(comando);
-            if disco_ok {
-                assert!(vga_buffer::screen_contains("volume somente leitura: /disco"));
-            } else {
+    fn escrita_no_disco_funciona_e_volume_desconhecido_e_reportado() {
+        if fs::volume_status(VolumeId::Disco).is_ok() {
+            // O `/disco` agora grava (o QEMU dos testes usa `snapshot=on`);
+            // o teste apaga o que criou e confere os clusters livres.
+            let livres = fs::free_clusters(VolumeId::Disco).unwrap();
+            tela("grava /disco/x.txt a");
+            assert!(vga_buffer::screen_contains("grava: criado /disco/x.txt (2 bytes)"));
+            tela("anexa /disco/x.txt b");
+            assert!(vga_buffer::screen_contains("anexa: /disco/x.txt agora tem 4 bytes"));
+            tela("apaga /disco/x.txt");
+            assert!(vga_buffer::screen_contains("apaga: removido /disco/x.txt"));
+            assert_eq!(fs::free_clusters(VolumeId::Disco).unwrap(), livres);
+        } else {
+            for comando in ["grava /disco/x.txt a", "anexa /disco/leiame.txt a", "apaga /disco/leiame.txt"] {
+                tela(comando);
                 assert!(vga_buffer::screen_contains("volume indisponivel: /disco"));
             }
         }

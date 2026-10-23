@@ -7,6 +7,116 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.12.0] - 2026-10-23
+
+Marco 12: rede básica com TCP/IP. O kernel acha a placa Realtek RTL8139 pelo PCI e
+fala Ethernet, ARP, IPv4, ICMP (eco) e TCP, tudo escrito no projeto, sem crate de
+rede; programas de usuário falam com ela por sockets TCP. Contrato de syscalls:
+versão 8.
+
+### Adicionado
+
+- Varredura do barramento PCI (`src/pci.rs`) e driver da RTL8139 por polling
+  (`src/rtl8139.rs`), com anel de recepção e quatro buffers de transmissão em
+  memória de DMA contígua abaixo de 4 GiB, sem interrupção da placa.
+- A pilha de rede (`src/net.rs` e `src/net/`): soma de verificação da Internet,
+  Ethernet II, ARP (cache de 8 entradas), IPv4, ICMP (só o eco), TCP simplificado
+  (para-e-espera, 1024 bytes por segmento, buffers de 2048, só em ordem,
+  retransmissão a cada 1 s, `TIME_WAIT` de 1 s) e um loopback interno para
+  `127.0.0.0/8` que funciona sem placa.
+- Comandos `rede` (a placa, o endereço, os contadores e as conexões; com três
+  argumentos troca o endereço, só em memória) e `ping <ip>` no prompt.
+- Syscalls `SYS_TCP_LISTEN` (17), `SYS_TCP_ACCEPT` (18), `SYS_TCP_CONNECT` (19),
+  `SYS_TCP_SEND` (20), `SYS_TCP_RECV` (21), `SYS_TCP_CLOSE` (22) e
+  `SYS_TCP_TIMEOUT` (23), e os erros `ERR_TIMEDOUT` (`-17`), `ERR_CONNREFUSED`
+  (`-18`), `ERR_CONNRESET` (`-19`), `ERR_ADDRINUSE` (`-20`) e `ERR_NOBUFS` (`-21`).
+  Sockets por programa (até 4) e 8 conexões no kernel inteiro.
+- Esperas de rede que não gastam CPU: o programa fica bloqueado (estado novo do
+  escalonador) e o kernel dorme se todos esperam; toda espera tem tempo limite.
+  Os sockets são fechados quando o programa termina.
+- Na biblioteca de runtime: `TcpListener`, `TcpStream`, `Ipv4` e `NetError`.
+- Programas `servidor` e `cliente` (`run servidor cliente`).
+- README (português e inglês): seção **Rede no QEMU**, com o QEMU à mão e `hostfwd`
+  para o computador falar com o os-rust, e a nota sobre hardware real.
+- Capítulo sobre a rede no `WALKTHROUGH.md` e no `WALKTHROUGH.en.md`; seção "Rede
+  (TCP)" nos guias do programador.
+- Testes: `tests/rede_pilha.rs` (sem hardware, com placa falsa e relógio injetado),
+  `tests/rede.rs` (placa real do QEMU e eco de TCP pelo `guestfwd`),
+  `tests/rede_syscalls.rs`, `tests/rede_programas.rs` e `tests/rede_espera.rs`.
+
+### Alterado
+
+- Argumentos do QEMU em `Cargo.toml`: `-nic user,model=rtl8139` no `cargo run`, e
+  o mesmo com `guestfwd=tcp:10.0.2.100:7-cmd:cat` no `cargo test`. Nada de
+  `hostfwd` no `cargo run`. O `snapshot=on` dos discos não mudou.
+- Contrato de syscalls: versão 8 (`SYSCALLS.md` e `SYSCALLS.en.md`); o primeiro
+  número livre passou a ser o 24. `ERR_NODEV`, `ERR_MFILE`, `ERR_TYPE` e `ERR_BADF`
+  cobrem também as syscalls de rede.
+- Testes existentes que valem para a versão 0.11.0 ou para o contrato 7 passaram a
+  conferir a 0.12.0 e o contrato 8: `contrato_declara_a_versao_8`, os de versão e
+  de contrato de `tests/escrita_no_disco.rs` e `tests/escrita_no_ramdisk.rs`, e os
+  três do primeiro número livre (agora o 24).
+- Versão do projeto: 0.12.0.
+
+## [0.11.0] - 2026-10-23
+
+Marco 11: escrita no disco ATA. O `/disco` passa a **aceitar escrita** pela mesma
+camada de FAT do `/ram`, e o kernel ganha criar e remover diretórios. Contrato
+de syscalls: versão 7. Foi o último marco do lote anterior; a rede veio no
+Marco 12.
+
+### Adicionado
+
+- Escrita no driver ATA (`src/ata.rs`): `WRITE SECTORS` por PIO, um setor por
+  comando, com `FLUSH CACHE` depois de **cada** setor (limite próprio,
+  `FLUSH_MAX_POLLS`), o que faz a ordem das escritas do FAT valer na mídia.
+- Camada de FAT (`src/fat.rs`): `mkdir` (diretório de um cluster com `.` e `..`,
+  entrada no pai por último) e `rmdir` (valida a cadeia e a vacuidade antes de
+  escrever; entrada primeiro, cluster depois), e `FatError::NotEmpty`.
+- Comandos `mkdir` e `rmdir` no prompt, com as mensagens novas (`diretorio nao
+  vazio`, `diretorio em uso`).
+- Syscalls `SYS_MKDIR` (15) e `SYS_RMDIR` (16) e o erro `ERR_NOTEMPTY` (`-16`);
+  na biblioteca de runtime, `mkdir`, `rmdir` e `FsError::NotEmpty`.
+- O registro de itens abertos cobre também diretórios abertos (`rmdir` de um
+  diretório aberto dá `ERR_BUSY`).
+- Programa `caderno`, que acrescenta a hora a `/disco/caderno.txt` e mostra a
+  persistência.
+- README (português e inglês): seções **Preservando o disco entre boots** (copiar
+  `target/imagens/disco.img` e rodar o QEMU à mão, sem `snapshot=on`) e
+  **Criando um pen drive bootável** (`dd`, macOS, Windows e os limites).
+- Capítulo sobre a escrita no disco no `WALKTHROUGH.md` e no `WALKTHROUGH.en.md`.
+- Testes: unidade em `ata` e `fat` (inclusive a interrupção simulada de `mkdir`,
+  `rmdir` e de uma criação com acréscimo, em todos os pontos de falha);
+  `tests/disco_ata.rs` (gravar no disco de verdade); `tests/escrita_no_disco.rs`
+  (sem cache no kernel, prompt, syscalls, `caderno`, 50 ciclos sem vazamento,
+  contrato, guia, README e `snapshot=on` no `Cargo.toml`).
+
+### Alterado
+
+- O `/disco` é de leitura e escrita. Ele guarda o que foi gravado na imagem em
+  que o QEMU roda: com `snapshot=on` (`cargo run` e `cargo test`) isso é
+  descartado ao fechar o QEMU. O `build.rs` e os argumentos do QEMU não mudaram.
+- Contrato de syscalls na versão 7 (`SYSCALLS.md`): `ERR_BUSY` cobre também
+  diretório aberto e a raiz de um volume, `ERR_NOSPC` cobre `SYS_MKDIR`, e
+  `ERR_ROFS` só vale para o volume que não aceita escrita (a frase **somente
+  leitura** continua, para esse caso). Programas das versões 1 a 6 continuam
+  funcionando.
+- Testes existentes que valiam para o contrato versão 6, a versão 0.10.0 ou o
+  `/disco` somente leitura: `contrato_declara_a_versao_6` (agora
+  `contrato_declara_a_versao_7`), `primeiro_numero_fora_do_contrato_continua_encerrando_so_o_programa`
+  e `numero_15_continua_encerrando_so_o_programa` (agora `numero_17_...`, o
+  número `17`), `a_versao_0_10_0_aparece_no_sobre` (agora `..._0_11_0_...`),
+  `o_contrato_concorda_com_as_constantes`,
+  `o_disco_recusa_comandos_e_syscalls_de_escrita_e_nao_muda` (agora
+  `o_disco_aceita_...`), `create_open_append_e_remove_devolvem_cada_erro_do_contrato_na_ordem`,
+  `disco_recusa_escrita_antes_de_olhar_o_caminho` (agora
+  `disco_aceita_escrita_e_so_olha_o_caminho_depois`) e
+  `escrita_no_disco_e_recusada_e_volume_desconhecido_e_reportado` (agora
+  `escrita_no_disco_funciona_e_volume_desconhecido_e_reportado`).
+- Comentários que diziam que o `/disco` é somente leitura (`src/blockdev.rs`,
+  `gravador`, `apagador` e `Cargo.toml`); o guia do programador acompanha.
+- Versão do projeto: `0.10.0` → `0.11.0`.
+
 ## [0.10.0] - 2026-10-23
 
 Marco 10: escrita no ramdisk. O kernel passa a **criar, acrescentar e apagar

@@ -410,10 +410,11 @@ fn create_open_append_e_remove_devolvem_cada_erro_do_contrato_na_ordem() {
                 a.chamada(nr, [USER_REGION_START - 4, 8, 0], ERR_FAULT, codigo + 5);
                 a.chamada(nr, [p[6], tam[6], 0], ERR_INVAL, codigo + 6);
                 a.chamada(nr, [p[7], tam[7], 0], ERR_NAMETOOLONG, codigo + 7);
-                // Volume: desconhecido, e somente leitura antes de olhar o caminho.
+                // Volume desconhecido. O `/disco` grava desde o Marco 11, então
+                // só o caminho dele importa: pai inexistente é `ERR_NOENT`
+                // (a recusa por `ERR_ROFS` é provada em `escrita_no_disco.rs`).
                 a.chamada(nr, [p[8], tam[8], 0], ERR_NODEV, codigo + 8);
-                a.chamada(nr, [p[9], tam[9], 0], ERR_ROFS, codigo + 9);
-                a.chamada(nr, [p[10], tam[10], 0], ERR_ROFS, codigo + 10);
+                a.chamada(nr, [p[10], tam[10], 0], ERR_NOENT, codigo + 10);
                 // Diretório pai.
                 a.chamada(nr, [p[4], tam[4], 0], ERR_NOENT, codigo + 11);
                 a.chamada(nr, [p[5], tam[5], 0], ERR_TYPE, codigo + 12);
@@ -526,12 +527,12 @@ fn write_file_de_4096_bytes_atravessa_varios_clusters() {
 }
 
 #[test_case]
-fn numero_15_continua_encerrando_so_o_programa() {
-    // O contrato v6 vai até `SYS_REMOVE` (14); o 15 é o primeiro número livre.
+fn numero_24_continua_encerrando_so_o_programa() {
+    // O contrato v8 vai até `SYS_TCP_TIMEOUT` (23); o 24 é o primeiro número livre.
     let mut a = Asm::new();
-    a.mov32(Rax, 15);
+    a.mov32(Rax, 24);
     a.syscall();
-    assert_eq!(rodar_sintetico("fs_quinze", &synth_elf(&a.0)), Termination::BadSyscall { number: 15 });
+    assert_eq!(rodar_sintetico("fs_dezessete", &synth_elf(&a.0)), Termination::BadSyscall { number: 24 });
     exige(&rodar_comando("echo vivo"), "vivo");
 }
 
@@ -696,25 +697,31 @@ fn retrato_do_disco() -> (Vec<String>, Vec<u8>, Vec<u8>) {
 }
 
 #[test_case]
-fn o_disco_recusa_comandos_e_syscalls_de_escrita_e_nao_muda() {
+fn o_disco_aceita_comandos_e_syscalls_de_escrita_e_volta_ao_que_era() {
+    // Desde o Marco 11 o `/disco` grava; o QEMU dos testes usa `snapshot=on` e o
+    // teste apaga o que cria. A recusa por `ERR_ROFS` é provada, no
+    // `tests/escrita_no_disco.rs`, com um volume de 2 setores por cluster.
     let antes = retrato_do_disco();
-    for comando in ["grava /disco/x.txt a", "anexa /disco/leiame.txt a", "apaga /disco/leiame.txt"] {
-        let tela = rodar_comando(comando);
-        exige(&tela, &alloc::format!("{}: volume somente leitura: /disco", comando.split(' ').next().unwrap()));
-        exige(&rodar_comando("echo oi"), "oi");
-    }
+    let livres = fs::free_clusters(VolumeId::Disco).unwrap();
+    exige(&rodar_comando("grava /disco/x.txt a"), "grava: criado /disco/x.txt (2 bytes)");
+    exige(&rodar_comando("anexa /disco/x.txt b"), "anexa: /disco/x.txt agora tem 4 bytes");
+    exige(&rodar_comando("apaga /disco/x.txt"), "apaga: removido /disco/x.txt");
+    exige(&rodar_comando("echo oi"), "oi");
     let novo = b"/disco/x.txt";
     let existente = b"/disco/leiame.txt";
     let elf = programa(&[novo, existente], |a, p| {
-        a.chamada(SYS_CREATE, [p[0], novo.len() as u64, 0], ERR_ROFS, 10);
-        a.chamada(SYS_CREATE, [p[1], existente.len() as u64, 0], ERR_ROFS, 11);
-        a.chamada(SYS_OPEN_APPEND, [p[1], existente.len() as u64, 0], ERR_ROFS, 12);
-        a.chamada(SYS_OPEN_APPEND, [p[0], novo.len() as u64, 0], ERR_ROFS, 13);
-        a.chamada(SYS_REMOVE, [p[1], existente.len() as u64, 0], ERR_ROFS, 14);
-        a.chamada(SYS_REMOVE, [p[0], novo.len() as u64, 0], ERR_ROFS, 15);
+        a.chamada(SYS_CREATE, [p[0], novo.len() as u64, 0], 0, 10);
+        a.chamada(SYS_CLOSE, [0, 0, 0], 0, 11);
+        a.chamada(SYS_CREATE, [p[1], existente.len() as u64, 0], ERR_EXIST, 12);
+        a.chamada(SYS_OPEN_APPEND, [p[1], existente.len() as u64, 0], 0, 13);
+        a.chamada(SYS_CLOSE, [0, 0, 0], 0, 14);
+        a.chamada(SYS_REMOVE, [p[0], novo.len() as u64, 0], 0, 15);
+        a.chamada(SYS_OPEN_APPEND, [p[0], novo.len() as u64, 0], ERR_NOENT, 16);
+        a.chamada(SYS_REMOVE, [p[0], novo.len() as u64, 0], ERR_NOENT, 17);
     });
-    sai_bem("disco_ro", &elf);
+    sai_bem("disco_rw", &elf);
     assert_eq!(retrato_do_disco(), antes, "o /disco mudou");
+    assert_eq!(fs::free_clusters(VolumeId::Disco).unwrap(), livres);
 }
 
 /// Roda `f` com o volume dado no lugar de `vol` e restaura o original.
@@ -857,17 +864,17 @@ fn a_imagem_embutida_nunca_e_alterada_e_reiniciar_restaura_o_ram() {
 // ---------------------------------------------------------------------------
 
 #[test_case]
-fn a_versao_0_10_0_aparece_no_sobre() {
-    assert_eq!(os_rust::VERSION, "os-rust v0.10.0");
-    exige(&rodar_comando("sobre"), "os-rust v0.10.0");
+fn a_versao_0_12_0_aparece_no_sobre() {
+    assert_eq!(os_rust::VERSION, "os-rust v0.12.0");
+    exige(&rodar_comando("sobre"), "os-rust v0.12.0");
 }
 
 const CONTRATO: &str = include_str!("../SYSCALLS.md");
 
 #[test_case]
 fn o_contrato_concorda_com_as_constantes() {
-    assert!(CONTRATO.contains("**Versão do contrato**: 6"));
-    assert!(CONTRATO.contains("os-rust 0.10.0 (Marco 10)"));
+    assert!(CONTRATO.contains("**Versão do contrato**: 8"));
+    assert!(CONTRATO.contains("os-rust 0.12.0 (Marco 12)"));
     for (nr, nome) in [(SYS_CREATE, "SYS_CREATE"), (SYS_OPEN_APPEND, "SYS_OPEN_APPEND"), (SYS_WRITE_FILE, "SYS_WRITE_FILE"), (SYS_REMOVE, "SYS_REMOVE")] {
         assert!(CONTRATO.contains(&alloc::format!("| {} | `{}` |", nr, nome)), "{}", nome);
     }
@@ -877,7 +884,7 @@ fn o_contrato_concorda_com_as_constantes() {
     }
     assert_eq!((ERR_EXIST, ERR_NOSPC, ERR_ROFS, ERR_BUSY), (-12, -13, -14, -15));
     assert!(CONTRATO.contains("**somente leitura**"));
-    assert!(CONTRATO.contains("fora de 1 a 14"));
+    assert!(CONTRATO.contains("fora de 1 a 23"));
 }
 
 #[test_case]

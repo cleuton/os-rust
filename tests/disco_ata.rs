@@ -149,3 +149,80 @@ fn o_mesmo_leitor_le_o_ramdisk_e_o_disco() {
         assert!(entradas >= 2, "a raiz de cada volume tem arquivos e diretorios");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Escrita (Marco 11)
+//
+// O QEMU de teste usa `snapshot=on`: o que se grava vai para um arquivo
+// temporário e a imagem original nunca muda. Mesmo assim, cada teste lê o setor
+// antes e o regrava no fim, para o disco ficar como estava.
+// ---------------------------------------------------------------------------
+
+/// Um padrão de 512 bytes que muda com `semente`.
+fn padrao(semente: u8) -> [u8; SECTOR_SIZE] {
+    let mut setor = [0u8; SECTOR_SIZE];
+    for (i, b) in setor.iter_mut().enumerate() {
+        *b = (i as u8).wrapping_mul(7).wrapping_add(semente);
+    }
+    setor
+}
+
+fn le(disk: &AtaDisk, lba: u32) -> [u8; SECTOR_SIZE] {
+    let mut setor = [0u8; SECTOR_SIZE];
+    disk.read_sector(lba, &mut setor).unwrap();
+    setor
+}
+
+#[test_case]
+fn o_disco_diz_que_aceita_escrita() {
+    assert!(disco().writable());
+}
+
+#[test_case]
+fn grava_um_padrao_e_le_de_volta() {
+    let disk = disco();
+    let lba = 4000;
+    let original = le(&disk, lba);
+    let novo = padrao(3);
+    assert_ne!(original, novo);
+    disk.write_sector(lba, &novo).unwrap();
+    assert_eq!(le(&disk, lba), novo);
+    // Um segundo detect (outro AtaDisk) enxerga o mesmo: nada fica em cache no kernel.
+    assert_eq!(le(&disco(), lba), novo);
+    disk.write_sector(lba, &original).unwrap();
+    assert_eq!(le(&disk, lba), original);
+}
+
+#[test_case]
+fn grava_o_ultimo_setor_do_disco() {
+    let disk = disco();
+    let ultimo = disk.sector_count() - 1;
+    let original = le(&disk, ultimo);
+    let novo = padrao(9);
+    disk.write_sector(ultimo, &novo).unwrap();
+    assert_eq!(le(&disk, ultimo), novo);
+    disk.write_sector(ultimo, &original).unwrap();
+    assert_eq!(le(&disk, ultimo), original);
+}
+
+#[test_case]
+fn gravar_alem_do_fim_e_out_of_range_e_o_disco_segue_funcionando() {
+    let disk = disco();
+    let dados = padrao(1);
+    assert_eq!(disk.write_sector(disk.sector_count(), &dados), Err(BlockError::OutOfRange));
+    assert_eq!(disk.write_sector(u32::MAX, &dados), Err(BlockError::OutOfRange));
+    // Nenhuma porta foi tocada: o controlador continua respondendo.
+    assert_eq!(&le(&disk, 0)[510..512], &[0x55, 0xAA]);
+}
+
+#[test_case]
+fn gravar_nao_altera_os_vizinhos() {
+    let disk = disco();
+    let lba = 4100;
+    let (antes, meio, depois) = (le(&disk, lba - 1), le(&disk, lba), le(&disk, lba + 1));
+    disk.write_sector(lba, &padrao(5)).unwrap();
+    assert_eq!(le(&disk, lba - 1), antes);
+    assert_eq!(le(&disk, lba + 1), depois);
+    disk.write_sector(lba, &meio).unwrap();
+    assert_eq!(le(&disk, lba), meio);
+}

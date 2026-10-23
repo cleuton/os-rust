@@ -24,7 +24,7 @@ A biblioteca de runtime (`runtime/`, na raiz do repositório) existe para que vo
 - Um alocador global: permite usar `Box`, `Vec`, `String` e o restante da crate `alloc` (com `extern crate alloc;` no seu programa), através da syscall de memória. O heap do programa cresce até 1 MiB.
 - `yield_now()`: cede a CPU a outro programa que esteja rodando ao mesmo tempo (veja a seção **Multitarefa**).
 - `File`, `Dir`, `DirEntry` e `FsError`: abrir e ler arquivos e listar diretórios (veja a seção **Arquivos**). `File` e `Dir` só leem.
-- `FileWriter` e `remove`: criar um arquivo, acrescentar bytes ao fim dele e apagá-lo, no volume `/ram` (veja a seção **Escrevendo arquivos**).
+- `FileWriter`, `remove`, `mkdir` e `rmdir`: criar um arquivo, acrescentar bytes ao fim dele, apagá-lo, e criar e remover diretórios, nos volumes `/ram` e `/disco` (veja a seção **Escrevendo arquivos**).
 - `time::now()`: a data e a hora atuais, em UTC (veja a seção **A hora**).
 - `exit(codigo)`: encerra o programa mais cedo, se precisar.
 - Um tratador de `panic!`: escreve `[panic] <mensagem>` na tela e encerra o programa com o código 101.
@@ -454,14 +454,14 @@ A primeira linha vai ao `eco`, que pediu primeiro; a segunda vai ao `eco2`.
 
 ## Arquivos
 
-O os-rust tem arquivos em dois volumes (o `/ram` aceita escrita, veja **Escrevendo arquivos**; o `/disco` é **somente leitura**). Esta seção mostra como **ler**. Os arquivos moram em dois volumes, ambos no formato FAT16, e o seu programa os enxerga pelo mesmo caminho, sem saber de onde vêm os bytes:
+O os-rust tem arquivos em dois volumes (os dois aceitam escrita, veja **Escrevendo arquivos**). Esta seção mostra como **ler**. Os arquivos moram em dois volumes, ambos no formato FAT16, e o seu programa os enxerga pelo mesmo caminho, sem saber de onde vêm os bytes:
 
 | Volume | O que é |
 |---|---|
 | `/ram` | o ramdisk, copiado da imagem embutida na imagem de boot (leitura e escrita) |
-| `/disco` | o disco, anexado ao QEMU pelo `cargo run`, somente leitura (se o QEMU subir sem ele, `/disco` fica indisponível e o `/ram` continua funcionando) |
+| `/disco` | o disco, anexado ao QEMU pelo `cargo run`, leitura e escrita (se o QEMU subir sem ele, `/disco` fica indisponível e o `/ram` continua funcionando) |
 
-O conteúdo dos dois vem do diretório `discos/` do repositório (`discos/ram/` e `discos/disco/`), transformado em imagem de volume dentro de `cargo run`/`cargo test`: para dar um arquivo novo ao seu programa, ponha-o ali.
+O conteúdo dos dois vem do diretório `discos/` do repositório (`discos/ram/` e `discos/disco/`), transformado em imagem de volume pelo `build.rs` (sempre que ele roda): para dar um arquivo novo ao seu programa, ponha-o ali.
 
 ### Caminhos
 
@@ -508,8 +508,9 @@ Toda operação devolve `Result<_, FsError>`. `FsError` implementa `Display`, en
 | `Io` | erro ao ler o volume: o disco não respondeu ou a estrutura do volume está corrompida |
 | `Exists` | `FileWriter::create` num nome que já existe |
 | `NoSpace` | o volume (ou o diretório) não tem mais espaço |
-| `ReadOnly` | o volume não aceita escrita (por exemplo, `/disco`) |
-| `Busy` | `remove` de um arquivo que algum programa tem aberto |
+| `ReadOnly` | o volume não aceita escrita (só acontece com um volume de mais de 1 setor por cluster) |
+| `Busy` | `remove` de um arquivo, ou `rmdir` de um diretório, que algum programa tem aberto; `rmdir` da raiz de um volume |
+| `NotEmpty` | `rmdir` de um diretório que ainda tem entradas |
 
 Um erro de arquivo **nunca** derruba o seu programa nem o kernel: você recebe o `Err` e decide o que fazer.
 
@@ -633,10 +634,10 @@ fn main() -> i32 {
 
 ## Escrevendo arquivos
 
-O volume `/ram` aceita escrita; o `/disco` continua **somente leitura**. A escrita é simples de propósito: **um arquivo nasce vazio e só cresce pelo fim; apagar devolve o espaço; nada fica guardado para depois** (cada `write` já deixa os dados no volume, não existe `flush`). Quem quiser trocar o conteúdo de um arquivo apaga e cria de novo.
+Os volumes `/ram` e `/disco` aceitam escrita. A escrita é simples de propósito: **um arquivo nasce vazio e só cresce pelo fim; apagar devolve o espaço; nada fica guardado para depois** (cada `write` já deixa os dados no volume, não existe `flush`). Quem quiser trocar o conteúdo de um arquivo apaga e cria de novo.
 
 ```rust
-use runtime::{remove, FileWriter, FsError};
+use runtime::{mkdir, remove, rmdir, FileWriter, FsError};
 
 let mut arquivo = FileWriter::create("/ram/nota.txt")?;  // Result<FileWriter, FsError>; Exists se o nome já existe
 arquivo.write_all(b"ola, ramdisk\n")?;                   // grava tudo, repetindo write até acabar
@@ -644,6 +645,8 @@ let n = arquivo.write(b"mais")?;                         // Result<usize, FsErro
 
 let mut mesmo = FileWriter::append("/ram/nota.txt")?;    // abre um arquivo que já existe, para acrescentar
 remove("/ram/nota.txt")?;                                // Result<(), FsError>
+mkdir("/ram/docs/novo")?;                               // cria um diretório vazio; Exists se o nome já existe
+rmdir("/ram/docs/novo")?;                               // remove um diretório vazio; NotEmpty se tem entradas
 ```
 
 As regras:
@@ -652,8 +655,9 @@ As regras:
 - **Arquivo aberto não se apaga.** `remove` de um arquivo que *algum* programa tem aberto (inclusive o seu) devolve `Busy`. Feche antes: solte o `File` ou o `FileWriter` de escopo (`drop(arquivo)`).
 - **Volume cheio.** `write` devolve quantos bytes coube; a chamada seguinte devolve `NoSpace`. O que coube fica gravado.
 - **Quem lê vê o tamanho de quando abriu.** Um `File` aberto antes de um `write` não enxerga o que foi acrescentado depois; uma nova abertura enxerga tudo.
-- O diretório não cresce (sem posição livre, `NoSpace`), não se criam nem se removem diretórios, e só os arquivos do `/ram` mudam: reiniciar o sistema devolve o `/ram` ao conteúdo original. Nada é protegido: qualquer arquivo do `/ram` pode ser apagado.
-- O prompt tem os comandos `grava <caminho> [<texto>]`, `anexa <caminho> <texto>` e `apaga <caminho>` para fazer o mesmo à mão.
+- **Diretórios.** `mkdir` cria um diretório vazio (o pai precisa existir; não é recursivo) e `rmdir` remove um diretório **vazio** que ninguém tem aberto. Um diretório novo ocupa um cluster e não cresce: cabem 14 entradas (sem posição livre, `NoSpace`).
+- **O que persiste.** Reiniciar o sistema devolve o `/ram` ao conteúdo original. O `/disco` guarda o que você grava **na imagem em que o QEMU está rodando**: com o `cargo run` (`snapshot=on`) isso é descartado quando o QEMU fecha. Para a gravação sobreviver a um reinício, rode o QEMU à mão sobre uma cópia da imagem do disco (README, "Preservando o disco entre boots"). Nada é protegido: qualquer arquivo, ou diretório vazio, pode ser apagado.
+- O prompt tem os comandos `grava <caminho> [<texto>]`, `anexa <caminho> <texto>`, `apaga <caminho>`, `mkdir <caminho>` e `rmdir <caminho>` para fazer o mesmo à mão.
 
 ### Programa de exemplo 10: gravador
 
@@ -669,9 +673,9 @@ Cria `/ram/gravado.txt` com 20 linhas (680 bytes); se o arquivo já existe, acre
 //! tenta criar primeiro; se o nome já existe (`Exists`), abre o arquivo para
 //! acrescentar em vez de sobrescrevê-lo.
 //!
-//! Só o `/ram` aceita escrita (o `/disco` é somente leitura), e reiniciar o
-//! sistema devolve o `/ram` ao conteúdo original. O caminho é fixo porque
-//! programas não recebem argumentos de linha de comando.
+//! O `/ram` volta ao conteúdo original a cada boot (o `/disco` também aceita
+//! escrita, mas só persiste se o QEMU roda sem `snapshot=on`). O caminho é fixo
+//! porque programas não recebem argumentos de linha de comando.
 //!
 //! Rode com `run gravador` (cria), de novo (amplia) e `run apagador` (remove).
 
@@ -805,6 +809,149 @@ fn main() -> i32 {
 
 Repare que o `apagador` fecha o arquivo (`drop(arquivo)`) **antes** de chamar `remove`: com o arquivo aberto, `remove` devolveria `Busy`.
 
+### Programa de exemplo 12: caderno
+
+Acrescenta uma linha com a hora (UTC) a `/disco/caderno.txt` a cada execução (20 bytes por linha), e depois escreve o arquivo na tela e conta as linhas. Arquivo: `programs/src/bin/caderno.rs`. Rode com `run caderno` duas vezes e confira com `ls /disco` (20 e depois 40 bytes). Ele escreve no **`/disco`**, então só deixa a anotação para o próximo boot se o QEMU rodar à mão sobre uma cópia da imagem (README, "Preservando o disco entre boots"); com o `cargo run`, a anotação vale até fechar o QEMU.
+
+```rust
+//! `caderno`: acrescenta uma linha com a hora a um arquivo do disco e mostra o
+//! arquivo inteiro.
+//!
+//! Cada vez que roda, o programa anota a hora atual (UTC) em
+//! `/disco/caderno.txt`: na primeira vez cria o arquivo, nas seguintes
+//! acrescenta ao fim. Depois abre o arquivo, escreve o conteúdo na tela e
+//! conta as linhas. É o jeito mais curto de ver a persistência do `/disco`:
+//! rode `run caderno` duas vezes e o arquivo terá duas linhas (20 bytes cada).
+//!
+//! Atenção: enquanto o QEMU roda com `snapshot=on` (é o caso de `cargo run` e
+//! `cargo test`), o `/disco` volta ao inicial quando o QEMU fecha. Para a
+//! anotação sobreviver a um reinício, rode o QEMU à mão sobre uma cópia da
+//! imagem do disco (passo a passo no README, "Preservando o disco entre boots").
+//!
+//! O escritor é fechado **antes** de o arquivo ser aberto para leitura, e o
+//! caminho é fixo porque programas não recebem argumentos de linha de comando.
+//!
+//! Rode com `run caderno`.
+
+#![no_std]
+#![no_main]
+
+use core::fmt::{self, Write};
+
+use runtime::sys::write;
+use runtime::{entry, println, time, File, FileWriter, FsError, TimeError};
+
+entry!(main);
+
+/// O arquivo que o programa cria e amplia.
+const CAMINHO: &str = "/disco/caderno.txt";
+
+/// Uma linha do caderno: `AAAA-MM-DD HH:MM:SS` (19 caracteres) mais `\n`.
+const TAMANHO_DA_LINHA: usize = 20;
+
+/// Por que o programa não conseguiu anotar ou mostrar o caderno.
+enum Falha {
+    Arquivo(FsError),
+    Hora(TimeError),
+    /// A linha não coube nos 20 bytes (não deveria acontecer).
+    Formato,
+}
+
+impl From<FsError> for Falha {
+    fn from(erro: FsError) -> Falha {
+        Falha::Arquivo(erro)
+    }
+}
+
+impl From<TimeError> for Falha {
+    fn from(erro: TimeError) -> Falha {
+        Falha::Hora(erro)
+    }
+}
+
+impl fmt::Display for Falha {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Falha::Arquivo(erro) => write!(f, "{}", erro),
+            Falha::Hora(erro) => write!(f, "{}", erro),
+            Falha::Formato => f.write_str("linha com formato inesperado"),
+        }
+    }
+}
+
+/// Um buffer na pilha que recebe a linha formatada: o programa não precisa de heap.
+struct Linha {
+    bytes: [u8; TAMANHO_DA_LINHA],
+    usados: usize,
+}
+
+impl Write for Linha {
+    fn write_str(&mut self, texto: &str) -> fmt::Result {
+        let fim = self.usados + texto.len();
+        if fim > TAMANHO_DA_LINHA {
+            return Err(fmt::Error);
+        }
+        self.bytes[self.usados..fim].copy_from_slice(texto.as_bytes());
+        self.usados = fim;
+        Ok(())
+    }
+}
+
+fn main() -> i32 {
+    match anota().and_then(|_| mostra()) {
+        Ok(linhas) => {
+            // "1 linha", mas "2 linhas".
+            let palavra = if linhas == 1 { "linha" } else { "linhas" };
+            println!("caderno: {} {} em {}", linhas, palavra, CAMINHO);
+            0
+        }
+        Err(erro) => {
+            println!("caderno: nao gravou {}: {}", CAMINHO, erro);
+            1
+        }
+    }
+}
+
+/// Acrescenta a linha com a hora ao caderno, criando o arquivo se ele não existe.
+fn anota() -> Result<(), Falha> {
+    // O nome já existe (`Exists`): acrescenta ao fim, sem tocar no que já está lá.
+    let mut escritor = match FileWriter::create(CAMINHO) {
+        Ok(escritor) => escritor,
+        Err(FsError::Exists) => FileWriter::append(CAMINHO)?,
+        Err(erro) => return Err(erro.into()),
+    };
+    let agora = time::now()?;
+    let mut linha = Linha { bytes: [0; TAMANHO_DA_LINHA], usados: 0 };
+    // `{}` escreve `AAAA-MM-DD HH:MM:SS`; o relógio é sempre UTC.
+    writeln!(linha, "{}", agora).map_err(|_| Falha::Formato)?;
+    escritor.write_all(&linha.bytes[..linha.usados])?;
+    // `escritor` sai de escopo aqui e o descritor é fechado, antes de o
+    // arquivo ser aberto para leitura.
+    Ok(())
+}
+
+/// Escreve o caderno na tela, em pedaços de 128 bytes, e devolve quantas
+/// linhas ele tem.
+fn mostra() -> Result<usize, Falha> {
+    let mut arquivo = File::open(CAMINHO)?;
+    let mut pedaco = [0u8; 128];
+    let mut linhas = 0;
+    loop {
+        match arquivo.read(&mut pedaco)? {
+            // 0 bytes: o arquivo acabou.
+            0 => return Ok(linhas),
+            n => {
+                // `write` entrega os bytes à tela exatamente como estão.
+                write(&pedaco[..n]);
+                linhas += pedaco[..n].iter().filter(|&&b| b == b'\n').count();
+            }
+        }
+    }
+}
+```
+
+Repare que o escritor é fechado (sai de escopo em `anota`) **antes** de o arquivo ser aberto para leitura em `mostra`.
+
 ## A hora
 
 Um programa pode perguntar a data e a hora ao kernel, que as lê do relógio do computador (o chip RTC). Você não toca no relógio: usa `time::now()`, da biblioteca de runtime, que faz a syscall `SYS_TIME` por você.
@@ -851,6 +998,226 @@ fn main() -> i32 {
 
 Para ver a hora sem escrever um programa, o prompt tem o comando `data`. O contrato da syscall (registradores, formato do buffer de 8 bytes e erros) está em `SYSCALLS.md`, seção 5, `SYS_TIME`.
 
+## Rede (TCP)
+
+Um programa fala com a rede por **sockets TCP**. Você não chama as syscalls 17 a 23 na mão: usa os tipos da biblioteca de runtime.
+
+- `Ipv4`: um endereço, quatro bytes. `Ipv4::parse("10.0.2.2")` devolve `Option<Ipv4>`; escrito com `{}`, sai como `a.b.c.d`. O endereço do próprio computador, visto de dentro do programa, é `127.0.0.1` (o loopback, que funciona até sem placa de rede); `10.0.2.2` é o computador de verdade quando o os-rust roda no QEMU.
+- `TcpListener::bind(porta)` abre um servidor; `accept()` espera uma conexão e devolve um `TcpStream`; `set_timeout(ms)` muda o tempo limite.
+- `TcpStream::connect(ip, porta)` abre uma conexão; `read(&mut buffer)` lê o que chegou e devolve `0` quando o outro lado fechou; `write(&bytes)` envia o que couber e `write_all(&bytes)` envia tudo; `set_timeout(ms)` muda o tempo limite.
+- `NetError` diz o que deu errado (`TimedOut`, `Refused`, `Reset`, `AddrInUse`, `NoBuffers`, `NoNetwork`, ...) e se escreve com `{}`.
+
+As regras:
+
+- **Não existe espera infinita.** Toda espera (`accept`, `read`, `connect`, `write` com o buffer cheio) tem tempo limite: 10 segundos por padrão, de 0 a 60 000 ms com `set_timeout`; o `connect` espera no máximo 3 segundos. Um servidor esquecido não prende o computador, porque não existe Ctrl+C.
+- **Feche o que abriu.** `TcpListener` e `TcpStream` fecham o socket sozinhos quando saem de escopo (`drop`). Um programa pode ter até 4 sockets abertos ao mesmo tempo, e o kernel inteiro tem 8 conexões; se o programa termina sem fechar, o kernel fecha por ele.
+- **Só TCP.** Não há UDP, nomes de máquina (DNS) nem endereço automático (DHCP). Esperar a rede não gasta CPU: o programa fica bloqueado, e os outros programas continuam.
+
+### Programa de exemplo 13: servidor
+
+Espera uma conexão na porta 8000 e responde com uma página HTTP/1.0 mínima (88 bytes: 65 de cabeçalho e 23 de corpo). Arquivo: `programs/src/bin/servidor.rs`. Rode com `run servidor cliente`, ou sozinho com `run servidor` (e, no QEMU iniciado à mão com `hostfwd`, `curl http://127.0.0.1:8080/` no computador; veja o README, "Rede no QEMU").
+
+```rust
+//! `servidor`: espera uma conexão TCP na porta 8000 e responde a uma
+//! requisição, no formato mínimo de uma página HTTP/1.0.
+//!
+//! É a metade "servidora" da demonstração de rede do Marco 12. Rode junto do
+//! `cliente` (`run servidor cliente`), e o tráfego passa pelo loopback
+//! (`127.0.0.1`), sem nenhuma placa de rede. Com o QEMU iniciado à mão com
+//! `hostfwd` (README, "Rede no QEMU"), o próprio computador de verdade também
+//! consegue conversar com ele: `curl http://127.0.0.1:8080/`.
+//!
+//! O programa não interpreta a requisição: lê o que chegar (uma vez, até 512
+//! bytes) e devolve sempre a mesma página, com 65 bytes de cabeçalho e 23 de
+//! corpo. Toda espera tem tempo limite, porque não existe Ctrl+C: se ninguém
+//! se conectar em 30 segundos, o programa desiste e o prompt volta.
+
+#![no_std]
+#![no_main]
+
+use runtime::{entry, println, NetError, TcpListener};
+
+entry!(main);
+
+/// A porta em que o servidor espera.
+const PORTA: u16 = 8000;
+
+/// Quanto o servidor espera alguém se conectar (30 s).
+const ESPERA_CONEXAO_MS: u32 = 30_000;
+
+/// Quanto espera a requisição, depois de conectado (10 s).
+const ESPERA_DADOS_MS: u32 = 10_000;
+
+/// O corpo da resposta: 23 bytes, com o `\n` final.
+const CORPO: &str = "ola da rede do os-rust\n";
+
+/// A resposta inteira: 65 bytes de cabeçalho (`\r\n` termina cada linha, e uma
+/// linha em branco termina o cabeçalho) mais os 23 do corpo, 88 no total.
+const RESPOSTA: &[u8] =
+    b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 23\r\n\r\nola da rede do os-rust\n";
+
+fn main() -> i32 {
+    match servir() {
+        Ok(()) => 0,
+        Err(codigo) => codigo,
+    }
+}
+
+/// Atende uma conexão. O erro é o código de saída do programa.
+fn servir() -> Result<(), i32> {
+    let ouvinte = TcpListener::bind(PORTA).map_err(erro_de_rede)?;
+    ouvinte.set_timeout(ESPERA_CONEXAO_MS).map_err(erro_de_rede)?;
+    println!("servidor: ouvindo na porta {}", PORTA);
+
+    let conexao = match ouvinte.accept() {
+        Ok(conexao) => conexao,
+        Err(NetError::TimedOut) => {
+            println!("servidor: ninguem se conectou em 30 s");
+            return Err(1);
+        }
+        Err(erro) => return Err(erro_de_rede(erro)),
+    };
+    conexao.set_timeout(ESPERA_DADOS_MS).map_err(erro_de_rede)?;
+
+    // Uma leitura basta: a requisição do `cliente` cabe num segmento só.
+    let mut requisicao = [0u8; 512];
+    let lidos = conexao.read(&mut requisicao).map_err(erro_de_rede)?;
+    println!("servidor: recebi {} bytes", lidos);
+
+    conexao.write_all(RESPOSTA).map_err(erro_de_rede)?;
+    // Fechar a conexão e o ouvinte: o kernel termina de enviar o que falta e
+    // encerra a conexão em segundo plano, mesmo depois de o programa acabar.
+    drop(conexao);
+    drop(ouvinte);
+    println!("servidor: respondi {} bytes de corpo", CORPO.len());
+    Ok(())
+}
+
+/// Mostra o erro e devolve o código de saída 2.
+fn erro_de_rede(erro: NetError) -> i32 {
+    println!("servidor: erro de rede: {}", erro);
+    2
+}
+```
+
+### Programa de exemplo 14: cliente
+
+Conecta num servidor na porta 8000, pede uma página (33 bytes) e escreve a resposta na tela, sem os `\r`, até 1024 bytes. Arquivo: `programs/src/bin/cliente.rs`. Apertar só Enter no endereço usa `127.0.0.1`.
+
+```rust
+//! `cliente`: conecta num servidor na porta 8000, pede uma página e a mostra.
+//!
+//! É a metade "cliente" da demonstração de rede do Marco 12. Pergunta o
+//! endereço do servidor; apertar só Enter usa `127.0.0.1`, e então o par é o
+//! programa `servidor` (`run servidor cliente`), pelo loopback, sem placa de
+//! rede. Digitando `10.0.2.2` (o computador de verdade, visto de dentro do
+//! QEMU), conversa com um servidor do host, por exemplo
+//! `python3 -m http.server 8000` (README, "Rede no QEMU").
+//!
+//! A requisição tem 33 bytes. A resposta é escrita na tela sem os `\r` (que só
+//! servem ao protocolo), até 1024 bytes; se vier mais que isso, o programa
+//! mostra o começo e avisa que cortou. Toda espera tem tempo limite (10 s).
+
+#![no_std]
+#![no_main]
+
+use runtime::sys::write;
+use runtime::{entry, print, println, read_line, Ipv4, NetError, TcpStream};
+
+entry!(main);
+
+/// A porta do servidor.
+const PORTA: u16 = 8000;
+
+/// O pedido: 33 bytes (`GET / HTTP/1.0\r\n` 16, `Host: os-rust\r\n` 15, `\r\n` 2).
+const REQUISICAO: &[u8] = b"GET / HTTP/1.0\r\nHost: os-rust\r\n\r\n";
+
+/// Quanto da resposta vai para a tela.
+const LIMITE_NA_TELA: usize = 1024;
+
+/// Quanto espera cada resposta do servidor (10 s).
+const ESPERA_MS: u32 = 10_000;
+
+fn main() -> i32 {
+    print!("cliente: endereco do servidor (vazio = 127.0.0.1): ");
+    let mut linha = [0u8; 64];
+    let texto = read_line(&mut linha).trim();
+    let ip = if texto.is_empty() {
+        Ipv4([127, 0, 0, 1])
+    } else {
+        match Ipv4::parse(texto) {
+            Some(ip) => ip,
+            None => {
+                println!("cliente: endereco invalido: {}", texto);
+                return 2;
+            }
+        }
+    };
+
+    let conexao = match TcpStream::connect(ip, PORTA) {
+        Ok(conexao) => conexao,
+        Err(erro) => {
+            println!("cliente: nao conectou em {}:{}: {}", ip, PORTA, erro);
+            return 1;
+        }
+    };
+
+    match conversar(&conexao) {
+        Ok(()) => 0,
+        Err(erro) => {
+            println!("cliente: erro de rede: {}", erro);
+            2
+        }
+    }
+}
+
+/// Envia o pedido e mostra a resposta até o servidor fechar a conexão.
+fn conversar(conexao: &TcpStream) -> Result<(), NetError> {
+    conexao.set_timeout(ESPERA_MS)?;
+    conexao.write_all(REQUISICAO)?;
+
+    let mut lidos_no_total = 0;
+    let mut escritos = 0;
+    let mut cortou = false;
+    let mut pedaco = [0u8; 256];
+    loop {
+        let n = conexao.read(&mut pedaco)?;
+        if n == 0 {
+            break;
+        }
+        lidos_no_total += n;
+        // Tira os `\r` e respeita o limite da tela.
+        let mut limpo = [0u8; 256];
+        let mut tamanho = 0;
+        for &byte in &pedaco[..n] {
+            if byte == b'\r' {
+                continue;
+            }
+            if escritos + tamanho == LIMITE_NA_TELA {
+                cortou = true;
+                break;
+            }
+            limpo[tamanho] = byte;
+            tamanho += 1;
+        }
+        write(&limpo[..tamanho]);
+        escritos += tamanho;
+        if cortou {
+            break;
+        }
+    }
+
+    if cortou {
+        println!("cliente: {} bytes recebidos (cortado)", LIMITE_NA_TELA);
+    } else {
+        println!("cliente: {} bytes recebidos", lidos_no_total);
+    }
+    Ok(())
+}
+```
+
+Repare que cada espera já tem o seu tempo limite (`set_timeout`), que o `servidor` fecha a conexão e o ouvinte (`drop`) antes de dizer que respondeu, e que o `cliente` lê até `read` devolver `0`, o sinal de que o servidor fechou.
+
 ## Escrevendo e compilando o seu próprio programa
 
 1. Crie um arquivo novo em `programs/src/bin/`, com o nome do seu programa (por exemplo, `programs/src/bin/meuprograma.rs`).
@@ -872,7 +1239,7 @@ Para verificação automatizada, `cargo test` roda a suíte do kernel, que inclu
 - **Meu programa não aparece em `run`**: confira se o nome do arquivo em `programs/src/bin/` (sem `.rs`) é exatamente o que você digitou depois de `run`, e se `cargo run` terminou sem erro de compilação.
 - **`cargo run` falha ao compilar meu programa**: o erro apontado é do seu código, não do kernel; corrija e rode `cargo run` de novo. O kernel não sobe com um programa que falhou ao compilar.
 - **Erro de ligação dizendo que falta `_start`**: faltou `entry!(main);` no seu programa.
-- **Meu programa e outro estão intercalando a saída e eu queria uma ordem fixa**: a ordem entre programas só é a do rodízio de `yield_now` enquanto o timer não interrompe ninguém; o kernel pode interromper qualquer programa em qualquer instrução. Se a ordem importa, cada programa precisa esperar pelo que precisa de outro jeito (não existe comunicação entre programas nesta versão).
+- **Meu programa e outro estão intercalando a saída e eu queria uma ordem fixa**: a ordem entre programas só é a do rodízio de `yield_now` enquanto o timer não interrompe ninguém; o kernel pode interromper qualquer programa em qualquer instrução. Se a ordem importa, cada programa precisa esperar pelo que precisa de outro jeito (dois programas só conversam pela rede, por sockets TCP no `127.0.0.1`; veja "Rede (TCP)").
 - **Meu programa trava e nunca volta ao prompt**: confira se todo caminho de código do seu `main` eventualmente retorna (ou chama `exit`); um programa que nunca sai continua ocupando o prompt. Se ele está em `read_line`, está esperando você apertar Enter.
 - **`memory allocation of N bytes failed` e `terminou com codigo 101`**: o programa pediu mais memória do que o heap de 1 MiB comporta (a mensagem vem depois de uma linha `[panic] panicked at ...`).
 - **Meu programa usa uma syscall que não existe**: o kernel encerra o programa com uma mensagem de erro, do mesmo jeito que trata um acesso inválido à memória; confira o número da syscall no `SYSCALLS.md`.

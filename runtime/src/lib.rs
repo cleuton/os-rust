@@ -13,6 +13,8 @@
 //!   (volumes `/ram` e `/disco`);
 //! - [`FileWriter`] e [`remove`]: criar, acrescentar ao fim e apagar arquivos
 //!   (só o `/ram` aceita escrita);
+//! - [`TcpListener`], [`TcpStream`], [`Ipv4`] e [`NetError`]: falar TCP pela
+//!   rede (ou pelo loopback `127.0.0.1`);
 //! - [`time::now`]: a data e a hora atuais, em UTC;
 //! - [`exit`]: encerra o programa mais cedo;
 //! - [`yield_now`]: cede a CPU a outro programa (multitarefa);
@@ -28,11 +30,13 @@
 pub mod fs;
 pub mod heap;
 pub mod io;
+pub mod net;
 pub mod sys;
 pub mod time;
 
-pub use fs::{remove, Dir, DirEntry, File, FileWriter, FsError};
+pub use fs::{mkdir, remove, rmdir, Dir, DirEntry, File, FileWriter, FsError};
 pub use io::read_line;
+pub use net::{Ipv4, NetError, TcpListener, TcpStream};
 pub use sys::{exit, yield_now};
 pub use time::{DateTime, TimeError};
 

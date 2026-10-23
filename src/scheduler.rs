@@ -34,6 +34,7 @@ use x86_64::instructions::interrupts;
 
 use crate::keyboard::{LineEditor, LINE_CAPACITY};
 use crate::memory;
+use crate::net::socket::{PendingNet, SocketTable};
 use crate::task::{PendingRead, Task, TaskContext, TaskState};
 use crate::timer;
 use crate::user::{self, Finished, Termination};
@@ -125,9 +126,31 @@ impl Scheduler {
             .map(|(_, index)| index)
     }
 
-    /// Verdadeiro se alguma tarefa espera uma linha do teclado.
+    /// Verdadeiro se alguma tarefa espera uma linha do teclado ou a rede.
     fn any_waiting(&self) -> bool {
-        self.tasks.iter().flatten().any(|t| t.state == TaskState::WaitingKeyboard)
+        self.tasks
+            .iter()
+            .flatten()
+            .any(|t| matches!(t.state, TaskState::WaitingKeyboard | TaskState::WaitingNet))
+    }
+
+    /// Passa a `Ready` as tarefas cujo pedido de rede já pode andar (chegou
+    /// dado, conexão ou espaço, a conexão caiu, ou o prazo venceu). Só
+    /// pergunta; o resultado é calculado quando a tarefa volta a rodar.
+    fn wake_network_waiters(&mut self) {
+        let now = timer::ticks();
+        for task in self.tasks.iter_mut().flatten() {
+            if task.state != TaskState::WaitingNet {
+                continue;
+            }
+            let ready = match &task.pending_net {
+                Some(pending) => crate::net::ready(&task.sockets, pending, now),
+                None => true,
+            };
+            if ready {
+                task.state = TaskState::Ready;
+            }
+        }
     }
 }
 
@@ -221,6 +244,9 @@ fn poll_keyboard() {
     if let Some(hook) = hook {
         hook();
     }
+    // A pilha de rede anda nos mesmos pontos seguros em que o teclado é olhado
+    // (bloqueio, `yield`, tick vindo de ring 3, volta do laço ocioso).
+    crate::net::poll();
 
     let mut sched = SCHED.lock();
     loop {
@@ -283,6 +309,7 @@ pub(crate) extern "C" fn run_next() -> ! {
         // (uma CPU só, sem preempção do kernel).
         let decision = {
             let mut sched = SCHED.lock();
+            sched.wake_network_waiters();
             match sched.next_ready() {
                 Some(index) => {
                     sched.current = Some(index);
@@ -294,6 +321,7 @@ pub(crate) extern "C" fn run_next() -> ! {
                             task.slices += 1;
                             task.space.activate();
                             deliver_line(task);
+                            complete_net(task);
                             Decision::Run(&task.context as *const TaskContext)
                         }
                         None => Decision::Idle,
@@ -343,6 +371,17 @@ fn deliver_line(task: &mut Task) {
     task.context.rax = read.written as u64;
 }
 
+/// Conclui o pedido de rede que a tarefa esperava, agora que o espaço de
+/// endereçamento dela está ativo (os buffers do pedido estão mapeados): copia
+/// os dados e grava o resultado da syscall em `rax`.
+fn complete_net(task: &mut Task) {
+    let Some(pending) = task.pending_net.take() else { return };
+    let result = crate::net::attempt(&mut task.sockets, &pending, timer::ticks());
+    // `wake_network_waiters` só liberou a tarefa porque o pedido podia andar;
+    // `None` seria uma contradição, e o prazo vencido é a resposta segura.
+    task.context.rax = result.unwrap_or(abi::ERR_TIMEDOUT) as u64;
+}
+
 /// Não resta nenhuma tarefa: volta ao kernel.
 fn finish() -> ! {
     debug_assert!(!SCHED.lock().any_alive());
@@ -373,6 +412,29 @@ pub(crate) fn block_on_keyboard(ctx: &mut TaskContext, ptr: u64, len: u64) -> ! 
         }
     }
     run_next()
+}
+
+/// Uma syscall de rede que não pôde andar: bloqueia a tarefa atual até a pilha
+/// poder atender (ou o prazo vencer) e passa a CPU adiante. O resultado entra em
+/// `rax` por `complete_net`. Nunca retorna.
+pub(crate) fn block_on_net(ctx: &mut TaskContext, pending: PendingNet) -> ! {
+    {
+        let mut sched = SCHED.lock();
+        if let Some(task) = sched.current.and_then(|i| sched.tasks[i].as_mut()) {
+            task.context = *ctx;
+            task.state = TaskState::WaitingNet;
+            task.pending_net = Some(pending);
+        }
+    }
+    run_next()
+}
+
+/// Roda `f` com a tabela de sockets da tarefa atual. A trava do escalonador fica
+/// presa durante `f` (a ordem de travas é escalonador e depois pilha de rede).
+pub(crate) fn with_current_sockets<R>(f: impl FnOnce(&mut SocketTable) -> R) -> Option<R> {
+    let mut sched = SCHED.lock();
+    let index = sched.current?;
+    sched.tasks[index].as_mut().map(|task| f(&mut task.sockets))
 }
 
 /// Encerra a tarefa atual, por `exit`, por falha ou por syscall inexistente:

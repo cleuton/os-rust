@@ -5,6 +5,118 @@ at a time. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/), and the versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.0] - 2026-10-23
+
+Milestone 12: basic TCP/IP networking. The kernel finds the Realtek RTL8139 card
+through PCI and speaks Ethernet, ARP, IPv4, ICMP (echo) and TCP, all written in the
+project, with no network crate; user programs talk to it through TCP sockets.
+Syscall contract: version 8.
+
+### Added
+
+- PCI bus scan (`src/pci.rs`) and the RTL8139 driver by polling (`src/rtl8139.rs`),
+  with a receive ring and four transmit buffers in contiguous DMA memory below
+  4 GiB, no card interrupt.
+- The network stack (`src/net.rs` and `src/net/`): the Internet checksum, Ethernet
+  II, ARP (8-entry cache), IPv4, ICMP (echo only), simplified TCP (stop-and-wait,
+  1024 bytes per segment, 2048-byte buffers, in-order only, retransmission every
+  1 s, 1 s `TIME_WAIT`) and an internal loopback for `127.0.0.0/8` that works with
+  no card.
+- `rede` commands (the card, the address, the counters and the connections; with
+  three arguments it changes the address, in memory only) and `ping <ip>` at the
+  prompt.
+- Syscalls `SYS_TCP_LISTEN` (17), `SYS_TCP_ACCEPT` (18), `SYS_TCP_CONNECT` (19),
+  `SYS_TCP_SEND` (20), `SYS_TCP_RECV` (21), `SYS_TCP_CLOSE` (22) and
+  `SYS_TCP_TIMEOUT` (23), and the errors `ERR_TIMEDOUT` (`-17`), `ERR_CONNREFUSED`
+  (`-18`), `ERR_CONNRESET` (`-19`), `ERR_ADDRINUSE` (`-20`) and `ERR_NOBUFS` (`-21`).
+  Per-program sockets (up to 4) and 8 connections in the whole kernel.
+- Network waits that do not use CPU: the program stays blocked (a new scheduler
+  state) and the kernel sleeps if all of them wait; every wait has a timeout.
+  Sockets are closed when the program ends.
+- In the runtime library: `TcpListener`, `TcpStream`, `Ipv4` and `NetError`.
+- The `servidor` and `cliente` programs (`run servidor cliente`).
+- README (Portuguese and English): the **Networking in QEMU** section, with QEMU by
+  hand and `hostfwd` so the computer can talk to os-rust, and the note on real
+  hardware.
+- A networking chapter in `WALKTHROUGH.md` and `WALKTHROUGH.en.md`; a "Network
+  (TCP)" section in the programmer's guides.
+- Tests: `tests/rede_pilha.rs` (no hardware, with a fake card and an injected
+  clock), `tests/rede.rs` (QEMU's real card and the TCP echo through `guestfwd`),
+  `tests/rede_syscalls.rs`, `tests/rede_programas.rs` and `tests/rede_espera.rs`.
+
+### Changed
+
+- QEMU arguments in `Cargo.toml`: `-nic user,model=rtl8139` for `cargo run`, and the
+  same with `guestfwd=tcp:10.0.2.100:7-cmd:cat` for `cargo test`. No `hostfwd` in
+  `cargo run`. The disks' `snapshot=on` did not change.
+- Syscall contract: version 8 (`SYSCALLS.md` and `SYSCALLS.en.md`); the first free
+  number is now 24. `ERR_NODEV`, `ERR_MFILE`, `ERR_TYPE` and `ERR_BADF` also cover
+  the network syscalls.
+- Existing tests that hold for version 0.11.0 or contract 7 now check 0.12.0 and
+  contract 8: `contrato_declara_a_versao_8`, the version and contract ones in
+  `tests/escrita_no_disco.rs` and `tests/escrita_no_ramdisk.rs`, and the three about
+  the first free number (now 24).
+- Project version: 0.12.0.
+
+## [0.11.0] - 2026-10-23
+
+Milestone 11: ATA disk writing. `/disco` now **accepts writes** through the same
+FAT layer as `/ram`, and the kernel can create and remove directories. Syscall
+contract: version 7. It was the last milestone of the previous batch; networking
+came in Milestone 12.
+
+### Added
+
+- Writing in the ATA driver (`src/ata.rs`): `WRITE SECTORS` via PIO, one sector per
+  command, with `FLUSH CACHE` after **every** sector (its own limit,
+  `FLUSH_MAX_POLLS`), which makes the FAT write order hold on the medium.
+- FAT layer (`src/fat.rs`): `mkdir` (a one-cluster directory with `.` and `..`,
+  the parent's entry last) and `rmdir` (validates the chain and emptiness before
+  writing; entry first, cluster after), and `FatError::NotEmpty`.
+- `mkdir` and `rmdir` prompt commands, with the new messages (`diretorio nao
+  vazio`, `diretorio em uso`).
+- Syscalls `SYS_MKDIR` (15) and `SYS_RMDIR` (16) and the `ERR_NOTEMPTY` error
+  (`-16`); in the runtime library, `mkdir`, `rmdir` and `FsError::NotEmpty`.
+- The open-items registry also covers open directories (`rmdir` of an open
+  directory gives `ERR_BUSY`).
+- The `caderno` program, which appends the time to `/disco/caderno.txt` and shows
+  the persistence.
+- README (Portuguese and English): sections **Preservando o disco entre boots**
+  / **Keeping the disk between boots** (copy `target/imagens/disco.img` and run
+  QEMU by hand, without `snapshot=on`) and **Criando um pen drive bootável** /
+  **Creating a bootable USB stick** (`dd`, macOS, Windows and the limits).
+- A chapter on disk writing in `WALKTHROUGH.md` and `WALKTHROUGH.en.md`.
+- Tests: unit tests in `ata` and `fat` (including the simulated interruption of
+  `mkdir`, `rmdir` and of a create-with-append, at every failure point);
+  `tests/disco_ata.rs` (writing to the real disk); `tests/escrita_no_disco.rs`
+  (no cache in the kernel, prompt, syscalls, `caderno`, 50 cycles without leaks,
+  contract, guide, README and `snapshot=on` in `Cargo.toml`).
+
+### Changed
+
+- `/disco` is read and write. It keeps what was written to the image QEMU is
+  running on: with `snapshot=on` (`cargo run` and `cargo test`) that is discarded
+  when QEMU closes. `build.rs` and QEMU's arguments did not change.
+- Syscall contract at version 7 (`SYSCALLS.md`): `ERR_BUSY` also covers an open
+  directory and a volume root, `ERR_NOSPC` also covers `SYS_MKDIR`, and `ERR_ROFS`
+  only applies to a volume that does not accept writes (the **somente leitura**
+  phrase stays, for that case). Version 1 to 6 programs keep working.
+- Existing tests that held for contract version 6, version 0.10.0 or a read-only
+  `/disco`: `contrato_declara_a_versao_6` (now `contrato_declara_a_versao_7`),
+  `primeiro_numero_fora_do_contrato_continua_encerrando_so_o_programa` and
+  `numero_15_continua_encerrando_so_o_programa` (now `numero_17_...`, number `17`),
+  `a_versao_0_10_0_aparece_no_sobre` (now `..._0_11_0_...`),
+  `o_contrato_concorda_com_as_constantes`,
+  `o_disco_recusa_comandos_e_syscalls_de_escrita_e_nao_muda` (now
+  `o_disco_aceita_...`), `create_open_append_e_remove_devolvem_cada_erro_do_contrato_na_ordem`,
+  `disco_recusa_escrita_antes_de_olhar_o_caminho` (now
+  `disco_aceita_escrita_e_so_olha_o_caminho_depois`) and
+  `escrita_no_disco_e_recusada_e_volume_desconhecido_e_reportado` (now
+  `escrita_no_disco_funciona_e_volume_desconhecido_e_reportado`).
+- Comments that said `/disco` is read-only (`src/blockdev.rs`, `gravador`,
+  `apagador` and `Cargo.toml`); the programmer's guide follows.
+- Project version: `0.10.0` → `0.11.0`.
+
 ## [0.10.0] - 2026-10-23
 
 Milestone 10: writing to the ramdisk. The kernel can now **create, append to

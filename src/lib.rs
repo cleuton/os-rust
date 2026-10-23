@@ -20,11 +20,14 @@ pub mod gdt;
 pub mod interrupts;
 pub mod keyboard;
 pub mod memory;
+pub mod net;
 pub mod shell;
 pub mod panic;
 pub mod logo;
 pub mod elf;
+pub mod pci;
 pub mod programs;
+pub mod rtl8139;
 pub mod scheduler;
 pub mod syscall;
 pub mod task;
@@ -86,6 +89,7 @@ pub fn init(boot_info: &'static bootloader::BootInfo) {
         info.heap_size / 1024
     );
     fs::init();
+    net::init(boot_info.physical_memory_offset);
     syscall::init();
     serial_println!("[boot] syscall ativo");
 }

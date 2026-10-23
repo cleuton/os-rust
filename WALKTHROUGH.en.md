@@ -1798,3 +1798,258 @@ Seeking, overwriting in the middle and truncating, creating and removing
 directories, date and time in the entries, attributes, long names and any cache or
 delayed write. And the real disk: Milestone 11 takes the same layer to `/disco`,
 with sector writing in the ATA driver.
+
+## Milestone 11: ATA disk writing
+
+Milestone 10 taught the kernel to write to a volume that lives in memory.
+Milestone 11 takes **the same layer** to the real disk. The idea fits in one
+sentence: **the same writer as `/ram` now writes to `/disco`, sector by sector,
+with a cache flush after every sector; directories are born with one cluster; and
+keeping data is a manual step**. Almost nothing changes in `src/fat.rs` and
+`src/fs.rs` for `/disco` to become writable: what changes is the driver, which
+learns to write, and the fact that the disk lies about when a sector "is
+written".
+
+### Writing a sector: `WRITE SECTORS`
+
+It is reading in reverse (`src/ata.rs`, `AtaDisk::write_sector`). Under the
+controller lock and with interrupts disabled, like reading:
+
+1. select the disk and the 4 high bits of the LBA, and wait for the disk to drop
+   `BSY`;
+2. write the count (1) and the three LBA bytes, and send the `WRITE SECTORS`
+   command (`0x30`);
+3. wait for `DRQ`: the disk is ready to **receive** data;
+4. **write** 256 16-bit words to the data port (`outw`, the mirror of the read
+   path's `inw`);
+5. wait for `BSY` to clear and `DRQ` to drop: the disk accepted the sector.
+
+Every wait uses the same `wait` function as reading, with a limit on status
+reads: a disk that does not respond gives `Timeout`, never an infinite loop. An
+`lba` past the end of the disk returns `OutOfRange` **before** touching any port.
+
+### Why the disk cache must be flushed after every sector
+
+Finishing step 5 does not mean the sector is on the medium. The disk keeps what it
+receives in a **write cache** and takes it to the medium when it suits it, not
+necessarily in the order it received it. That would break the argument of
+Milestone 10: the write order of `Fat::append` (new cluster in the FAT, link, data,
+and only last the size) only protects the volume if each sector is already on the
+medium **before** the next one starts. If the disk reorders, a power loss can leave
+the new size on the medium without the data. So, after every sector, the driver
+sends `FLUSH CACHE` (`0xE7`) and waits for `BSY` to clear; only then does
+`write_sector` return `Ok`. The flush can take far longer than transferring 512
+bytes, so it has its own limit, `FLUSH_MAX_POLLS`, ten times the `MAX_POLLS` of the
+other waits. The cost is known and accepted: a large write makes dozens of writes
+with flushes, all inside the syscall, with interrupts disabled. Timer ticks may be
+lost, which only shortens the round-robin slice; the time, which comes from the
+RTC, is not affected.
+
+### Nothing else changes for `/disco` to become writable
+
+`fs::with_fat_write` already called `Fat::check_writable`, which asks the device
+`writable()`. `AtaDisk` now answers `true`, and that is it: creating, appending to
+and deleting files on `/disco` use the same code as `/ram`, with no second writer.
+An unavailable disk still gives `Unavailable` before any other error.
+
+### A new directory: `.` and `..`
+
+`Fat::mkdir` creates a directory of **one cluster** (one sector, 16 entries) that
+does not grow. The write order follows the same reasoning as `append`:
+
+1. check everything that can fail for lack of space **without writing anything**:
+   the name does not exist, the parent exists, the parent has a free slot and the
+   volume has a free cluster;
+2. mark the cluster as end of chain (`0xFFFF`) in both FAT copies;
+3. write the whole cluster sector: the `.` entry (points to the cluster itself),
+   the `..` entry (points to the parent, or to `0` when the parent is the volume
+   root) and zeros to the end;
+4. **last**, write the entry in the parent.
+
+The directory only exists for the reader once the parent's entry appears, and by
+then it is already complete. A stop before that leaves, at worst, a cluster used
+with no owner. The FAT reader skips `.` and `..` when listing, so `ls` of a new
+directory shows nothing. The simulated-interruption test runs `mkdir` with the
+device failing on the N-th write, for every N, and checks that the volume stays
+mountable and readable.
+
+### Removing a directory
+
+`Fat::rmdir` checks everything **before** changing anything: the entry is a live
+directory, the chain has no cycle and does not leave the volume, and the directory
+is empty in every sector (`.` and `..`, deleted entries and the end do not count;
+anything else, including a long-name entry the reader would ignore, is
+`NotEmpty`). Only then come the writes, in the order of `remove`: the parent's
+entry becomes deleted (`0xE5`), then the cluster is freed in both FAT copies. The
+entry goes first because a stop between the two leaves a cluster with no owner,
+and never a visible directory with a free chain.
+
+The kernel also refuses to remove a directory some program has open: the
+open-items registry from Milestone 10 now keeps the entry position of directories
+opened with `SYS_OPEN`, and `fs::rmdir` returns `Busy` if it finds the entry there
+(or if the target is a volume root). Without that, a reader could start reading a
+cluster that has already been reused.
+
+### From the prompt to the program
+
+`mkdir` and `rmdir` are prompt commands (`src/shell.rs`) and syscalls 15 and 16
+(`SYS_MKDIR`, `SYS_RMDIR`) of contract version 7. `SYS_MKDIR` uses no descriptor: it
+opens nothing. The `caderno` program shows it all together: it appends a line with
+the time to `/disco/caderno.txt` on every run and shows the file.
+
+### Why `cargo run` does not keep what you write
+
+QEMU's arguments in `Cargo.toml` attach the disk with `snapshot=on`: QEMU sends
+writes to a temporary file and the original image never changes. That is how
+`cargo test` can write to `/disco` freely without breaking anything, and why, with
+`cargo run`, what you write disappears when you close QEMU. `build.rs` still
+regenerates `target/imagens/disco.img` every time it runs. To **keep** data, you
+copy the image outside `target/` and boot QEMU by hand, without `snapshot=on`, over
+the copy (README, "Keeping the disk between boots"). If QEMU is killed in the
+middle of a write, every sector already written and flushed is in the file, and the
+write order keeps the volume consistent.
+
+### What was left out
+
+Directories that grow, more than 1 sector per cluster, seeking, overwriting in the
+middle, truncating, renaming and moving; date and time in entries, attributes and
+long names; block cache, delayed write and journaling; DMA, LBA48 and native SATA.
+And networking, which came in Milestone 12.
+
+## Milestone 12: basic TCP/IP networking
+
+Until Milestone 11 os-rust read and wrote files but did not talk to the world.
+Milestone 12 gives it a **minimal but complete** network stack, all written in
+the project. The idea fits in one sentence: **an Ethernet frame arrives from the
+card, goes up through ARP, IP and TCP to a socket, and the answer goes down the
+same way; without a card, `127.0.0.1` still lets two programs talk over TCP**.
+This chapter follows that path, bottom up.
+
+### Finding the card: the PCI bus
+
+A network card has no fixed address. PCI is the bus where it lives, and each
+device has a 256-byte configuration space, addressed by bus (0 to 255), device
+(0 to 31) and function (0 to 7). There are two I/O ports to read that space
+(`src/pci.rs`): write the address to `0xCF8` and read the data from `0xCFC`. The
+first register of every function gives the vendor and the model; a vendor of
+`0xFFFF` means "nothing here". The scan looks at function 0 of each device (and
+functions 1 to 7 only if the device declares several), with a fixed limit of
+reads, looking for `10EC:8139`, the Realtek RTL8139. Once the card is found, the
+kernel turns on, in the command register, access to its I/O ports and **bus
+mastering** (the permission for the card to do DMA) and reads BAR0, which gives
+the base port of its registers.
+
+### DMA and why the address is physical
+
+The RTL8139 does not receive frames through the CPU: it **writes them to memory
+by itself** (DMA). Since it does not go through the page table, it only
+understands **physical** addresses. That is why its buffers are page-aligned
+`static`s (`src/rtl8139.rs`), and at initialization the driver translates each
+page through the active page table and checks that the block is contiguous in
+physical memory and ends below 4 GiB (the ring register is 32 bits wide). If the
+check fails, the card is declared "unavailable" and the kernel boots anyway.
+
+### The receive ring and the four send buffers
+
+The card writes each received frame into an 8 KiB **ring**, preceded by 4 bytes
+(`status` and `length`). The driver remembers where it stopped reading and tells
+the card how much it has read. With the `WRAP` bit on, the card lets the last
+frame run past the end of the ring, which is why the buffer has 1536 bytes of
+slack: the driver never has to stitch a split frame. To send, there are four
+1536-byte buffers used in round-robin: write the buffer's physical address and
+then the frame size, and the card gives the buffer back when it finishes. No card
+interrupt is used (`IMR = 0`): the kernel **asks** whether something arrived.
+
+### The layers and the path of a frame
+
+```text
+card  ->  Ethernet  ->  ARP
+                    \->  IPv4  ->  ICMP (echo)
+                              \->  TCP  ->  program's socket
+```
+
+Each layer is a file in `src/net/` that only knows how to build and read bytes
+(`eth.rs`, `arp.rs`, `ip.rs`, `icmp.rs`, `tcp.rs`): **Ethernet** says who sends,
+who receives and what is inside; **IPv4** says from where to where, and checks
+version, size, checksum and whether the packet is fragmented (the stack does not
+reassemble fragments); **ICMP** only answers echo, which is `ping`; **TCP**
+delivers a reliable sequence of bytes. The answer goes down the same path. For
+`127.0.0.1` the packet never reaches Ethernet: it returns to the stack itself
+through an 8-slot queue, and that is why the loopback works without a card.
+
+### ARP: from IP to MAC
+
+To send a packet to someone on the same network you need that person's physical
+address (MAC). ARP asks everyone "who has IP X?", and the owner answers. The
+answers go into an 8-entry cache (the oldest leaves when it is full). Anyone
+outside the subnet is reached through the gateway's MAC. While the answer does not
+come, **one** packet waits; the request is repeated up to 3 times, once per
+second, and then the packet is dropped (TCP retransmits it).
+
+### The checksum
+
+IP, ICMP and TCP protect their headers with the same computation (RFC 1071): sum
+the data as 16-bit words, fold the carry back in and invert. Whoever checks sums
+everything, **including** the checksum field, and must get zero. TCP includes in
+the computation a "pseudo-header" with the IP addresses, so a segment delivered to
+the wrong destination is detected (`src/net/checksum.rs`).
+
+### TCP: the handshake, stop-and-wait and retransmission
+
+TCP numbers every byte; the receiver acknowledges how far it got (ACK). The
+connection is born with the **three-way handshake**: the connecting side sends
+`SYN`, the server answers `SYN+ACK`, and the first confirms with `ACK`. The states
+of each end (`LISTEN`, `SYN_SENT`, ..., `TIME_WAIT`) are in `src/net/tcp.rs`.
+
+This version is deliberately simple: **one unacknowledged segment at a time** (up
+to 1024 bytes). Only when it is acknowledged does the next one go out. If the
+acknowledgement does not come in 100 ticks (1 s), the same segment is resent, at
+most 5 times; then the connection drops with `ERR_TIMEDOUT`. The receiver only
+accepts what arrives **in order**: an early or repeated segment is discarded and
+the last in-order byte is acknowledged again. The window it advertises is the free
+space of the buffer; with the peer's window at zero, it probes with 1 byte every
+second. Sequence numbers are 32 bits and **wrap around**: every comparison uses
+wrapping arithmetic (`seq_lt`). Closing the connection takes a `FIN` in each
+direction, and the final state (`TIME_WAIT`), which in the standard lasts minutes,
+lasts 1 s here, a documented shortcut.
+
+### Why the stack runs by polling, at safe points
+
+Like ATA and the RTC, the network does not use a card interrupt. What moves the
+stack is `net::poll()`: it receives the frames the card already has, empties the
+loopback and fires the timers (retransmission, ARP, `TIME_WAIT`). It **never** runs
+inside an IRQ handler (a ring 0 handler neither allocates nor takes a lock), but
+at the same safe points where the kernel already looked at the keyboard: the
+prompt's idle loop, the scheduler (blocking, `yield`, a tick coming from ring 3,
+back in the idle loop) and inside the network syscalls and commands. Nothing in
+the stack allocates on the heap: eight connection blocks, 2048-byte buffers and
+the loopback queue are `static`.
+
+To prove the state machine without waiting real seconds, the stack is generic over
+the card (`Nic`) and takes the time as an argument. The tests use a fake card and
+an injected clock: retransmission at exactly 100 ticks and the drop after the
+fifth come from arithmetic, not from a `sleep`.
+
+### How a task blocks on the network
+
+`SYS_TCP_ACCEPT`, `SYS_TCP_CONNECT`, `SYS_TCP_RECV` and `SYS_TCP_SEND` (with a full
+buffer) wait without using CPU, with the same design as `SYS_READ_LINE`. The
+syscall tries the operation; if it cannot, it stores a `PendingNet` in the task
+(which operation, which socket, the already validated pointer, the deadline) and
+the task goes to the `WaitingNet` state: the scheduler does not pick it. At each
+turn of `run_next`, after moving the stack, it asks every waiting task whether the
+request can proceed (`net::ready`: data arrived, a connection appeared, room
+opened, the connection dropped or the deadline passed); if so, it goes back to
+`Ready`. The result is only computed when its address space is activated, as in
+`deliver_line`: that is where the bytes are copied into the program's buffer and
+the value goes into `rax`. If all programs wait, the kernel sleeps in `hlt` until
+the next tick. Each task has its own table of 4 sockets, which is closed when the
+task ends, for any reason.
+
+### What was left out
+
+UDP, DHCP, DNS, IPv6, TLS, IP fragmentation, IP and TCP options, congestion
+control, a sliding window with several segments in flight, more than one card and
+protection against attacks (the initial sequence number is predictable). Real
+hardware was not tested. And a real HTTP: the `servidor` always returns the same
+minimal page.

@@ -5,8 +5,10 @@
 //! biblioteca esconde as syscalls atrás de tipos de Rust: [`File`] e [`Dir`]
 //! fecham o descritor sozinhos quando saem de escopo, e os códigos de erro
 //! viram [`FsError`]. [`File`] e [`Dir`] só leem; para escrever há
-//! [`FileWriter`] (criar e acrescentar ao fim) e [`remove`]. Só o volume
-//! `/ram` aceita escrita; `/disco` é somente leitura.
+//! [`FileWriter`] (criar e acrescentar ao fim), [`remove`], [`mkdir`] e
+//! [`rmdir`]. Os volumes `/ram` e `/disco` aceitam escrita; o `/ram` volta ao
+//! inicial a cada boot, e o `/disco` só persiste se o QEMU roda sem
+//! `snapshot=on` (o `cargo run` descarta o que se grava).
 //!
 //! Caminhos: `/<volume>/<componente>/...`, com os volumes `/ram` e `/disco`,
 //! nomes 8.3 (até 8 caracteres, ponto e até 3 de extensão), sem diferenciar
@@ -15,7 +17,8 @@
 
 use abi::{
     DIR_ENTRY_SIZE, ERR_BADF, ERR_BUSY, ERR_EXIST, ERR_FAULT, ERR_INVAL, ERR_IO, ERR_MFILE,
-    ERR_NAMETOOLONG, ERR_NODEV, ERR_NOENT, ERR_NOSPC, ERR_ROFS, ERR_TYPE, IO_MAX_LEN, KIND_DIR,
+    ERR_NAMETOOLONG, ERR_NODEV, ERR_NOENT, ERR_NOSPC, ERR_NOTEMPTY, ERR_ROFS, ERR_TYPE, IO_MAX_LEN,
+    KIND_DIR,
 };
 
 use crate::sys;
@@ -47,10 +50,14 @@ pub enum FsError {
     Exists,
     /// O volume (ou o diretório) não tem mais espaço.
     NoSpace,
-    /// O volume não aceita escrita (por exemplo, `/disco`).
+    /// O volume não aceita escrita (por exemplo, um volume com mais de 1
+    /// setor por cluster).
     ReadOnly,
-    /// O arquivo está aberto por algum programa e não pode ser apagado.
+    /// O arquivo ou diretório está aberto por algum programa (ou é a raiz de
+    /// um volume) e não pode ser apagado.
     Busy,
+    /// `rmdir` de um diretório que ainda tem entradas.
+    NotEmpty,
 }
 
 impl FsError {
@@ -70,6 +77,7 @@ impl FsError {
             ERR_NOSPC => FsError::NoSpace,
             ERR_ROFS => FsError::ReadOnly,
             ERR_BUSY => FsError::Busy,
+            ERR_NOTEMPTY => FsError::NotEmpty,
             // Um código que este contrato não conhece (de uma versão futura).
             _ => FsError::Io,
         }
@@ -91,7 +99,8 @@ impl core::fmt::Display for FsError {
             FsError::Exists => "ja existe",
             FsError::NoSpace => "sem espaco",
             FsError::ReadOnly => "volume somente leitura",
-            FsError::Busy => "arquivo em uso",
+            FsError::Busy => "em uso",
+            FsError::NotEmpty => "diretorio nao vazio",
         };
         f.write_str(text)
     }
@@ -187,6 +196,20 @@ impl Drop for FileWriter {
 /// não é apagado: o erro é [`FsError::Busy`]. Feche-o antes.
 pub fn remove(path: &str) -> Result<(), FsError> {
     check(sys::remove(path.as_bytes())).map(|_| ())
+}
+
+/// Cria o diretório `path`, vazio. Não é recursivo: o pai precisa existir
+/// ([`FsError::NotFound`] senão). Um nome que já existe é [`FsError::Exists`].
+/// O diretório ocupa um cluster e não cresce: cabem 14 entradas.
+pub fn mkdir(path: &str) -> Result<(), FsError> {
+    check(sys::mkdir(path.as_bytes())).map(|_| ())
+}
+
+/// Remove o diretório `path`. Só remove diretório vazio
+/// ([`FsError::NotEmpty`] senão), que ninguém tem aberto nem é a raiz de um
+/// volume ([`FsError::Busy`]).
+pub fn rmdir(path: &str) -> Result<(), FsError> {
+    check(sys::rmdir(path.as_bytes())).map(|_| ())
 }
 
 /// Um diretório aberto para listagem. Fecha o descritor ao sair de escopo.

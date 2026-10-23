@@ -6,6 +6,13 @@
 //! ler 256 palavras de 16 bits da porta de dados. "PIO" quer dizer que é o
 //! processador quem copia os bytes, uma palavra por vez, sem DMA.
 //!
+//! Gravar é a mesma conversa ao contrário: `WRITE SECTORS`, esperar `DRQ` e
+//! **escrever** as 256 palavras. Mas o disco guarda o que recebe num cache e
+//! só o leva à mídia quando quer; por isso, depois de **cada** setor, o
+//! driver manda `FLUSH CACHE` e só então diz que gravou. É isso que faz a
+//! ordem das escritas do sistema de arquivos valer no disco de verdade: o
+//! setor anterior já está na mídia antes de o próximo começar.
+//!
 //! Duas escolhas mantêm o driver pequeno:
 //!
 //! - **Polling, sem interrupção.** O bit `nIEN` do registrador de controle
@@ -20,9 +27,10 @@
 //! **Atomicidade.** A leitura de um setor é uma sequência de acessos às
 //! portas que não pode ser intercalada com outra: se outro código mexesse no
 //! controlador no meio, os registradores ficariam inconsistentes. O kernel não
-//! é preemptivo (o timer só troca de programa quando interrompe ring 3), mas a
-//! regra fica explícita no código: a sequência inteira roda com interrupções
-//! desligadas e sob uma trava do controlador.
+//! é trocado no meio (a multitarefa é preemptiva, mas o timer só troca de
+//! programa quando interrompe ring 3), mas a regra fica explícita no código:
+//! a sequência inteira roda com interrupções desligadas e sob uma trava do
+//! controlador.
 
 use spin::Mutex;
 use x86_64::instructions::interrupts;
@@ -33,6 +41,11 @@ use crate::blockdev::{BlockDevice, BlockError, SECTOR_SIZE};
 /// Quantas leituras do registrador de status cada espera faz, no máximo, antes
 /// de desistir.
 pub const MAX_POLLS: u32 = 100_000;
+
+/// Quantas leituras do registrador de status a **descarga do cache** faz, no
+/// máximo, antes de desistir. É 10 vezes [`MAX_POLLS`]: levar o cache à mídia
+/// pode demorar bem mais que transferir 512 bytes.
+pub const FLUSH_MAX_POLLS: u32 = 10 * MAX_POLLS;
 
 /// Status: o disco está ocupado.
 const STATUS_BSY: u8 = 0x80;
@@ -45,6 +58,10 @@ const STATUS_DF: u8 = 0x20;
 
 /// Comando `READ SECTORS` (LBA28).
 const CMD_READ_SECTORS: u8 = 0x20;
+/// Comando `WRITE SECTORS` (LBA28).
+const CMD_WRITE_SECTORS: u8 = 0x30;
+/// Comando `FLUSH CACHE`: leva à mídia o que o disco ainda guarda no cache.
+const CMD_FLUSH_CACHE: u8 = 0xE7;
 /// Comando `IDENTIFY DEVICE`.
 const CMD_IDENTIFY: u8 = 0xEC;
 /// Registrador de controle: bit 1 (`nIEN`) desliga a IRQ do disco.
@@ -149,6 +166,14 @@ fn inw(port: u16) -> u16 {
     unsafe { Port::<u16>::new(port).read() }
 }
 
+fn outw(port: u16, value: u16) {
+    // SAFETY: escreve na porta de dados do controlador IDE (`io_base`); só é
+    // chamada depois de o disco sinalizar `DRQ` (pronto para receber os
+    // dados de um `WRITE SECTORS`), sob a trava do controlador. O efeito é só
+    // entregar 16 bits ao disco, nunca mexer em memória do kernel.
+    unsafe { Port::<u16>::new(port).write(value) }
+}
+
 /// Trava do controlador: uma conversa com o disco por vez.
 static CONTROLLER: Mutex<()> = Mutex::new(());
 
@@ -231,6 +256,10 @@ impl BlockDevice for AtaDisk {
         self.sectors
     }
 
+    fn writable(&self) -> bool {
+        true
+    }
+
     fn read_sector(&self, lba: u32, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlockError> {
         if lba >= self.sectors {
             return Err(BlockError::OutOfRange);
@@ -255,6 +284,49 @@ impl BlockDevice for AtaDisk {
             for pair in buf.chunks_exact_mut(2) {
                 pair.copy_from_slice(&inw(io).to_le_bytes());
             }
+            Ok(())
+        })
+        .map_err(BlockError::from)
+    }
+
+    fn write_sector(&self, lba: u32, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlockError> {
+        // Fora do disco: recusa sem tocar em nenhuma porta.
+        if lba >= self.sectors {
+            return Err(BlockError::OutOfRange);
+        }
+        // Mesma atomicidade da leitura: trava do controlador e interrupções
+        // desligadas durante toda a sequência, inclusive a descarga.
+        let _controller = CONTROLLER.lock();
+        interrupts::without_interrupts(|| -> Result<(), AtaError> {
+            let io = self.bus.io_base();
+            select(self.bus, self.drive, (lba >> 24) as u8);
+            // Disco livre antes de mandar o comando.
+            wait(|| inb(self.bus.control()), |_| true, MAX_POLLS)?;
+            outb(io + 2, 1); // um setor
+            outb(io + 3, lba as u8);
+            outb(io + 4, (lba >> 8) as u8);
+            outb(io + 5, (lba >> 16) as u8);
+            outb(io + 7, CMD_WRITE_SECTORS);
+            for _ in 0..4 {
+                inb(self.bus.control());
+            }
+            wait(|| inb(self.bus.control()), |s| s & STATUS_DRQ != 0, MAX_POLLS)?;
+            for pair in buf.chunks_exact(2) {
+                outw(io, u16::from_le_bytes([pair[0], pair[1]]));
+            }
+            for _ in 0..4 {
+                inb(self.bus.control());
+            }
+            // O disco largou `BSY` e não pede mais dados: aceitou o setor.
+            wait(|| inb(self.bus.control()), |s| s & STATUS_DRQ == 0, MAX_POLLS)?;
+            // Só agora o setor está no cache do disco. A descarga o leva à
+            // mídia antes de dizermos que gravou (os 400 ns de espera evitam
+            // ler um `BSY` que o disco ainda não ligou).
+            outb(io + 7, CMD_FLUSH_CACHE);
+            for _ in 0..4 {
+                inb(self.bus.control());
+            }
+            wait(|| inb(self.bus.control()), |_| true, FLUSH_MAX_POLLS)?;
             Ok(())
         })
         .map_err(BlockError::from)
@@ -347,6 +419,44 @@ mod tests {
         );
         assert_eq!(result, Err(AtaError::Timeout));
         assert_eq!(reads.get(), 0);
+    }
+
+    #[test_case]
+    fn a_descarga_tem_limite_proprio_dez_vezes_maior() {
+        assert_eq!(FLUSH_MAX_POLLS, 10 * MAX_POLLS);
+        // Uma descarga que demora mais leituras do que o limite comum ainda
+        // termina com `FLUSH_MAX_POLLS`, e estoura com o limite comum. (Não
+        // gasta o limite inteiro: cada leitura de teste custa tempo no QEMU.)
+        let demora = MAX_POLLS + 50;
+        let pronto_depois = |max: u32| {
+            let reads = Cell::new(0u32);
+            wait(
+                || {
+                    reads.set(reads.get() + 1);
+                    if reads.get() < demora { STATUS_BSY } else { 0x50 }
+                },
+                |_| true,
+                max,
+            )
+        };
+        assert_eq!(pronto_depois(MAX_POLLS), Err(AtaError::Timeout));
+        assert_eq!(pronto_depois(FLUSH_MAX_POLLS), Ok(0x50));
+    }
+
+    #[test_case]
+    fn espera_do_fim_da_escrita_termina_quando_o_disco_nao_pede_mais_dados() {
+        let reads = Cell::new(0u32);
+        let result = wait(
+            || {
+                reads.set(reads.get() + 1);
+                // Primeiro ainda pede dados, depois fica livre.
+                if reads.get() < 3 { STATUS_DRQ } else { 0x50 }
+            },
+            |s| s & STATUS_DRQ == 0,
+            1000,
+        );
+        assert_eq!(result, Ok(0x50));
+        assert_eq!(reads.get(), 3);
     }
 
     #[test_case]

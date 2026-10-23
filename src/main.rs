@@ -33,6 +33,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial_println!("[boot] prompt pronto");
 
     loop {
+        // A pilha de rede também anda na espera ociosa do prompt: é daqui que
+        // uma conexão que ainda está terminando acaba depois do `run`.
+        os_rust::net::poll();
         shell::poll_keyboard();
 
         // `enable_and_hlt` executa `sti; hlt` como uma única instrução
