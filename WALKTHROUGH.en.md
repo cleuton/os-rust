@@ -2046,6 +2046,16 @@ the value goes into `rax`. If all programs wait, the kernel sleeps in `hlt` unti
 the next tick. Each task has its own table of 4 sockets, which is closed when the
 task ends, for any reason.
 
+### FTP on top of the sockets (0.12.1)
+
+Version 0.12.1 does not change the kernel: `ftpd` is a user program that proves this milestone's sockets are enough for a real protocol, and that the path to running programs gained a shortcut (an ELF made on the computer reaches `/disco` without rebuilding the image).
+
+- **Why two connections.** FTP separates control (commands and answers, port 21) from data (the contents of a file or of a listing, port 2100). That way a long transfer does not block the channel through which the client can send `QUIT`, and each transfer ends with the closing of the data connection, which makes a length in the protocol unnecessary.
+- **Why passive mode only.** In active mode the server would have to connect back to the client, and QEMU's user network does not forward that in a simple way. In passive mode the client connects to both ports, and QEMU's `hostfwd` covers both.
+- **Why one data listener per transfer.** A program has 4 sockets: the listener on 21, the control connection, the listener on 2100 and the data connection. Keeping the listener between commands would leave state that survives failures, and two listeners on the same port give `AddrInUse`. So `PASV` opens the listener, and the data command consumes and closes it, whether it worked or not.
+- **Why one session at a time.** For the same 4 sockets: two clients would need 6. Whoever connects during a session waits in the kernel's accept queue.
+- **Why timeouts and a `SITE EXIT`.** There is no infinite wait and no Ctrl+C, and `run` holds the prompt until the program ends. So the server gives up by itself (30 s with no client, 30 s without a command, 10 s per data wait) and the client can send `SITE EXIT` to get the prompt back.
+
 ### What was left out
 
 UDP, DHCP, DNS, IPv6, TLS, IP fragmentation, IP and TCP options, congestion

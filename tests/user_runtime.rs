@@ -625,3 +625,106 @@ fn nomes_de_programas_sao_unicos_e_ordenados() {
     // Em ordem alfabética.
     assert!(nomes.windows(2).all(|par| par[0] < par[1]));
 }
+
+// ---------------------------------------------------------------------------
+// Programas fora do repositório: os guias ensinam a receita real
+// ---------------------------------------------------------------------------
+
+const GUIA_EN: &str = include_str!("../PROGRAMMERS_GUIDE.md");
+const CONFIG_CARGO: &str = include_str!("../.cargo/config.toml");
+const BUILD_RS_PROGRAMAS: &str = include_str!("../programs/build.rs");
+const CARGO_RAIZ: &str = include_str!("../Cargo.toml");
+const CHANGELOG: &str = include_str!("../CHANGELOG.md");
+const CHANGELOG_EN: &str = include_str!("../CHANGELOG.en.md");
+
+/// O `src/main.rs` do projeto externo `saudacao`: a fonte da verdade do
+/// programa que os dois guias mostram.
+const SAUDACAO_RS: &str = r##"#![no_std]
+#![no_main]
+
+use runtime::{entry, print, println, read_line};
+
+entry!(main);
+
+fn main() -> i32 {
+    print!("seu nome: ");
+    let mut buffer = [0u8; 128];
+    let nome = read_line(&mut buffer);
+    println!("ola, {}! este programa foi feito fora do os-rust.", nome);
+    0
+}
+"##;
+
+const LINHA_DO_LINKER: &str = r#"println!("cargo:rustc-link-arg=-T{manifest}/link.ld");"#;
+
+#[test_case]
+fn os_guias_ensinam_programas_fora_do_repositorio() {
+    for (nome, guia, titulo) in [
+        ("GUIA_DO_PROGRAMADOR.md", GUIA, "## Programas fora do repositório"),
+        ("PROGRAMMERS_GUIDE.md", GUIA_EN, "## Programs outside the repository"),
+    ] {
+        assert!(guia.contains(titulo), "{}: falta o titulo `{}`", nome, titulo);
+        for termo in [
+            "cargo new saudacao --vcs none",
+            "rust-toolchain.toml",
+            "x86_64-os_rust_user.json",
+            "link.ld",
+            "build-std",
+            "cargo build --release --target x86_64-os_rust_user.json",
+            "target/x86_64-os_rust_user/release/saudacao",
+            "curl -T target/x86_64-os_rust_user/release/saudacao ftp://127.0.0.1:2121/disco/saudacao",
+            "run /disco/saudacao",
+            "DELE /disco/saudacao",
+            "SITE EXIT",
+            "65536",
+        ] {
+            assert!(guia.contains(termo), "{}: nao cita `{}`", nome, termo);
+        }
+    }
+}
+
+#[test_case]
+fn o_guia_copia_a_configuracao_real_do_cargo() {
+    // As linhas do bloco `[unstable]` do `.cargo/config.toml` de verdade.
+    let mut linhas: Vec<&str> = Vec::new();
+    let mut dentro = false;
+    for linha in CONFIG_CARGO.lines() {
+        let linha = linha.trim();
+        if linha.starts_with('[') {
+            dentro = linha == "[unstable]";
+            continue;
+        }
+        if dentro && !linha.is_empty() && !linha.starts_with('#') {
+            linhas.push(linha);
+        }
+    }
+    assert!(linhas.len() >= 3, "o bloco [unstable] real deveria ter ao menos 3 linhas");
+    assert!(
+        BUILD_RS_PROGRAMAS.contains(LINHA_DO_LINKER),
+        "programs/build.rs nao tem mais a linha do linker"
+    );
+    for (nome, guia) in [("GUIA_DO_PROGRAMADOR.md", GUIA), ("PROGRAMMERS_GUIDE.md", GUIA_EN)] {
+        for linha in &linhas {
+            assert!(guia.contains(linha), "{}: falta a linha `{}` do bloco [unstable]", nome, linha);
+        }
+        assert!(guia.contains(LINHA_DO_LINKER), "{}: falta a linha do linker do build.rs", nome);
+    }
+}
+
+#[test_case]
+fn o_programa_saudacao_aparece_igual_nos_dois_guias() {
+    for (nome, guia) in [("GUIA_DO_PROGRAMADOR.md", GUIA), ("PROGRAMMERS_GUIDE.md", GUIA_EN)] {
+        assert!(guia.contains(SAUDACAO_RS.trim_end()), "{}: o codigo de saudacao nao aparece igual", nome);
+    }
+}
+
+#[test_case]
+fn os_guias_nao_mudam_a_versao() {
+    // A mudança é só documentação: nada de versão nova nem de CHANGELOG.
+    for (nome, texto) in [("Cargo.toml", CARGO_RAIZ), ("CHANGELOG.md", CHANGELOG), ("CHANGELOG.en.md", CHANGELOG_EN)] {
+        let minusculas: alloc::string::String = texto.chars().map(|c| c.to_ascii_lowercase()).collect();
+        assert!(!minusculas.contains("programas fora"), "{} fala de programas fora", nome);
+        assert!(!minusculas.contains("outside the repository"), "{} fala de outside the repository", nome);
+    }
+    assert!(CARGO_RAIZ.contains("version = \"0.12.1\""), "a versao do projeto mudou");
+}

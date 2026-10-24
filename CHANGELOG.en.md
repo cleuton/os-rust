@@ -5,6 +5,42 @@ at a time. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/), and the versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.12.1] - 2026-10-24
+
+Maintenance release: brings `ftpd` to Milestone 12. There is no new milestone, no
+kernel change and no contract change (it stays at version 8). `ftpd` is a user
+program that translates FTP commands into file calls, on top of the TCP sockets, to
+send files to os-rust and get them back without rebuilding.
+
+### Added
+
+- `ftpd` program (`programs/src/bin/ftpd.rs`, embedded in the boot image): an FTP
+  server with one session at a time, passive mode only (`PASV` and `EPSV`), no
+  password, on ports 21 (control) and 2100 (data). Commands: `USER`, `PASS`,
+  `QUIT`, `NOOP`, `SYST`, `TYPE`, `PWD`, `CWD`, `CDUP`, `LIST`, `NLST`, `RETR`,
+  `STOR`, `SIZE`, `DELE`, `MKD`, `RMD` and `SITE EXIT`. It has a virtual root `/`
+  with the folders `ram` and `disco`, a `STOR` that never overwrites and deletes
+  the partial file if it fails, and timeouts on every wait (30 s with no client,
+  30 s without a command, 10 s per data wait).
+- README (Portuguese and English): **FTP server** section, with the step by step
+  without rebuilding, the QEMU command by hand with `hostfwd`, `curl` and `ftplib`
+  examples, the limits and the warnings; `ftpd` in the program list.
+- "Example program 15: ftpd" in the programmer's guides and a section about FTP in
+  the Milestone 12 chapter of the walkthrough (`WALKTHROUGH.md` and
+  `WALKTHROUGH.en.md`).
+- Tests: `tests/ftpd.rs`, `tests/ftpd_espera.rs` and `tests/ftpd_ocioso.rs`, with
+  an FTP client that runs inside QEMU, in the scheduler hook.
+
+### Changed
+
+- Version to `0.12.1` in `Cargo.toml` (the boot, `sobre` and error-screen
+  identification follow).
+- The tests that pinned version `0.12.0` now check `0.12.1`:
+  `a_versao_0_12_1_aparece_e_o_que_existia_continua_igual`,
+  `a_versao_0_12_1_aparece_no_boot_e_no_sobre` and `a_versao_0_12_1_aparece_no_sobre`,
+  and the version checks of the README and `Cargo.toml` tests in
+  `tests/rede_programas.rs`.
+
 ## [0.12.0] - 2026-10-23
 
 Milestone 12: basic TCP/IP networking. The kernel finds the Realtek RTL8139 card

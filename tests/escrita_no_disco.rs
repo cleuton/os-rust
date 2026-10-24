@@ -840,9 +840,9 @@ fn o_readme_ensina_preservar_o_disco_e_o_pen_drive() {
 // ---------------------------------------------------------------------------
 
 #[test_case]
-fn a_versao_0_12_0_aparece_no_boot_e_no_sobre() {
-    assert_eq!(os_rust::VERSION, "os-rust v0.12.0");
-    exige(&rodar_comando("sobre"), "os-rust v0.12.0");
+fn a_versao_0_12_1_aparece_no_boot_e_no_sobre() {
+    assert_eq!(os_rust::VERSION, "os-rust v0.12.1");
+    exige(&rodar_comando("sobre"), "os-rust v0.12.1");
 }
 
 const CONTRATO: &str = include_str!("../SYSCALLS.md");

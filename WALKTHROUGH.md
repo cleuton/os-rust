@@ -2045,6 +2045,16 @@ são copiados para o buffer do programa e o valor entra em `rax`. Se todos os
 programas esperam, o kernel dorme em `hlt` até o próximo tick. Cada tarefa tem a
 sua tabela de 4 sockets, que é fechada quando a tarefa termina, por qualquer motivo.
 
+### O FTP por cima dos sockets (0.12.1)
+
+A versão 0.12.1 não muda o kernel: o `ftpd` é um programa de usuário que prova que os sockets deste marco bastam para um protocolo de verdade, e que o caminho até executar programas ganhou um atalho (um ELF feito no computador chega ao `/disco` sem refazer a imagem).
+
+- **Por que duas conexões.** O FTP separa o controle (comandos e respostas, porta 21) dos dados (o conteúdo de um arquivo ou de uma listagem, porta 2100). Assim uma transferência longa não bloqueia o canal por onde o cliente pode mandar `QUIT`, e cada transferência termina com o fechamento da conexão de dados, o que dispensa um tamanho no protocolo.
+- **Por que só o modo passivo.** No modo ativo o servidor teria de conectar de volta ao cliente, e a rede de usuário do QEMU não encaminha isso de forma simples. No passivo o cliente conecta nas duas portas, e o `hostfwd` do QEMU cobre ambas.
+- **Por que um ouvinte de dados por transferência.** Um programa tem 4 sockets: a escuta da 21, o controle, a escuta da 2100 e os dados. Guardar o ouvinte entre comandos deixaria estado que sobrevive a falhas, e duas escutas na mesma porta dão `AddrInUse`. Então `PASV` abre o ouvinte, e o comando de dados o consome e o fecha, dê certo ou não.
+- **Por que uma sessão por vez.** Pelos mesmos 4 sockets: com dois clientes seriam 6. Quem conecta durante uma sessão espera na fila de aceitação do kernel.
+- **Por que tempos e um `SITE EXIT`.** Não existe espera infinita nem Ctrl+C, e `run` ocupa o prompt até o programa terminar. Então o servidor desiste sozinho (30 s sem cliente, 30 s sem comando, 10 s por espera de dados) e o cliente pode mandar `SITE EXIT` para devolver o prompt.
+
 ### O que ficou de fora
 
 UDP, DHCP, DNS, IPv6, TLS, fragmentação de IP, opções do IP e do TCP, controle de

@@ -7,6 +7,40 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.12.1] - 2026-10-24
+
+Versão de manutenção: traz o `ftpd` ao Marco 12. Não há marco novo, não há mudança
+de kernel e não há mudança de contrato (continua na versão 8). O `ftpd` é um
+programa de usuário que traduz comandos FTP em chamadas de arquivo, por cima dos
+sockets TCP, para enviar arquivos ao os-rust e recebê-los de volta sem rebuildar.
+
+### Adicionado
+
+- Programa `ftpd` (`programs/src/bin/ftpd.rs`, embutido na imagem de boot): servidor
+  FTP de uma sessão por vez, só no modo passivo (`PASV` e `EPSV`), sem senha, nas
+  portas 21 (controle) e 2100 (dados). Comandos: `USER`, `PASS`, `QUIT`, `NOOP`,
+  `SYST`, `TYPE`, `PWD`, `CWD`, `CDUP`, `LIST`, `NLST`, `RETR`, `STOR`, `SIZE`,
+  `DELE`, `MKD`, `RMD` e `SITE EXIT`. Tem uma raiz virtual `/` com as pastas `ram` e
+  `disco`, `STOR` que nunca sobrescreve e apaga o arquivo parcial se falha, e tempos
+  em toda espera (30 s sem cliente, 30 s sem comando, 10 s por espera de dados).
+- README (português e inglês): seção **Servidor FTP** (**FTP server**), com o
+  passo a passo sem rebuildar, o comando do QEMU à mão com `hostfwd`, exemplos de
+  `curl` e de `ftplib`, os limites e os avisos; `ftpd` na lista de programas.
+- "Programa de exemplo 15: ftpd" nos guias do programador e uma seção sobre o FTP no
+  capítulo do Marco 12 do percurso (`WALKTHROUGH.md` e `WALKTHROUGH.en.md`).
+- Testes: `tests/ftpd.rs`, `tests/ftpd_espera.rs` e `tests/ftpd_ocioso.rs`, com um
+  cliente FTP que roda dentro do QEMU, no gancho do escalonador.
+
+### Alterado
+
+- Versão para `0.12.1` em `Cargo.toml` (a identificação do boot, do `sobre` e das
+  telas de erro acompanham).
+- Os testes que fixavam a versão `0.12.0` passam a conferir `0.12.1`:
+  `a_versao_0_12_1_aparece_e_o_que_existia_continua_igual`,
+  `a_versao_0_12_1_aparece_no_boot_e_no_sobre` e `a_versao_0_12_1_aparece_no_sobre`,
+  e as conferências de versão dos testes do README e do `Cargo.toml` em
+  `tests/rede_programas.rs`.
+
 ## [0.12.0] - 2026-10-23
 
 Marco 12: rede básica com TCP/IP. O kernel acha a placa Realtek RTL8139 pelo PCI e
