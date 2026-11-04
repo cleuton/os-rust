@@ -1,0 +1,10 @@
+[build]
+target = "x86_64-proto_os.json"
+
+[unstable]
+build-std = ["core", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
+json-target-spec = true
+
+[target.'cfg(target_os = "none")']
+runner = "bootimage runner"
