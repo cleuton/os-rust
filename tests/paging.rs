@@ -1,37 +1,39 @@
 //! Teste de integração de tradução de endereços e criação de
-//! mapeamentos: traduzir um endereço já mapeado pelo bootloader, traduzir
-//! um endereço não mapeado, e mapear uma página nova (incluindo o erro
-//! explícito de mapear a mesma página duas vezes).
+//! mapeamentos (User Story 3, cenários 1-3): traduzir um endereço já
+//! mapeado pelo bootloader, traduzir um endereço não mapeado, e mapear
+//! uma página nova (incluindo o erro explícito de mapear a mesma página
+//! duas vezes) (FR-007, FR-008, FR-009).
 
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
-#![test_runner(os_rust::test_runner)]
+#![test_runner(proto_os::test_runner)]
 #![reexport_test_harness_main = "test_main"]
 
 use bootloader::{entry_point, BootInfo};
 use core::panic::PanicInfo;
-use os_rust::memory::{self, BootInfoFrameAllocator};
+use proto_os::memory::{self, BootInfoFrameAllocator};
 use x86_64::structures::paging::{mapper::MapToError, Page};
 use x86_64::VirtAddr;
 
 /// Guarda o `boot_info` recebido por `main`, para que cada `#[test_case]`
 /// possa reconstruir `physical_memory_offset`/`memory_map` sem manter
-/// nenhum `OffsetPageTable`/alocador de frames vivo entre os testes.
+/// nenhum `OffsetPageTable`/alocador de frames vivo entre os testes
+/// (`research.md`, seção 12).
 static BOOT_INFO: spin::Once<&'static BootInfo> = spin::Once::new();
 
 entry_point!(main);
 
 fn main(boot_info: &'static BootInfo) -> ! {
-    os_rust::init(boot_info);
+    proto_os::init(boot_info);
     BOOT_INFO.call_once(|| boot_info);
     test_main();
-    os_rust::panic::halt_loop();
+    proto_os::panic::halt_loop();
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    os_rust::test_panic_handler(info)
+    proto_os::test_panic_handler(info)
 }
 
 fn boot_info() -> &'static BootInfo {
@@ -45,7 +47,7 @@ fn physical_memory_offset() -> VirtAddr {
 #[test_case]
 fn traduz_endereco_ja_mapeado_pelo_bootloader() {
     // O buffer de texto VGA, em uso desde o Marco 0, sempre mapeado pelo
-    // bootloader antes do kernel rodar.
+    // bootloader antes do kernel rodar (US3 cenário 1).
     let vga = VirtAddr::new(0xb8000);
 
     // SAFETY: `physical_memory_offset()` veio do `BootInfo` real
@@ -59,7 +61,8 @@ fn traduz_endereco_ja_mapeado_pelo_bootloader() {
 fn traduz_endereco_nao_mapeado_devolve_none() {
     // Endereço deliberadamente fora de qualquer região mapeada: acima do
     // que uma VM de teste com uma faixa modesta de RAM cobre (mapeamento
-    // completo da física) e bem longe do heap e da imagem do kernel.
+    // completo da física) e bem longe do heap e da imagem do kernel
+    // (US3 cenário 2).
     let nao_mapeado = VirtAddr::new(0xdead_beaf_000);
 
     // SAFETY: mesma garantia da função acima.
@@ -71,7 +74,7 @@ fn traduz_endereco_nao_mapeado_devolve_none() {
 #[test_case]
 fn mapear_pagina_nova_permite_ler_e_escrever_nela() {
     // Página virtual fora do heap e de qualquer mapeamento existente,
-    // dedicada só a este teste.
+    // dedicada só a este teste (US3 cenário 3).
     let pagina = Page::containing_address(VirtAddr::new(0x_2222_2222_0000));
 
     // SAFETY: `boot_info().memory_map` veio do `BootInfo` real entregue

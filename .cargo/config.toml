@@ -1,5 +1,5 @@
 [build]
-target = "x86_64-os_rust.json"
+target = "x86_64-proto_os.json"
 
 [unstable]
 build-std = ["core", "compiler_builtins", "alloc"]
