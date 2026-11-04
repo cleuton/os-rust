@@ -1,1 +1,0 @@
-Arquivo curto: cabe em um unico cluster.
