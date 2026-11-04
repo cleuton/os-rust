@@ -4,16 +4,6 @@ use core::fmt;
 use lazy_static::lazy_static;
 use spin::Mutex;
 use volatile::Volatile;
-use x86_64::instructions::port::Port;
-
-/// Portas de índice/dado do controlador CRTC do VGA, usadas para mover o
-/// cursor de hardware do modo texto.
-const CRTC_INDEX_PORT: u16 = 0x3D4;
-const CRTC_DATA_PORT: u16 = 0x3D5;
-/// Índices dos registradores do CRTC que guardam a posição do cursor
-/// (16 bits, partido em byte alto e byte baixo).
-const CURSOR_LOCATION_HIGH: u8 = 0x0E;
-const CURSOR_LOCATION_LOW: u8 = 0x0F;
 
 /// As 16 cores fixas do hardware VGA em modo texto.
 #[allow(dead_code)]
@@ -93,20 +83,10 @@ impl Writer {
                 self.column_position += 1;
             }
         }
-        self.move_hardware_cursor();
     }
 
     fn write_string(&mut self, s: &str) {
-        self.write_bytes(s.as_bytes());
-    }
-
-    /// Escreve bytes crus na tela, com a mesma regra de `write_string`:
-    /// ASCII imprimível e `\n` aparecem como são, qualquer outro byte vira
-    /// o quadrado `0xfe`. Existe porque a syscall `write` (Marco 5) recebe
-    /// de um programa de usuário bytes que não são necessariamente UTF-8, e
-    /// por isso não podem passar por um `&str`.
-    pub fn write_bytes(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
+        for byte in s.bytes() {
             match byte {
                 // ASCII imprimível ou nova linha: escreve como está.
                 0x20..=0x7e | b'\n' => self.write_byte(byte),
@@ -148,47 +128,6 @@ impl Writer {
             self.clear_row(row);
         }
         self.column_position = 0;
-        self.move_hardware_cursor();
-    }
-
-    /// Remove o último caractere escrito, apagando-o da tela e voltando o
-    /// cursor lógico uma posição. Sem efeito quando a linha já está vazia
-    /// (não apaga o prompt).
-    fn backspace(&mut self) {
-        if self.column_position == 0 {
-            return;
-        }
-        self.column_position -= 1;
-
-        let row = BUFFER_HEIGHT - 1;
-        let col = self.column_position;
-        let blank = ScreenChar {
-            ascii_character: b' ',
-            color_code: self.color_code,
-        };
-        self.buffer.chars[row][col].write(blank);
-        self.move_hardware_cursor();
-    }
-
-    /// Move o cursor de hardware do modo texto VGA para acompanhar a
-    /// posição atual de escrita — sempre na última linha visível, já que
-    /// este `Writer` só escreve ali e rola a tela ao quebrar linha.
-    fn move_hardware_cursor(&self) {
-        let position = (BUFFER_HEIGHT - 1) * BUFFER_WIDTH + self.column_position;
-
-        let mut index_port: Port<u8> = Port::new(CRTC_INDEX_PORT);
-        let mut data_port: Port<u8> = Port::new(CRTC_DATA_PORT);
-
-        // SAFETY: 0x3D4/0x3D5 são as portas fixas de índice/dado do CRTC do
-        // VGA; os índices 0x0E/0x0F selecionam, respectivamente, o byte
-        // alto e o baixo do registrador de posição do cursor (um valor de
-        // 16 bits sem nenhum outro efeito colateral no hardware).
-        unsafe {
-            index_port.write(CURSOR_LOCATION_HIGH);
-            data_port.write(((position >> 8) & 0xff) as u8);
-            index_port.write(CURSOR_LOCATION_LOW);
-            data_port.write((position & 0xff) as u8);
-        }
     }
 }
 
@@ -239,201 +178,4 @@ pub fn _print(args: fmt::Arguments) {
 /// Limpa a tela do buffer VGA global (chamado uma vez, no boot).
 pub fn clear_screen() {
     WRITER.lock().clear_screen();
-}
-
-/// Apaga o último caractere escrito no `Writer` VGA global (Backspace).
-pub fn backspace() {
-    WRITER.lock().backspace();
-}
-
-/// Verdadeiro se `needle` aparece em alguma linha da tela, em sequência
-/// (sem quebra de linha no meio). Usada por testes de outros módulos
-/// (ex.: `shell.rs`) e por testes de integração em `tests/` (por isso é
-/// `pub`, não só `#[cfg(test)]`: um binário de teste de integração
-/// depende de `os_rust` como uma crate externa comum, compilada sem
-/// `--cfg test`, então não enxergaria um item `pub(crate)`/`cfg(test)`)
-/// para verificar o efeito observável de um comando sem precisar prever
-/// a linha exata onde o texto termina depois da rolagem.
-pub fn screen_contains(needle: &str) -> bool {
-    let needle = needle.as_bytes();
-    if needle.is_empty() || needle.len() > BUFFER_WIDTH {
-        return false;
-    }
-    let writer = WRITER.lock();
-    for row in 0..BUFFER_HEIGHT {
-        'window: for start in 0..=(BUFFER_WIDTH - needle.len()) {
-            for (i, &b) in needle.iter().enumerate() {
-                if writer.buffer.chars[row][start + i].read().ascii_character != b {
-                    continue 'window;
-                }
-            }
-            return true;
-        }
-    }
-    false
-}
-
-/// Desenha o logo canônico (`crate::logo::LOGO`) direto nas linhas 0-19
-/// do buffer VGA, sem passar pelo `Writer` normal — que sempre escreve na
-/// última linha e rola a tela inteira a cada `\n`, mesmo partindo de uma
-/// tela vazia (ver os testes `quebra_de_linha`/`rolagem_ao_ultrapassar_a_altura_da_tela`
-/// abaixo). Por isso só deve ser chamada depois que `print_welcome`/
-/// `shell::print_prompt` já tiverem escrito seu conteúdo pelo caminho
-/// normal, nunca antes — assim o logo nasce exatamente nas linhas 0-19 e
-/// nenhuma escrita seguinte o desloca. Cada `'█'` vira o byte `0xDB`
-/// (bloco cheio da code page 437); ASCII imprimível vira o próprio byte;
-/// qualquer outro caractere vira `0xfe`, como em `write_string`, para não
-/// confiar que o texto do logo seja só ASCII/`'█'`. O logo é só visual:
-/// nunca escreve na serial, e não move `column_position` nem o cursor de
-/// hardware, porque nenhum código depois dele volta a escrever nessas
-/// linhas.
-pub fn draw_logo() {
-    let mut writer = WRITER.lock();
-    let color_code = ColorCode::new(Color::LightCyan, Color::Black);
-    for (row, line) in crate::logo::LOGO.lines().enumerate() {
-        for (col, ch) in line.chars().enumerate() {
-            let byte = match ch {
-                '█' => 0xDB,
-                ' '..='~' => ch as u8,
-                _ => 0xfe,
-            };
-            writer.buffer.chars[row][col].write(ScreenChar {
-                ascii_character: byte,
-                color_code,
-            });
-        }
-    }
-}
-
-/// Devolve o byte `ascii_character` de cada coluna da linha `row`, sem
-/// nenhuma cor. Existe só para teste: `pub`, não `pub(crate)`/`cfg(test)`,
-/// pelo mesmo motivo de `screen_contains` logo acima — o binário de teste
-/// de integração compila esta crate como uma crate externa comum, sem
-/// `--cfg test`. Usada para comparar linhas inteiras da tela (inclusive
-/// bytes fora do ASCII imprimível, como `0xDB`) contra `logo::LOGO`
-/// traduzido: `screen_contains` não serve para isso, porque recebe
-/// `&str`, e `0xDB` não é um `char` UTF-8 válido sozinho.
-pub fn screen_row_bytes(row: usize) -> [u8; BUFFER_WIDTH] {
-    let writer = WRITER.lock();
-    let mut bytes = [0u8; BUFFER_WIDTH];
-    for (col, byte) in bytes.iter_mut().enumerate() {
-        *byte = writer.buffer.chars[row][col].read().ascii_character;
-    }
-    bytes
-}
-
-/// Quantas linhas da tela têm a forma `dddd-dd-dd dd:dd:dd UTC` (a saída de
-/// `data` e de `hora`), começando na primeira coluna. Confere só a **forma**,
-/// nunca o valor: os testes não podem depender da hora real. `pub` pelo mesmo
-/// motivo de `screen_contains`: serve também aos testes de `tests/`.
-pub fn screen_count_clock_lines() -> usize {
-    // d = dígito; qualquer outro caractere tem de ser igual ao do modelo.
-    const MODEL: &[u8] = b"dddd-dd-dd dd:dd:dd UTC";
-    (0..BUFFER_HEIGHT)
-        .filter(|&row| {
-            let bytes = screen_row_bytes(row);
-            MODEL.iter().enumerate().all(|(i, &m)| {
-                if m == b'd' {
-                    bytes[i].is_ascii_digit()
-                } else {
-                    bytes[i] == m
-                }
-            })
-        })
-        .count()
-}
-
-/// Verdadeiro se a tela inteira está em branco (todas as posições com
-/// espaço). Usada só por testes de outros módulos para confirmar o
-/// efeito do comando `clear`.
-#[cfg(test)]
-pub(crate) fn screen_is_blank() -> bool {
-    let writer = WRITER.lock();
-    for row in 0..BUFFER_HEIGHT {
-        for col in 0..BUFFER_WIDTH {
-            if writer.buffer.chars[row][col].read().ascii_character != b' ' {
-                return false;
-            }
-        }
-    }
-    true
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test_case]
-    fn escreve_caractere_simples() {
-        clear_screen();
-        crate::print!("A");
-        let ch = WRITER.lock().buffer.chars[BUFFER_HEIGHT - 1][0].read();
-        assert_eq!(ch.ascii_character, b'A');
-    }
-
-    #[test_case]
-    fn write_bytes_troca_byte_fora_do_ascii_pelo_quadrado() {
-        clear_screen();
-        WRITER.lock().write_bytes(b"ab\xffc");
-        let writer = WRITER.lock();
-        let ultima_linha = &writer.buffer.chars[BUFFER_HEIGHT - 1];
-        assert_eq!(ultima_linha[0].read().ascii_character, b'a');
-        assert_eq!(ultima_linha[1].read().ascii_character, b'b');
-        assert_eq!(ultima_linha[2].read().ascii_character, 0xfe);
-        assert_eq!(ultima_linha[3].read().ascii_character, b'c');
-    }
-
-    #[test_case]
-    fn quebra_de_linha() {
-        clear_screen();
-        // O primeiro "\n" garante uma linha 24 limpa antes de "cd", já
-        // que `write_byte` sempre escreve na última linha visível: a
-        // quebra de linha rola o conteúdo anterior ("ab") para a linha
-        // 23 e reseta a coluna, então "cd" começa do zero na linha 24.
-        crate::print!("ab\ncd");
-        let writer = WRITER.lock();
-        assert_eq!(
-            writer.buffer.chars[BUFFER_HEIGHT - 1][0].read().ascii_character,
-            b'c'
-        );
-        assert_eq!(
-            writer.buffer.chars[BUFFER_HEIGHT - 1][1].read().ascii_character,
-            b'd'
-        );
-    }
-
-    #[test_case]
-    fn rolagem_ao_ultrapassar_a_altura_da_tela() {
-        clear_screen();
-        crate::print!("\nPRIMEIRA\nSEGUNDA");
-        let writer = WRITER.lock();
-        for (i, c) in "PRIMEIRA".bytes().enumerate() {
-            assert_eq!(
-                writer.buffer.chars[BUFFER_HEIGHT - 2][i].read().ascii_character,
-                c
-            );
-        }
-        for (i, c) in "SEGUNDA".bytes().enumerate() {
-            assert_eq!(
-                writer.buffer.chars[BUFFER_HEIGHT - 1][i].read().ascii_character,
-                c
-            );
-        }
-    }
-
-    #[test_case]
-    fn apaga_ultimo_caractere_com_backspace() {
-        clear_screen();
-        crate::print!("AB");
-        backspace();
-        let writer = WRITER.lock();
-        assert_eq!(
-            writer.buffer.chars[BUFFER_HEIGHT - 1][0].read().ascii_character,
-            b'A'
-        );
-        assert_eq!(
-            writer.buffer.chars[BUFFER_HEIGHT - 1][1].read().ascii_character,
-            b' '
-        );
-    }
 }
