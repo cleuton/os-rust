@@ -1,7 +1,0 @@
-cargo:rerun-if-changed=/home/cleuton/Documents/projetos/ProtoOS/proto-os/Cargo.toml
-cargo:rustc-link-search=native=/home/cleuton/Documents/projetos/ProtoOS/proto-os/target/bootimage/bootloader/x86_64-bootloader/release/build/bootloader/4fee2018cde64e4d/out
-cargo:rustc-link-lib=static=kernel_bin-should_panic-7ed347d17e0b2770
-cargo:rerun-if-env-changed=KERNEL
-cargo:rerun-if-env-changed=KERNEL_MANIFEST
-cargo:rerun-if-changed=/home/cleuton/Documents/projetos/ProtoOS/proto-os/target/x86_64-proto_os/debug/build/proto_os/7ed347d17e0b2770/out/should_panic-7ed347d17e0b2770
-cargo:rerun-if-changed=build.rs
