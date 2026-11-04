@@ -1,0 +1,6 @@
+/home/cleuton/Documents/projetos/ProtoOS/proto-os/target/debug/build/compiler_builtins/a069cbae8353c8bf/out/build_script_build.d: /home/cleuton/.rustup/toolchains/nightly-2026-08-01-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins/build.rs /home/cleuton/.rustup/toolchains/nightly-2026-08-01-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins/../libm/configure.rs
+
+/home/cleuton/Documents/projetos/ProtoOS/proto-os/target/debug/build/compiler_builtins/a069cbae8353c8bf/out/build_script_build: /home/cleuton/.rustup/toolchains/nightly-2026-08-01-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins/build.rs /home/cleuton/.rustup/toolchains/nightly-2026-08-01-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins/../libm/configure.rs
+
+/home/cleuton/.rustup/toolchains/nightly-2026-08-01-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins/build.rs:
+/home/cleuton/.rustup/toolchains/nightly-2026-08-01-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins/../libm/configure.rs:

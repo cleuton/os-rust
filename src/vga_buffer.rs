@@ -97,16 +97,7 @@ impl Writer {
     }
 
     fn write_string(&mut self, s: &str) {
-        self.write_bytes(s.as_bytes());
-    }
-
-    /// Escreve bytes crus na tela, com a mesma regra de `write_string`:
-    /// ASCII imprimível e `\n` aparecem como são, qualquer outro byte vira
-    /// o quadrado `0xfe`. Existe porque a syscall `write` (Marco 5) recebe
-    /// de um programa de usuário bytes que não são necessariamente UTF-8, e
-    /// por isso não podem passar por um `&str`.
-    pub fn write_bytes(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
+        for byte in s.bytes() {
             match byte {
                 // ASCII imprimível ou nova linha: escreve como está.
                 0x20..=0x7e | b'\n' => self.write_byte(byte),
@@ -247,14 +238,12 @@ pub fn backspace() {
 }
 
 /// Verdadeiro se `needle` aparece em alguma linha da tela, em sequência
-/// (sem quebra de linha no meio). Usada por testes de outros módulos
-/// (ex.: `shell.rs`) e por testes de integração em `tests/` (por isso é
-/// `pub`, não só `#[cfg(test)]`: um binário de teste de integração
-/// depende de `os_rust` como uma crate externa comum, compilada sem
-/// `--cfg test`, então não enxergaria um item `pub(crate)`/`cfg(test)`)
-/// para verificar o efeito observável de um comando sem precisar prever
-/// a linha exata onde o texto termina depois da rolagem.
-pub fn screen_contains(needle: &str) -> bool {
+/// (sem quebra de linha no meio). Usada só por testes de outros módulos
+/// (ex.: `shell.rs`) para verificar o efeito observável de um comando
+/// sem precisar prever a linha exata onde o texto termina depois da
+/// rolagem.
+#[cfg(test)]
+pub(crate) fn screen_contains(needle: &str) -> bool {
     let needle = needle.as_bytes();
     if needle.is_empty() || needle.len() > BUFFER_WIDTH {
         return false;
@@ -271,76 +260,6 @@ pub fn screen_contains(needle: &str) -> bool {
         }
     }
     false
-}
-
-/// Desenha o logo canônico (`crate::logo::LOGO`) direto nas linhas 0-19
-/// do buffer VGA, sem passar pelo `Writer` normal — que sempre escreve na
-/// última linha e rola a tela inteira a cada `\n`, mesmo partindo de uma
-/// tela vazia (ver os testes `quebra_de_linha`/`rolagem_ao_ultrapassar_a_altura_da_tela`
-/// abaixo). Por isso só deve ser chamada depois que `print_welcome`/
-/// `shell::print_prompt` já tiverem escrito seu conteúdo pelo caminho
-/// normal, nunca antes — assim o logo nasce exatamente nas linhas 0-19 e
-/// nenhuma escrita seguinte o desloca. Cada `'█'` vira o byte `0xDB`
-/// (bloco cheio da code page 437); ASCII imprimível vira o próprio byte;
-/// qualquer outro caractere vira `0xfe`, como em `write_string`, para não
-/// confiar que o texto do logo seja só ASCII/`'█'`. O logo é só visual:
-/// nunca escreve na serial, e não move `column_position` nem o cursor de
-/// hardware, porque nenhum código depois dele volta a escrever nessas
-/// linhas.
-pub fn draw_logo() {
-    let mut writer = WRITER.lock();
-    let color_code = ColorCode::new(Color::LightCyan, Color::Black);
-    for (row, line) in crate::logo::LOGO.lines().enumerate() {
-        for (col, ch) in line.chars().enumerate() {
-            let byte = match ch {
-                '█' => 0xDB,
-                ' '..='~' => ch as u8,
-                _ => 0xfe,
-            };
-            writer.buffer.chars[row][col].write(ScreenChar {
-                ascii_character: byte,
-                color_code,
-            });
-        }
-    }
-}
-
-/// Devolve o byte `ascii_character` de cada coluna da linha `row`, sem
-/// nenhuma cor. Existe só para teste: `pub`, não `pub(crate)`/`cfg(test)`,
-/// pelo mesmo motivo de `screen_contains` logo acima — o binário de teste
-/// de integração compila esta crate como uma crate externa comum, sem
-/// `--cfg test`. Usada para comparar linhas inteiras da tela (inclusive
-/// bytes fora do ASCII imprimível, como `0xDB`) contra `logo::LOGO`
-/// traduzido: `screen_contains` não serve para isso, porque recebe
-/// `&str`, e `0xDB` não é um `char` UTF-8 válido sozinho.
-pub fn screen_row_bytes(row: usize) -> [u8; BUFFER_WIDTH] {
-    let writer = WRITER.lock();
-    let mut bytes = [0u8; BUFFER_WIDTH];
-    for (col, byte) in bytes.iter_mut().enumerate() {
-        *byte = writer.buffer.chars[row][col].read().ascii_character;
-    }
-    bytes
-}
-
-/// Quantas linhas da tela têm a forma `dddd-dd-dd dd:dd:dd UTC` (a saída de
-/// `data` e de `hora`), começando na primeira coluna. Confere só a **forma**,
-/// nunca o valor: os testes não podem depender da hora real. `pub` pelo mesmo
-/// motivo de `screen_contains`: serve também aos testes de `tests/`.
-pub fn screen_count_clock_lines() -> usize {
-    // d = dígito; qualquer outro caractere tem de ser igual ao do modelo.
-    const MODEL: &[u8] = b"dddd-dd-dd dd:dd:dd UTC";
-    (0..BUFFER_HEIGHT)
-        .filter(|&row| {
-            let bytes = screen_row_bytes(row);
-            MODEL.iter().enumerate().all(|(i, &m)| {
-                if m == b'd' {
-                    bytes[i].is_ascii_digit()
-                } else {
-                    bytes[i] == m
-                }
-            })
-        })
-        .count()
 }
 
 /// Verdadeiro se a tela inteira está em branco (todas as posições com
@@ -369,18 +288,6 @@ mod tests {
         crate::print!("A");
         let ch = WRITER.lock().buffer.chars[BUFFER_HEIGHT - 1][0].read();
         assert_eq!(ch.ascii_character, b'A');
-    }
-
-    #[test_case]
-    fn write_bytes_troca_byte_fora_do_ascii_pelo_quadrado() {
-        clear_screen();
-        WRITER.lock().write_bytes(b"ab\xffc");
-        let writer = WRITER.lock();
-        let ultima_linha = &writer.buffer.chars[BUFFER_HEIGHT - 1];
-        assert_eq!(ultima_linha[0].read().ascii_character, b'a');
-        assert_eq!(ultima_linha[1].read().ascii_character, b'b');
-        assert_eq!(ultima_linha[2].read().ascii_character, 0xfe);
-        assert_eq!(ultima_linha[3].read().ascii_character, b'c');
     }
 
     #[test_case]

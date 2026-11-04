@@ -1,103 +1,32 @@
 #![no_std]
 #![feature(abi_x86_interrupt)]
-#![feature(alloc_error_handler)]
 #![cfg_attr(test, no_main)]
 #![cfg_attr(test, feature(custom_test_frameworks))]
 #![cfg_attr(test, test_runner(crate::test_runner))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
 
-extern crate alloc;
-
-pub mod allocator;
-pub mod ata;
-pub mod rtc;
-pub mod blockdev;
-pub mod fat;
-pub mod fs;
 pub mod vga_buffer;
 pub mod serial;
-pub mod gdt;
 pub mod interrupts;
 pub mod keyboard;
-pub mod memory;
-pub mod net;
 pub mod shell;
 pub mod panic;
-pub mod logo;
-pub mod elf;
-pub mod pci;
-pub mod programs;
-pub mod rtl8139;
-pub mod scheduler;
-pub mod syscall;
-pub mod task;
-pub mod timer;
-pub mod user;
 
-/// Nome do projeto, derivado literalmente do campo `name` de
-/// `Cargo.toml` em tempo de compilação — `env!("CARGO_PKG_NAME")`
-/// preserva o hífen do manifesto (`"os-rust"`), ao contrário do
-/// identificador da crate (`os_rust`, com underscore). Única fonte do
-/// nome exibido em todo o código, para nunca ficar dessincronizado do
-/// nome real do pacote; reutilizada por `shell::cmd_sobre` (`shell::PROMPT`
-/// e `VERSION` repetem o `env!` por causa de `concat!`).
-pub const NAME: &str = env!("CARGO_PKG_NAME");
-
-/// Identificação do sistema no formato `os-rust vX.Y.Z`, derivada do
-/// nome e da versão do pacote em `Cargo.toml`, em tempo de compilação —
-/// a única fonte do nome e da versão em todo o código, para que um bump
-/// de versão baste alterar `Cargo.toml`. Reutilizada por `print_welcome`,
-/// pela primeira linha de diagnóstico da serial, por `shell::cmd_sobre`,
-/// por `panic::handle` e pela tela de exceção fatal de `interrupts.rs`.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_NAME"), " v", env!("CARGO_PKG_VERSION"));
-
-/// Escreve a mensagem de boas-vindas na tela: uma única linha, `VERSION`.
-/// Chamada pelo binário de produção (`main.rs::kernel_main`) e por
-/// testes de integração que verificam o conteúdo exato da tela — extraída
-/// para a biblioteca justamente para ser testável por `cargo test`.
-pub fn print_welcome() {
-    println!("{}", VERSION);
-}
-
-/// Inicializa a infraestrutura de baixo nível do kernel, nesta ordem:
-/// porta serial primeiro (nenhuma mensagem de diagnóstico existe antes
-/// dela, e elas só vão para a serial, nunca para a tela); GDT/TSS antes
-/// da IDT, porque o handler de double fault na IDT referencia o índice
-/// de pilha que só a TSS reserva; interrupções antes de memória, porque
-/// nada em memória depende delas; o timer logo depois das interrupções (só
-/// programa o PIT; a IRQ0 já foi liberada no PIC); memória depois; `syscall` por último,
-/// porque lê os seletores de segmento da GDT já carregada. Uma mensagem de
-/// diagnóstico na serial depois de cada etapa ajuda a localizar em qual
-/// delas o boot parou, se parar. Chamada tanto pelo binário de produção
-/// (`main.rs`) quanto pelos pontos de entrada de teste (`lib.rs`,
-/// `main.rs` em modo de teste, `tests/*.rs`).
-pub fn init(boot_info: &'static bootloader::BootInfo) {
+/// Inicializa a infraestrutura de baixo nível do kernel: porta serial
+/// primeiro (FR-001), depois interrupções (IDT + PIC), com uma mensagem
+/// de diagnóstico na serial após cada etapa (FR-004). Chamada tanto pelo
+/// binário de produção (`main.rs`) quanto pelos pontos de entrada de
+/// teste (`lib.rs`, `main.rs` em modo de teste, `tests/*.rs`).
+pub fn init() {
     serial::init();
-    serial_println!("[boot] {} iniciado", VERSION);
-    gdt::init();
-    serial_println!("[boot] gdt/tss ativos");
+    serial_println!("[boot] iniciado");
     interrupts::init();
     serial_println!("[boot] interrupcoes ativas");
-    timer::init();
-    serial_println!("[boot] timer ativo");
-    memory::init(boot_info);
-    let info = memory::info();
-    serial_println!(
-        "[boot] memoria inicializada: {} KiB utilizaveis, heap em {:#x} ({} KiB)",
-        info.usable_bytes / 1024,
-        info.heap_start,
-        info.heap_size / 1024
-    );
-    fs::init();
-    net::init(boot_info.physical_memory_offset);
-    syscall::init();
-    serial_println!("[boot] syscall ativo");
 }
 
 /// Um teste executável pelo executor de testes: qualquer função sem
 /// parâmetros ganha esta capacidade automaticamente (`impl<T: Fn()>`
-/// abaixo) — imprime o nome do teste antes de rodar e "[ok]" depois,
-/// sem exigir que cada teste declare isso manualmente.
+/// abaixo). Ver `data-model.md`, "Teste".
 pub trait Testable {
     fn run(&self) -> ();
 }
@@ -115,10 +44,9 @@ where
 
 /// Executor de testes: imprime a contagem total, roda cada teste na
 /// ordem em que aparece e, se todos retornarem sem panic, sinaliza
-/// sucesso ao host. Um panic dentro de qualquer teste nunca retorna a
-/// este ponto — o `#[panic_handler]` de teste assume o controle e chama
-/// `exit_qemu(QemuExitCode::Failed)`, reportando a falha ao host mesmo
-/// sem o executor chegar a rodar de novo.
+/// sucesso ao host (FR-009). Um panic dentro de qualquer teste nunca
+/// retorna a este ponto — o `#[panic_handler]` de teste assume o
+/// controle e chama `exit_qemu(QemuExitCode::Failed)` (FR-011).
 pub fn test_runner(tests: &[&dyn Testable]) {
     serial_println!("Running {} tests", tests.len());
     for test in tests {
@@ -128,12 +56,8 @@ pub fn test_runner(tests: &[&dyn Testable]) {
 }
 
 /// Valores escritos no dispositivo `isa-debug-exit` do QEMU para
-/// sinalizar o resultado ao host. `isa-debug-exit` transforma o valor
-/// escrito `V` no código de saída do processo QEMU via `(V << 1) | 1`,
-/// então `Success` (`0x10`) produz `33` e `Failed` (`0x11`) produz `35`
-/// — `33` é exatamente o `test-success-exit-code` configurado em
-/// `Cargo.toml`, o valor que o script de teste espera para considerar a
-/// suíte bem-sucedida.
+/// sinalizar o resultado ao host (ver `research.md`, seção 5, e
+/// `contracts/serial-test-protocol.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum QemuExitCode {
@@ -143,8 +67,7 @@ pub enum QemuExitCode {
 
 /// Encerra o QEMU informando `code` ao host, através do dispositivo
 /// `isa-debug-exit` (presente só durante `cargo test`, via `test-args`
-/// em `Cargo.toml` — nunca em `cargo run`, então esta função nunca roda
-/// fora de um teste).
+/// em `Cargo.toml` — nunca em `cargo run`, ver FR-018).
 pub fn exit_qemu(code: QemuExitCode) -> ! {
     use x86_64::instructions::port::Port;
 
@@ -168,8 +91,7 @@ pub fn exit_qemu(code: QemuExitCode) -> ! {
 /// `#[panic_handler]` usado em modo de teste (`lib.rs`, `main.rs` sob
 /// `#[cfg(test)]`, e cada arquivo de `tests/` exceto `should_panic.rs`,
 /// que tem o seu próprio): qualquer panic durante um teste é reportado
-/// ao host como falha, imediatamente, em vez de deixar o QEMU travado
-/// esperando o `test-timeout` de `Cargo.toml` esgotar.
+/// ao host como falha, imediatamente (FR-011).
 pub fn test_panic_handler(info: &core::panic::PanicInfo) -> ! {
     serial_println!("[failed]\n");
     serial_println!("Error: {}\n", info);
@@ -183,8 +105,8 @@ pub fn test_panic_handler(info: &core::panic::PanicInfo) -> ! {
 bootloader::entry_point!(test_kernel_main);
 
 #[cfg(test)]
-fn test_kernel_main(boot_info: &'static bootloader::BootInfo) -> ! {
-    init(boot_info);
+fn test_kernel_main(_boot_info: &'static bootloader::BootInfo) -> ! {
+    init();
     test_main();
     panic::halt_loop();
 }
