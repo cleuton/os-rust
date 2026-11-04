@@ -5,101 +5,12 @@ at a time. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/), and the versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [0.12.1] - 2026-10-24
-
-Maintenance release: brings `ftpd` to Milestone 12. There is no new milestone, no
-kernel change and no contract change (it stays at version 8). `ftpd` is a user
-program that translates FTP commands into file calls, on top of the TCP sockets, to
-send files to os-rust and get them back without rebuilding.
-
-### Added
-
-- `ftpd` program (`programs/src/bin/ftpd.rs`, embedded in the boot image): an FTP
-  server with one session at a time, passive mode only (`PASV` and `EPSV`), no
-  password, on ports 21 (control) and 2100 (data). Commands: `USER`, `PASS`,
-  `QUIT`, `NOOP`, `SYST`, `TYPE`, `PWD`, `CWD`, `CDUP`, `LIST`, `NLST`, `RETR`,
-  `STOR`, `SIZE`, `DELE`, `MKD`, `RMD` and `SITE EXIT`. It has a virtual root `/`
-  with the folders `ram` and `disco`, a `STOR` that never overwrites and deletes
-  the partial file if it fails, and timeouts on every wait (30 s with no client,
-  30 s without a command, 10 s per data wait).
-- README (Portuguese and English): **FTP server** section, with the step by step
-  without rebuilding, the QEMU command by hand with `hostfwd`, `curl` and `ftplib`
-  examples, the limits and the warnings; `ftpd` in the program list.
-- "Example program 15: ftpd" in the programmer's guides and a section about FTP in
-  the Milestone 12 chapter of the walkthrough (`WALKTHROUGH.md` and
-  `WALKTHROUGH.en.md`).
-- Tests: `tests/ftpd.rs`, `tests/ftpd_espera.rs` and `tests/ftpd_ocioso.rs`, with
-  an FTP client that runs inside QEMU, in the scheduler hook.
-
-### Changed
-
-- Version to `0.12.1` in `Cargo.toml` (the boot, `sobre` and error-screen
-  identification follow).
-- The tests that pinned version `0.12.0` now check `0.12.1`:
-  `a_versao_0_12_1_aparece_e_o_que_existia_continua_igual`,
-  `a_versao_0_12_1_aparece_no_boot_e_no_sobre` and `a_versao_0_12_1_aparece_no_sobre`,
-  and the version checks of the README and `Cargo.toml` tests in
-  `tests/rede_programas.rs`.
-
-## [0.12.0] - 2026-10-23
-
-Milestone 12: basic TCP/IP networking. The kernel finds the Realtek RTL8139 card
-through PCI and speaks Ethernet, ARP, IPv4, ICMP (echo) and TCP, all written in the
-project, with no network crate; user programs talk to it through TCP sockets.
-Syscall contract: version 8.
-
-### Added
-
-- PCI bus scan (`src/pci.rs`) and the RTL8139 driver by polling (`src/rtl8139.rs`),
-  with a receive ring and four transmit buffers in contiguous DMA memory below
-  4 GiB, no card interrupt.
-- The network stack (`src/net.rs` and `src/net/`): the Internet checksum, Ethernet
-  II, ARP (8-entry cache), IPv4, ICMP (echo only), simplified TCP (stop-and-wait,
-  1024 bytes per segment, 2048-byte buffers, in-order only, retransmission every
-  1 s, 1 s `TIME_WAIT`) and an internal loopback for `127.0.0.0/8` that works with
-  no card.
-- `rede` commands (the card, the address, the counters and the connections; with
-  three arguments it changes the address, in memory only) and `ping <ip>` at the
-  prompt.
-- Syscalls `SYS_TCP_LISTEN` (17), `SYS_TCP_ACCEPT` (18), `SYS_TCP_CONNECT` (19),
-  `SYS_TCP_SEND` (20), `SYS_TCP_RECV` (21), `SYS_TCP_CLOSE` (22) and
-  `SYS_TCP_TIMEOUT` (23), and the errors `ERR_TIMEDOUT` (`-17`), `ERR_CONNREFUSED`
-  (`-18`), `ERR_CONNRESET` (`-19`), `ERR_ADDRINUSE` (`-20`) and `ERR_NOBUFS` (`-21`).
-  Per-program sockets (up to 4) and 8 connections in the whole kernel.
-- Network waits that do not use CPU: the program stays blocked (a new scheduler
-  state) and the kernel sleeps if all of them wait; every wait has a timeout.
-  Sockets are closed when the program ends.
-- In the runtime library: `TcpListener`, `TcpStream`, `Ipv4` and `NetError`.
-- The `servidor` and `cliente` programs (`run servidor cliente`).
-- README (Portuguese and English): the **Networking in QEMU** section, with QEMU by
-  hand and `hostfwd` so the computer can talk to os-rust, and the note on real
-  hardware.
-- A networking chapter in `WALKTHROUGH.md` and `WALKTHROUGH.en.md`; a "Network
-  (TCP)" section in the programmer's guides.
-- Tests: `tests/rede_pilha.rs` (no hardware, with a fake card and an injected
-  clock), `tests/rede.rs` (QEMU's real card and the TCP echo through `guestfwd`),
-  `tests/rede_syscalls.rs`, `tests/rede_programas.rs` and `tests/rede_espera.rs`.
-
-### Changed
-
-- QEMU arguments in `Cargo.toml`: `-nic user,model=rtl8139` for `cargo run`, and the
-  same with `guestfwd=tcp:10.0.2.100:7-cmd:cat` for `cargo test`. No `hostfwd` in
-  `cargo run`. The disks' `snapshot=on` did not change.
-- Syscall contract: version 8 (`SYSCALLS.md` and `SYSCALLS.en.md`); the first free
-  number is now 24. `ERR_NODEV`, `ERR_MFILE`, `ERR_TYPE` and `ERR_BADF` also cover
-  the network syscalls.
-- Existing tests that hold for version 0.11.0 or contract 7 now check 0.12.0 and
-  contract 8: `contrato_declara_a_versao_8`, the version and contract ones in
-  `tests/escrita_no_disco.rs` and `tests/escrita_no_ramdisk.rs`, and the three about
-  the first free number (now 24).
-- Project version: 0.12.0.
-
 ## [0.11.0] - 2026-10-23
 
 Milestone 11: ATA disk writing. `/disco` now **accepts writes** through the same
 FAT layer as `/ram`, and the kernel can create and remove directories. Syscall
-contract: version 7. It was the last milestone of the previous batch; networking
-came in Milestone 12.
+contract: version 7. **This is the last milestone of the current batch**; the next
+batch will add basic networking with TCP/IP.
 
 ### Added
 

@@ -1,8 +1,8 @@
 # os-rust syscall contract
 
-**Contract version**: 8
+**Contract version**: 7
 
-**Valid since**: os-rust 0.12.0 (Milestone 12)
+**Valid since**: os-rust 0.11.0 (Milestone 11)
 
 This document is everything a program needs to know to run on os-rust.
 The kernel and the programs never depend on anything that is not here. An
@@ -100,7 +100,7 @@ unsafe {
 
 ## 5. Syscalls
 
-Contract v8 numbers. **Any other number** (including `0`) terminates the
+Contract v7 numbers. **Any other number** (including `0`) terminates the
 program (§7).
 
 | No. | Name | Arguments | Result |
@@ -121,13 +121,6 @@ program (§7).
 | 14 | `SYS_REMOVE` | `rdi = path_ptr`, `rsi = path_len` | `0` or error (`< 0`) |
 | 15 | `SYS_MKDIR` | `rdi = path_ptr`, `rsi = path_len` | `0` or error (`< 0`) |
 | 16 | `SYS_RMDIR` | `rdi = path_ptr`, `rsi = path_len` | `0` or error (`< 0`) |
-| 17 | `SYS_TCP_LISTEN` | `rdi = port` | listening socket (`≥ 0`) or error (`< 0`) |
-| 18 | `SYS_TCP_ACCEPT` | `rdi = sock` | new socket (`≥ 0`) or error (`< 0`); blocks |
-| 19 | `SYS_TCP_CONNECT` | `rdi = ip`, `rsi = port` | connected socket (`≥ 0`) or error (`< 0`); blocks |
-| 20 | `SYS_TCP_SEND` | `rdi = sock`, `rsi = ptr`, `rdx = len` | bytes accepted (`≥ 0`) or error (`< 0`) |
-| 21 | `SYS_TCP_RECV` | `rdi = sock`, `rsi = ptr`, `rdx = len` | bytes received (`≥ 0`; `0` = the peer closed) or error (`< 0`) |
-| 22 | `SYS_TCP_CLOSE` | `rdi = sock` | `0` or error (`< 0`) |
-| 23 | `SYS_TCP_TIMEOUT` | `rdi = sock`, `rsi = ms` | `0` or error (`< 0`) |
 
 ### `SYS_WRITE` (1)
 
@@ -403,84 +396,6 @@ above) as `SYS_MKDIR`. For the last component, the order is:
 None of these failures changes the volume. `SYS_REMOVE` of a directory is still
 `ERR_TYPE`, and so is `SYS_RMDIR` of a file.
 
-### `SYS_TCP_LISTEN` (17)
-
-Opens a TCP listening socket on `port` (`rdi`, 1 to 65535), on any local
-address, and returns the socket number. Order: `ERR_INVAL` (port `0` or above
-65535), `ERR_MFILE` (the program already has 4 sockets), `ERR_ADDRINUSE` (there
-is already a `listen` on that port), `ERR_NOBUFS` (the kernel's 8 connection
-blocks are in use). It does not depend on the network card. The new socket has a
-10 000 ms timeout.
-
-### `SYS_TCP_ACCEPT` (18)
-
-`rdi = sock` (a listening socket). Waits for an **established** connection in the
-`listen` queue and returns a new socket for it, also with a 10 000 ms timeout.
-`ERR_TYPE` if `sock` is not a listening socket; `ERR_MFILE` if the program
-already has 4 sockets (the connection stays in the queue). With a connection in
-the queue it returns immediately. Without one, the program **blocks without
-using CPU** until one arrives or until the **listening socket's** timeout
-(`ERR_TIMEDOUT`). Each `listen` keeps at most 2 connections not yet accepted; a
-SYN beyond that is ignored (the peer resends it).
-
-### `SYS_TCP_CONNECT` (19)
-
-`rdi = ip`, `rsi = port`. Opens a connection and waits for the three-way
-handshake. The IPv4 address is the number `a<<24 | b<<16 | c<<8 | d` (for
-`10.0.2.2`, `0x0A000202`). Order: `ERR_INVAL` (`ip` zero or above `0xFFFF_FFFF`,
-port `0` or above 65535), `ERR_MFILE`, `ERR_NOBUFS`, `ERR_NODEV` (destination
-outside `127.0.0.0/8` and no network card). The local port comes from
-`49152..=65535`, in sequence. Failures: `ERR_CONNREFUSED` (the peer answered RST,
-including the loopback with no server) and `ERR_TIMEDOUT` (3 SYNs, one per
-second; ARP counts inside that time). The `connect` wait is **fixed** at 3 s and
-does not depend on `SYS_TCP_TIMEOUT`.
-
-### `SYS_TCP_SEND` (20)
-
-`rdi = sock`, `rsi = ptr`, `rdx = len`. Copies up to `len` bytes from `ptr` into
-the send buffer (2048 bytes) and returns how many it copied (`1..=len`). It does
-**not wait for the peer's acknowledgement**: the kernel transmits and
-retransmits in the background (one segment of up to 1024 bytes at a time,
-retransmission every 1 s, at most 5 times). With the buffer full, it blocks until
-there is room or until the socket's timeout (`ERR_TIMEDOUT`). `len == 0` returns
-`0` without looking at `ptr`; `len > 4096` is `ERR_INVAL`. `ERR_TYPE` on a
-listening socket. After the connection fails (`ERR_CONNRESET`, or `ERR_TIMEDOUT`
-by retransmission), every call returns that error until `SYS_TCP_CLOSE`. If the
-**peer** closed its side, sending stays valid (half-close).
-
-### `SYS_TCP_RECV` (21)
-
-`rdi = sock`, `rsi = ptr`, `rdx = len`. Copies up to `len` received bytes into
-`ptr` (the range must be writable) and returns how many it copied. With data, it
-returns immediately. If the peer closed (FIN) and no data remains, it returns
-`0`. Otherwise it blocks until data, FIN or an error arrives, or until the
-socket's timeout (`ERR_TIMEDOUT`). Data and FIN together: the data comes first,
-then `0`. `len == 0` returns `0` without looking at `ptr` and without blocking;
-`len > 4096` is `ERR_INVAL`; `ERR_TYPE` on a listening socket. After a connection
-failure, it delivers the data that was left and then the error.
-
-### `SYS_TCP_CLOSE` (22)
-
-`rdi = sock`. Closes the socket and returns `0`, without waiting; the number
-stops being valid at once. On a connection, the kernel sends what is left in the
-send buffer, then the FIN, and finishes the close in the background (the final
-state, `TIME_WAIT`, lasts 1 s). On a listening socket, connections nobody
-accepted are aborted with RST. On a socket whose connection already failed, it
-just releases it.
-
-### `SYS_TCP_TIMEOUT` (23)
-
-`rdi = sock`, `rsi = ms`. Sets the timeout, in milliseconds, of the socket's next
-waits (`accept`, `send`, `recv`). `ms` goes from `0` to `60000`; above that is
-`ERR_INVAL`. With `0` no wait is done: if the operation cannot proceed at once,
-it returns `ERR_TIMEDOUT`. The resolution is 10 ms (the value is rounded up to
-the next tick). There is no infinite wait.
-
-**Order of checks in the network syscalls**: (1) `ERR_INVAL` for arguments
-outside the limits; (2) `ERR_FAULT` for an invalid pointer (`SYS_TCP_SEND` and
-`SYS_TCP_RECV`), **before** any effect; (3) `ERR_BADF` and `ERR_TYPE` for the
-socket; (4) the rest, as described for each call.
-
 ## 6. Result and error codes
 
 The result in `rax` is a signed 64-bit integer: `≥ 0` is success (the
@@ -492,10 +407,10 @@ meaning depends on the syscall); `< 0` is an error, with the code below.
 | `ERR_INVAL` | `-2` | Argument outside the allowed limits (`len > 4096`, `size == 0` in `SYS_ALLOC`, `path_len == 0`, malformed path, or `len != 8` in `SYS_TIME`). |
 | `ERR_NOMEM` | `-3` | `SYS_ALLOC` could not give the requested memory (1 MiB heap limit or lack of physical memory). |
 | `ERR_NOENT` | `-4` | The path, or a component of it, does not exist. |
-| `ERR_NODEV` | `-5` | Unknown volume, or known but unavailable (no disk, invalid volume); for the network, the card does not exist and the destination is not `127.0.0.0/8`. |
-| `ERR_TYPE` | `-6` | Wrong type: `SYS_READ` on a directory, `SYS_READ_DIR` on a file, a file in the middle of the path, appending to or removing (`SYS_REMOVE`) a directory, or `SYS_RMDIR` of a file; in the network syscalls, using a listening socket for `SYS_TCP_SEND` or `SYS_TCP_RECV`, or a connection socket for `SYS_TCP_ACCEPT`. |
-| `ERR_BADF` | `-7` | Invalid descriptor: outside `0..=3`, not open or already closed, or used in the wrong mode (`SYS_READ` on an append descriptor, `SYS_WRITE_FILE` on a read descriptor); in the network syscalls, a socket outside `0..=3`, not open or already closed. |
-| `ERR_MFILE` | `-8` | The program already has 4 open files (or 4 sockets, in the network syscalls). |
+| `ERR_NODEV` | `-5` | Unknown volume, or known but unavailable (no disk, invalid volume). |
+| `ERR_TYPE` | `-6` | Wrong type: `SYS_READ` on a directory, `SYS_READ_DIR` on a file, a file in the middle of the path, appending to or removing (`SYS_REMOVE`) a directory, or `SYS_RMDIR` of a file. |
+| `ERR_BADF` | `-7` | Invalid descriptor: outside `0..=3`, not open or already closed, or used in the wrong mode (`SYS_READ` on an append descriptor, `SYS_WRITE_FILE` on a read descriptor). |
+| `ERR_MFILE` | `-8` | The program already has 4 open files. |
 | `ERR_NAMETOOLONG` | `-9` | Path longer than 64 bytes, or with more than 8 components. |
 | `ERR_IO` | `-10` | Error reading the volume: disk that does not respond, disk error or corrupted FAT structure. |
 | `ERR_CLOCK` | `-11` | `SYS_TIME`: the clock returned impossible values, did not stabilize or did not respond. |
@@ -504,11 +419,6 @@ meaning depends on the syscall); `< 0` is an error, with the code below.
 | `ERR_ROFS` | `-14` | The volume exists, is mounted and does not accept writes (a volume with more than 1 sector per cluster, or a device that cannot write: writing to `/disco` works). |
 | `ERR_BUSY` | `-15` | `SYS_REMOVE` of a file, or `SYS_RMDIR` of a directory, that some program has open; `SYS_RMDIR` of a volume root. |
 | `ERR_NOTEMPTY` | `-16` | `SYS_RMDIR` of a directory that has any entry besides `.`, `..` and deleted entries. |
-| `ERR_TIMEDOUT` | `-17` | The socket's timeout ran out (`SYS_TCP_ACCEPT`, `SYS_TCP_RECV`, `SYS_TCP_SEND`), or the connection gave up: SYN unanswered in 3 attempts (3 s), or data unacknowledged after 5 retransmissions. |
-| `ERR_CONNREFUSED` | `-18` | `SYS_TCP_CONNECT`: the peer answered the SYN with RST (including the loopback with no server). |
-| `ERR_CONNRESET` | `-19` | The connection was reset by the peer (RST) after being established. |
-| `ERR_ADDRINUSE` | `-20` | `SYS_TCP_LISTEN` on a port that already has a `listen`. |
-| `ERR_NOBUFS` | `-21` | The kernel already has 8 TCP connections (blocks in `TIME_WAIT` are reused, the oldest first). |
 
 There is no errno: the program receives only the value in `rax`.
 
@@ -520,7 +430,7 @@ There is no errno: the program receives only the value in `rax`.
 | `SYS_EXIT(n)`, `n ≠ 0` | `[run] <nome> terminou com codigo <n>` | same |
 | Invalid memory access (`#PF`) in ring 3 | `[run] <nome> encerrado por erro de memoria: #PF (Page Fault) em <rip>` + `codigo de erro: <código>` + `endereco de falha: <endereço>` | same |
 | Other CPU exception in ring 3 (`#DE`, `#UD`, `#GP`, `#SS`, `#NP`) | `[run] <nome> encerrado por erro: <sigla> (<nome da exceção>) em <rip>` (+ error code, when there is one) | same |
-| Nonexistent syscall number (anything outside 1 to 23) | `[run] <nome> encerrado: syscall inexistente (<n>)` | same |
+| Nonexistent syscall number (anything outside 1 to 16) | `[run] <nome> encerrado: syscall inexistente (<n>)` | same |
 
 The message appears **at the moment** that program ends, on screen and
 serial, even if others keep running. A program failure **never** brings down
@@ -529,7 +439,7 @@ freed; the prompt responds again when the last one ends, and the next
 program runs normally. File syscall errors (nonexistent path, unavailable
 volume, invalid descriptor, invalid pointer…) do **not** terminate the
 program: it receives the error code and continues. The files the program
-left open are closed when it ends, for any of the reasons above; so are its sockets (as by `SYS_TCP_CLOSE`). Anything
+left open are closed when it ends, for any of the reasons above. Anything
 that is not one of the lines above (for example, an infinite loop) is
 outside the contract: there is no total time limit, only the slice of each
 turn (section 8).
@@ -570,21 +480,13 @@ What the program **cannot** assume:
   five ticks have been counted since it was put on the CPU, that is, after
   40 to 50 ms of continuous computation. Both values may change in future
   milestones.
-- No direct means of communication between programs. Two programs only talk over the network: by TCP sockets on the loopback (`127.0.0.1`), for example (section 10).
+- No means of communication between programs (it does not exist in this
+  version).
 
 Limit: at most **4** programs at the same time. Asking for more, a name that
 does not exist, a path that could not be read, a file that is too large or
 that is not a valid ELF64 rejects the whole `run` and **no** program is
 started.
-
-### Waiting for the network
-
-A program that waits for the network (`SYS_TCP_ACCEPT`, `SYS_TCP_CONNECT`,
-`SYS_TCP_RECV`, `SYS_TCP_SEND` with a full buffer) is **blocked**: the scheduler
-does not pick it and the other programs go on. If all of them wait for the
-keyboard or the network, the kernel sleeps (`hlt`) until the next interrupt; it
-does not spin in a busy loop. The syscall's result arrives when the program runs
-again. Every wait ends, at most, at the socket's timeout (section 10).
 
 ### Keyboard
 
@@ -700,37 +602,7 @@ another's descriptors. In the runtime library: `File::open`, `File::read`,
 `FileWriter::write`, `FileWriter::write_all`, `remove`, `mkdir` and `rmdir`
 (descriptors are closed automatically).
 
-## 10. Network
-
-The kernel speaks basic TCP/IP through a Realtek RTL8139 card (PCI), with
-Ethernet II, ARP, IPv4, ICMP (echo only) and TCP, plus an internal **loopback**.
-Programs use **TCP sockets** through syscalls 17 to 23 (in the runtime library:
-`TcpListener`, `TcpStream`, `Ipv4`, `NetError`).
-
-- **Address**: static, `10.0.2.15`, mask `255.255.255.0`, gateway `10.0.2.2` (the
-  values of QEMU's user network). The `rede` command changes them, in memory
-  only. Packets to `127.0.0.0/8` return to the stack itself and work **without a
-  card**; any other address needs the card (`ERR_NODEV` from `SYS_TCP_CONNECT`
-  if it does not exist).
-- **Socket**: a number from `0` to `3`, **the program's own** (no other program
-  sees it), separate from file descriptors. At most 4 per program (`ERR_MFILE`)
-  and 8 TCP connections in the whole kernel (`ERR_NOBUFS`).
-- **Simplified TCP**: at most one unacknowledged segment per connection
-  (stop-and-wait), segments of up to 1024 bytes, 2048-byte buffers in each
-  direction, in-order reception only, retransmission every 1 s. No UDP, no IP
-  fragmentation, no congestion control.
-- **Waits**: `SYS_TCP_ACCEPT`, `SYS_TCP_CONNECT`, `SYS_TCP_RECV` and
-  `SYS_TCP_SEND` (with a full buffer) **block without using CPU**, like
-  `SYS_READ_LINE`. Every wait has a timeout (default 10 s, 0 to 60 s with
-  `SYS_TCP_TIMEOUT`; the `connect` one is fixed, 3 s). There is no infinite wait.
-- **Closing**: `SYS_TCP_CLOSE` does not wait. The kernel finishes closing in the
-  background, and the final state (`TIME_WAIT`) lasts 1 s instead of minutes.
-  When a program ends (by `exit` or by a fault) its sockets are closed as by
-  `SYS_TCP_CLOSE`.
-- There is **no** UDP, DNS, DHCP, IPv6 or TLS; only the first RTL8139 card is
-  used.
-
-## 11. History
+## 10. History
 
 | Version | Milestone | Change |
 |---------|-----------|--------|
@@ -741,4 +613,3 @@ Programs use **TCP sockets** through syscalls 17 to 23 (in the runtime library:
 | 5 | 9 (os-rust 0.9.0) | `SYS_TIME` (10); `ERR_CLOCK` error (`-11`); 8-byte `DateTime`, always in UTC. v1 to v4 programs keep working. |
 | 6 | 10 (os-rust 0.10.0) | `SYS_CREATE` (11), `SYS_OPEN_APPEND` (12), `SYS_WRITE_FILE` (13), `SYS_REMOVE` (14); errors `ERR_EXIST` (`-12`) to `ERR_BUSY` (`-15`); `/ram` now accepts writes (only at the end); `/disco` stays read-only; `ERR_TYPE` and `ERR_BADF` also cover the wrong descriptor mode. v1 to v5 programs keep working. |
 | 7 | 11 (os-rust 0.11.0) | `SYS_MKDIR` (15), `SYS_RMDIR` (16); error `ERR_NOTEMPTY` (`-16`); `/disco` now accepts writes (each sector is flushed from the disk cache); `ERR_BUSY` also covers an open directory and a volume root, `ERR_NOSPC` also covers `SYS_MKDIR`, and `ERR_ROFS` only applies to a volume that does not accept writes. v1 to v6 programs keep working. |
-| 8 | 12 (os-rust 0.12.0) | `SYS_TCP_LISTEN` (17), `SYS_TCP_ACCEPT` (18), `SYS_TCP_CONNECT` (19), `SYS_TCP_SEND` (20), `SYS_TCP_RECV` (21), `SYS_TCP_CLOSE` (22), `SYS_TCP_TIMEOUT` (23); errors `ERR_TIMEDOUT` (`-17`) to `ERR_NOBUFS` (`-21`); per-program TCP sockets (up to 4, 8 connections in the kernel), network waits that do not use CPU with a timeout, `127.0.0.0/8` loopback; `ERR_NODEV`, `ERR_MFILE`, `ERR_TYPE` and `ERR_BADF` also cover the network syscalls. v1 to v7 programs keep working. |

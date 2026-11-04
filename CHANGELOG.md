@@ -7,97 +7,12 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
-## [0.12.1] - 2026-10-24
-
-Versão de manutenção: traz o `ftpd` ao Marco 12. Não há marco novo, não há mudança
-de kernel e não há mudança de contrato (continua na versão 8). O `ftpd` é um
-programa de usuário que traduz comandos FTP em chamadas de arquivo, por cima dos
-sockets TCP, para enviar arquivos ao os-rust e recebê-los de volta sem rebuildar.
-
-### Adicionado
-
-- Programa `ftpd` (`programs/src/bin/ftpd.rs`, embutido na imagem de boot): servidor
-  FTP de uma sessão por vez, só no modo passivo (`PASV` e `EPSV`), sem senha, nas
-  portas 21 (controle) e 2100 (dados). Comandos: `USER`, `PASS`, `QUIT`, `NOOP`,
-  `SYST`, `TYPE`, `PWD`, `CWD`, `CDUP`, `LIST`, `NLST`, `RETR`, `STOR`, `SIZE`,
-  `DELE`, `MKD`, `RMD` e `SITE EXIT`. Tem uma raiz virtual `/` com as pastas `ram` e
-  `disco`, `STOR` que nunca sobrescreve e apaga o arquivo parcial se falha, e tempos
-  em toda espera (30 s sem cliente, 30 s sem comando, 10 s por espera de dados).
-- README (português e inglês): seção **Servidor FTP** (**FTP server**), com o
-  passo a passo sem rebuildar, o comando do QEMU à mão com `hostfwd`, exemplos de
-  `curl` e de `ftplib`, os limites e os avisos; `ftpd` na lista de programas.
-- "Programa de exemplo 15: ftpd" nos guias do programador e uma seção sobre o FTP no
-  capítulo do Marco 12 do percurso (`WALKTHROUGH.md` e `WALKTHROUGH.en.md`).
-- Testes: `tests/ftpd.rs`, `tests/ftpd_espera.rs` e `tests/ftpd_ocioso.rs`, com um
-  cliente FTP que roda dentro do QEMU, no gancho do escalonador.
-
-### Alterado
-
-- Versão para `0.12.1` em `Cargo.toml` (a identificação do boot, do `sobre` e das
-  telas de erro acompanham).
-- Os testes que fixavam a versão `0.12.0` passam a conferir `0.12.1`:
-  `a_versao_0_12_1_aparece_e_o_que_existia_continua_igual`,
-  `a_versao_0_12_1_aparece_no_boot_e_no_sobre` e `a_versao_0_12_1_aparece_no_sobre`,
-  e as conferências de versão dos testes do README e do `Cargo.toml` em
-  `tests/rede_programas.rs`.
-
-## [0.12.0] - 2026-10-23
-
-Marco 12: rede básica com TCP/IP. O kernel acha a placa Realtek RTL8139 pelo PCI e
-fala Ethernet, ARP, IPv4, ICMP (eco) e TCP, tudo escrito no projeto, sem crate de
-rede; programas de usuário falam com ela por sockets TCP. Contrato de syscalls:
-versão 8.
-
-### Adicionado
-
-- Varredura do barramento PCI (`src/pci.rs`) e driver da RTL8139 por polling
-  (`src/rtl8139.rs`), com anel de recepção e quatro buffers de transmissão em
-  memória de DMA contígua abaixo de 4 GiB, sem interrupção da placa.
-- A pilha de rede (`src/net.rs` e `src/net/`): soma de verificação da Internet,
-  Ethernet II, ARP (cache de 8 entradas), IPv4, ICMP (só o eco), TCP simplificado
-  (para-e-espera, 1024 bytes por segmento, buffers de 2048, só em ordem,
-  retransmissão a cada 1 s, `TIME_WAIT` de 1 s) e um loopback interno para
-  `127.0.0.0/8` que funciona sem placa.
-- Comandos `rede` (a placa, o endereço, os contadores e as conexões; com três
-  argumentos troca o endereço, só em memória) e `ping <ip>` no prompt.
-- Syscalls `SYS_TCP_LISTEN` (17), `SYS_TCP_ACCEPT` (18), `SYS_TCP_CONNECT` (19),
-  `SYS_TCP_SEND` (20), `SYS_TCP_RECV` (21), `SYS_TCP_CLOSE` (22) e
-  `SYS_TCP_TIMEOUT` (23), e os erros `ERR_TIMEDOUT` (`-17`), `ERR_CONNREFUSED`
-  (`-18`), `ERR_CONNRESET` (`-19`), `ERR_ADDRINUSE` (`-20`) e `ERR_NOBUFS` (`-21`).
-  Sockets por programa (até 4) e 8 conexões no kernel inteiro.
-- Esperas de rede que não gastam CPU: o programa fica bloqueado (estado novo do
-  escalonador) e o kernel dorme se todos esperam; toda espera tem tempo limite.
-  Os sockets são fechados quando o programa termina.
-- Na biblioteca de runtime: `TcpListener`, `TcpStream`, `Ipv4` e `NetError`.
-- Programas `servidor` e `cliente` (`run servidor cliente`).
-- README (português e inglês): seção **Rede no QEMU**, com o QEMU à mão e `hostfwd`
-  para o computador falar com o os-rust, e a nota sobre hardware real.
-- Capítulo sobre a rede no `WALKTHROUGH.md` e no `WALKTHROUGH.en.md`; seção "Rede
-  (TCP)" nos guias do programador.
-- Testes: `tests/rede_pilha.rs` (sem hardware, com placa falsa e relógio injetado),
-  `tests/rede.rs` (placa real do QEMU e eco de TCP pelo `guestfwd`),
-  `tests/rede_syscalls.rs`, `tests/rede_programas.rs` e `tests/rede_espera.rs`.
-
-### Alterado
-
-- Argumentos do QEMU em `Cargo.toml`: `-nic user,model=rtl8139` no `cargo run`, e
-  o mesmo com `guestfwd=tcp:10.0.2.100:7-cmd:cat` no `cargo test`. Nada de
-  `hostfwd` no `cargo run`. O `snapshot=on` dos discos não mudou.
-- Contrato de syscalls: versão 8 (`SYSCALLS.md` e `SYSCALLS.en.md`); o primeiro
-  número livre passou a ser o 24. `ERR_NODEV`, `ERR_MFILE`, `ERR_TYPE` e `ERR_BADF`
-  cobrem também as syscalls de rede.
-- Testes existentes que valem para a versão 0.11.0 ou para o contrato 7 passaram a
-  conferir a 0.12.0 e o contrato 8: `contrato_declara_a_versao_8`, os de versão e
-  de contrato de `tests/escrita_no_disco.rs` e `tests/escrita_no_ramdisk.rs`, e os
-  três do primeiro número livre (agora o 24).
-- Versão do projeto: 0.12.0.
-
 ## [0.11.0] - 2026-10-23
 
 Marco 11: escrita no disco ATA. O `/disco` passa a **aceitar escrita** pela mesma
 camada de FAT do `/ram`, e o kernel ganha criar e remover diretórios. Contrato
-de syscalls: versão 7. Foi o último marco do lote anterior; a rede veio no
-Marco 12.
+de syscalls: versão 7. **Este é o último marco do lote atual**; o próximo lote
+acrescentará rede básica com TCP/IP.
 
 ### Adicionado
 

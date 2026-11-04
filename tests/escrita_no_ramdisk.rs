@@ -527,12 +527,12 @@ fn write_file_de_4096_bytes_atravessa_varios_clusters() {
 }
 
 #[test_case]
-fn numero_24_continua_encerrando_so_o_programa() {
-    // O contrato v8 vai até `SYS_TCP_TIMEOUT` (23); o 24 é o primeiro número livre.
+fn numero_17_continua_encerrando_so_o_programa() {
+    // O contrato v7 vai até `SYS_RMDIR` (16); o 17 é o primeiro número livre.
     let mut a = Asm::new();
-    a.mov32(Rax, 24);
+    a.mov32(Rax, 17);
     a.syscall();
-    assert_eq!(rodar_sintetico("fs_dezessete", &synth_elf(&a.0)), Termination::BadSyscall { number: 24 });
+    assert_eq!(rodar_sintetico("fs_dezessete", &synth_elf(&a.0)), Termination::BadSyscall { number: 17 });
     exige(&rodar_comando("echo vivo"), "vivo");
 }
 
@@ -864,17 +864,17 @@ fn a_imagem_embutida_nunca_e_alterada_e_reiniciar_restaura_o_ram() {
 // ---------------------------------------------------------------------------
 
 #[test_case]
-fn a_versao_0_12_1_aparece_no_sobre() {
-    assert_eq!(os_rust::VERSION, "os-rust v0.12.1");
-    exige(&rodar_comando("sobre"), "os-rust v0.12.1");
+fn a_versao_0_11_0_aparece_no_sobre() {
+    assert_eq!(os_rust::VERSION, "os-rust v0.11.0");
+    exige(&rodar_comando("sobre"), "os-rust v0.11.0");
 }
 
 const CONTRATO: &str = include_str!("../SYSCALLS.md");
 
 #[test_case]
 fn o_contrato_concorda_com_as_constantes() {
-    assert!(CONTRATO.contains("**Versão do contrato**: 8"));
-    assert!(CONTRATO.contains("os-rust 0.12.0 (Marco 12)"));
+    assert!(CONTRATO.contains("**Versão do contrato**: 7"));
+    assert!(CONTRATO.contains("os-rust 0.11.0 (Marco 11)"));
     for (nr, nome) in [(SYS_CREATE, "SYS_CREATE"), (SYS_OPEN_APPEND, "SYS_OPEN_APPEND"), (SYS_WRITE_FILE, "SYS_WRITE_FILE"), (SYS_REMOVE, "SYS_REMOVE")] {
         assert!(CONTRATO.contains(&alloc::format!("| {} | `{}` |", nr, nome)), "{}", nome);
     }
@@ -884,7 +884,7 @@ fn o_contrato_concorda_com_as_constantes() {
     }
     assert_eq!((ERR_EXIST, ERR_NOSPC, ERR_ROFS, ERR_BUSY), (-12, -13, -14, -15));
     assert!(CONTRATO.contains("**somente leitura**"));
-    assert!(CONTRATO.contains("fora de 1 a 23"));
+    assert!(CONTRATO.contains("fora de 1 a 16"));
 }
 
 #[test_case]

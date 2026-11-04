@@ -729,11 +729,11 @@ fn mkdir_e_rmdir_funcionam_no_disco_por_syscall() {
 }
 
 #[test_case]
-fn o_numero_24_continua_encerrando_so_o_programa_e_15_e_16_sao_syscalls() {
+fn o_numero_17_continua_encerrando_so_o_programa_e_15_e_16_sao_syscalls() {
     let mut a = Asm::new();
-    a.mov32(Rax, 24);
+    a.mov32(Rax, 17);
     a.syscall();
-    assert_eq!(rodar_sintetico("fs_dezessete", &synth_elf(&a.0)), Termination::BadSyscall { number: 24 });
+    assert_eq!(rodar_sintetico("fs_dezessete", &synth_elf(&a.0)), Termination::BadSyscall { number: 17 });
     exige(&rodar_comando("echo vivo"), "vivo");
     // `SYS_MKDIR` e `SYS_RMDIR` com ponteiro ruim devolvem `ERR_FAULT` e o programa segue.
     let elf = programa(&[], |a, _| {
@@ -840,17 +840,17 @@ fn o_readme_ensina_preservar_o_disco_e_o_pen_drive() {
 // ---------------------------------------------------------------------------
 
 #[test_case]
-fn a_versao_0_12_1_aparece_no_boot_e_no_sobre() {
-    assert_eq!(os_rust::VERSION, "os-rust v0.12.1");
-    exige(&rodar_comando("sobre"), "os-rust v0.12.1");
+fn a_versao_0_11_0_aparece_no_boot_e_no_sobre() {
+    assert_eq!(os_rust::VERSION, "os-rust v0.11.0");
+    exige(&rodar_comando("sobre"), "os-rust v0.11.0");
 }
 
 const CONTRATO: &str = include_str!("../SYSCALLS.md");
 
 #[test_case]
-fn o_contrato_concorda_com_as_constantes_da_versao_8() {
-    assert!(CONTRATO.contains("**Versão do contrato**: 8"));
-    assert!(CONTRATO.contains("os-rust 0.12.0 (Marco 12)"));
+fn o_contrato_concorda_com_as_constantes_da_versao_7() {
+    assert!(CONTRATO.contains("**Versão do contrato**: 7"));
+    assert!(CONTRATO.contains("os-rust 0.11.0 (Marco 11)"));
     for (nr, nome) in [(SYS_MKDIR, "SYS_MKDIR"), (SYS_RMDIR, "SYS_RMDIR")] {
         assert!(CONTRATO.contains(&alloc::format!("| {} | `{}` |", nr, nome)), "{}", nome);
     }
@@ -858,10 +858,10 @@ fn o_contrato_concorda_com_as_constantes_da_versao_8() {
     assert!(CONTRATO.contains(&alloc::format!("| `ERR_NOTEMPTY` | `{}` |", ERR_NOTEMPTY)));
     assert_eq!(ERR_NOTEMPTY, -16);
     assert!(CONTRATO.contains("**somente leitura**"));
-    assert!(CONTRATO.contains("fora de 1 a 23"));
+    assert!(CONTRATO.contains("fora de 1 a 16"));
     // O inglês acompanha.
     let en = include_str!("../SYSCALLS.en.md");
-    assert!(en.contains("**Contract version**: 8") && en.contains("os-rust 0.12.0"));
+    assert!(en.contains("**Contract version**: 7") && en.contains("os-rust 0.11.0"));
     assert!(en.contains("| 15 | `SYS_MKDIR` |") && en.contains("| 16 | `SYS_RMDIR` |"));
     assert!(en.contains("| `ERR_NOTEMPTY` | `-16` |"));
 }

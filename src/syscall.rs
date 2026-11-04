@@ -19,7 +19,6 @@ use x86_64::VirtAddr;
 use crate::gdt::{USER_CODE_SELECTOR_BITS, USER_DATA_SELECTOR_BITS};
 use crate::scheduler;
 use crate::task::TaskContext;
-use crate::{net, timer};
 use crate::user::{self, Termination, USER_REGION_END, USER_REGION_START};
 use crate::{gdt, memory, vga_buffer};
 
@@ -31,12 +30,10 @@ pub use abi::{
     DateTime, DirEntryRaw, ERR_BADF, ERR_BUSY, ERR_CLOCK, ERR_EXIST, ERR_FAULT, ERR_INVAL, ERR_IO,
     ERR_MFILE, ERR_NAMETOOLONG, ERR_NODEV, ERR_NOENT, ERR_NOMEM, ERR_NOSPC, ERR_NOTEMPTY, ERR_ROFS,
     ERR_TYPE, IO_MAX_LEN, SYS_ALLOC, SYS_CLOSE, SYS_CREATE, SYS_EXIT, SYS_MKDIR, SYS_OPEN,
-    SYS_OPEN_APPEND, SYS_READ, SYS_READ_DIR, SYS_READ_LINE, SYS_REMOVE, SYS_RMDIR, SYS_TCP_ACCEPT,
-    SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_LISTEN, SYS_TCP_RECV, SYS_TCP_SEND, SYS_TCP_TIMEOUT,
-    SYS_TIME, SYS_WRITE, SYS_WRITE_FILE, SYS_YIELD, TIME_SIZE,
+    SYS_OPEN_APPEND, SYS_READ, SYS_READ_DIR, SYS_READ_LINE, SYS_REMOVE, SYS_RMDIR, SYS_TIME,
+    SYS_WRITE, SYS_WRITE_FILE, SYS_YIELD, TIME_SIZE,
 };
-pub use abi::{ERR_ADDRINUSE, ERR_CONNREFUSED, ERR_CONNRESET, ERR_NOBUFS, ERR_TIMEDOUT};
-use abi::{DIR_ENTRY_SIZE, KIND_DIR, KIND_FILE, MAX_PATH_LEN, TCP_MAX_TIMEOUT_MS};
+use abi::{DIR_ENTRY_SIZE, KIND_DIR, KIND_FILE, MAX_PATH_LEN};
 
 use crate::fat::Kind;
 use crate::fs::FsError;
@@ -208,13 +205,6 @@ extern "C" fn syscall_dispatch(ctx: &mut TaskContext) {
         SYS_REMOVE => ctx.rax = sys_remove(a1, a2) as u64,
         SYS_MKDIR => ctx.rax = sys_mkdir(a1, a2) as u64,
         SYS_RMDIR => ctx.rax = sys_rmdir(a1, a2) as u64,
-        SYS_TCP_LISTEN => ctx.rax = sys_tcp_listen(a1) as u64,
-        SYS_TCP_ACCEPT => sys_tcp_accept(ctx, a1),
-        SYS_TCP_CONNECT => sys_tcp_connect(ctx, a1, a2),
-        SYS_TCP_SEND => sys_tcp_send(ctx, a1, a2, a3),
-        SYS_TCP_RECV => sys_tcp_recv(ctx, a1, a2, a3),
-        SYS_TCP_CLOSE => ctx.rax = sys_tcp_close(a1) as u64,
-        SYS_TCP_TIMEOUT => ctx.rax = sys_tcp_timeout(a1, a2) as u64,
         _ => scheduler::terminate_current(Termination::BadSyscall { number: nr }),
     }
 }
@@ -275,101 +265,6 @@ fn sys_read_line(ctx: &mut TaskContext, ptr: u64, len: u64) {
         return;
     }
     scheduler::block_on_keyboard(ctx, ptr, len)
-}
-
-// ---------------------------------------------------------------------------
-// Rede (sockets TCP). A ordem das verificações é a do contrato: (1) `ERR_INVAL`
-// para argumentos fora dos limites; (2) `ERR_FAULT` para ponteiro inválido, antes
-// de qualquer efeito; (3) `ERR_BADF`/`ERR_TYPE` para o socket; (4) o resto, na
-// pilha (`net::sys_*`). O socket é um número da tabela do programa que chama.
-// ---------------------------------------------------------------------------
-
-/// Maior porta TCP.
-const MAX_PORT: u64 = 65535;
-
-/// Termina uma syscall de rede: grava o resultado ou, se a pilha não pôde
-/// atender, bloqueia a tarefa (a CPU passa adiante e o resultado vem depois).
-fn finish_net(ctx: &mut TaskContext, outcome: Option<net::Outcome>) {
-    match outcome {
-        Some(net::Outcome::Done(result)) => ctx.rax = result as u64,
-        Some(net::Outcome::Block(pending)) => scheduler::block_on_net(ctx, pending),
-        None => ctx.rax = ERR_BADF as u64,
-    }
-}
-
-/// `tcp_listen(port)`.
-fn sys_tcp_listen(port: u64) -> i64 {
-    if port == 0 || port > MAX_PORT {
-        return ERR_INVAL;
-    }
-    scheduler::with_current_sockets(|table| net::sys_listen(table, port as u16)).unwrap_or(ERR_BADF)
-}
-
-/// `tcp_accept(sock)`.
-fn sys_tcp_accept(ctx: &mut TaskContext, sock: u64) {
-    let now = timer::ticks();
-    let outcome = scheduler::with_current_sockets(|table| net::sys_accept(table, sock, now));
-    finish_net(ctx, outcome);
-}
-
-/// `tcp_connect(ip, port)`.
-fn sys_tcp_connect(ctx: &mut TaskContext, ip: u64, port: u64) {
-    if ip == 0 || ip > 0xFFFF_FFFF || port == 0 || port > MAX_PORT {
-        ctx.rax = ERR_INVAL as u64;
-        return;
-    }
-    let now = timer::ticks();
-    let ip = (ip as u32).to_be_bytes();
-    let outcome = scheduler::with_current_sockets(|table| net::sys_connect(table, ip, port as u16, now));
-    finish_net(ctx, outcome);
-}
-
-/// `tcp_send(sock, ptr, len)`.
-fn sys_tcp_send(ctx: &mut TaskContext, sock: u64, ptr: u64, len: u64) {
-    if len > IO_MAX_LEN {
-        ctx.rax = ERR_INVAL as u64;
-        return;
-    }
-    if len > 0 {
-        if let Err(code) = validate_user_range(ptr, len, false) {
-            ctx.rax = code as u64;
-            return;
-        }
-    }
-    let now = timer::ticks();
-    let outcome = scheduler::with_current_sockets(|table| net::sys_send(table, sock, ptr, len, now));
-    finish_net(ctx, outcome);
-}
-
-/// `tcp_recv(sock, ptr, len)`: o kernel escreve em `ptr`, então o intervalo
-/// precisa ser gravável.
-fn sys_tcp_recv(ctx: &mut TaskContext, sock: u64, ptr: u64, len: u64) {
-    if len > IO_MAX_LEN {
-        ctx.rax = ERR_INVAL as u64;
-        return;
-    }
-    if len > 0 {
-        if let Err(code) = validate_user_range(ptr, len, true) {
-            ctx.rax = code as u64;
-            return;
-        }
-    }
-    let now = timer::ticks();
-    let outcome = scheduler::with_current_sockets(|table| net::sys_recv(table, sock, ptr, len, now));
-    finish_net(ctx, outcome);
-}
-
-/// `tcp_close(sock)`.
-fn sys_tcp_close(sock: u64) -> i64 {
-    scheduler::with_current_sockets(|table| net::sys_close(table, sock)).unwrap_or(ERR_BADF)
-}
-
-/// `tcp_timeout(sock, ms)`.
-fn sys_tcp_timeout(sock: u64, ms: u64) -> i64 {
-    if ms > TCP_MAX_TIMEOUT_MS {
-        return ERR_INVAL;
-    }
-    scheduler::with_current_sockets(|table| net::sys_timeout(table, sock, ms)).unwrap_or(ERR_BADF)
 }
 
 /// `write(ptr, len)`. O kernel **não confia no ponteiro**: antes de ler,
@@ -825,9 +720,9 @@ mod tests {
     }
 
     #[test_case]
-    fn contrato_declara_a_versao_8() {
-        assert!(CONTRATO.contains("**Versão do contrato**: 8"));
-        assert!(CONTRATO.contains("os-rust 0.12.0 (Marco 12)"));
+    fn contrato_declara_a_versao_7() {
+        assert!(CONTRATO.contains("**Versão do contrato**: 7"));
+        assert!(CONTRATO.contains("os-rust 0.11.0 (Marco 11)"));
     }
 
     #[test_case]

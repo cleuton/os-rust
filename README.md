@@ -2,7 +2,28 @@
 
 # os-rust
 
-![](./os-rust-logo.jpeg)
+```text
+                    #####
+                   // : \\
+                ..-  --:  -..
+           //--/ .:==███==+. \--\\
+          //-\ +- ███ █ ███ -+ /-\\
+           \\ | ██  @@@@@  ██ | //
+            | | @  @     @  @ | |
+            | | @██@ ███ @██@ | |
+            | | @  @@@@@@   @ | |
+           // | ██ @  █  % ██ | \\
+          \\.- -- ███ █ ███ -- -.//
+           \\--\. -- ███ -- ./--//
+                 --. -.- .--
+                   \\ : //
+                    #####
+                                         []
+ .o:o.   .s::.       [.o= []  |]   .s:: =++=t
+[o   o] [:___  ===== [r   []  |]  [:___  []
+[o   o]     :]       []   []  |]      :] []
+  o:o   ::__:        []    uu/|]  ::__:   \ut
+```
 
 ![](imagem.jpg)
 
@@ -32,7 +53,7 @@ sistema de arquivos ou multitarefa completa.
 
 A documentação do projeto também está disponível em inglês (veja o link `ENGLISH VERSION` no início de cada arquivo `.md`).
 
-**Versão atual: 0.12.1.** Os Marcos 0 (boot em modo texto VGA, com
+**Versão atual: 0.11.0.** Os Marcos 0 (boot em modo texto VGA, com
 mensagem de boas-vindas, rolagem e tratamento de panic legível), 1
 (interrupções, teclado e prompt de comandos), 2 (infraestrutura de
 depuração: saída serial e testes automatizados dentro do QEMU), 3
@@ -55,19 +76,16 @@ pela syscall `SYS_TIME`, com `run hora`), 10 (escrita no ramdisk: criar,
 acrescentar e apagar arquivos no `/ram`, pelo prompt e por programas de
 usuário, com `run gravador` e `run apagador`) e 11 (escrita no disco ATA: o
 `/disco` também grava, criar e remover diretórios, e os dados persistem entre
-boots quando o QEMU roda sobre uma cópia da imagem, com `run caderno`) e 12
-(rede básica com TCP/IP: placa RTL8139, ARP, IP, ICMP e TCP, com `rede`, `ping`
-e `run servidor cliente`) estão concluídos e são o que este repositório executa
-hoje. A versão 0.12.1 traz o programa `ftpd` ao Marco 12: um servidor FTP para
-trocar arquivos com o computador de verdade, sem rebuildar (veja [Servidor
-FTP](#servidor-ftp)). A demonstração original de palestra, no
+boots quando o QEMU roda sobre uma cópia da imagem, com `run caderno`) estão
+concluídos e são o que este repositório executa hoje. O Marco 11 é o último do
+lote atual. A demonstração original de palestra, no
 formato usado em aula, está preservada na tag git `v1.0-demo` e continua
 podendo ser usada como está.
 
 ## Roadmap
 
 O os-rust avança em marcos numerados, cada um terminando em algo visível
-no QEMU. A tabela abaixo resume os catorze primeiros marcos planejados; os
+no QEMU. A tabela abaixo resume os treze primeiros marcos planejados; os
 detalhes de cada um vêm na sequência.
 
 | Marco | Objetivo | Demonstrável | Status |
@@ -85,7 +103,7 @@ detalhes de cada um vêm na sequência.
 | 9. Driver de RTC | Ler a data e a hora do relógio de tempo real (chip CMOS) por polling e oferecê-las ao prompt e aos programas de usuário por uma syscall nova. | `data` mostra a data e a hora em UTC; `run hora` mostra o mesmo, pedido ao kernel por um programa. | Concluído |
 | 10. Escrita no ramdisk | Escrever em FAT16, criando, gravando, ampliando e apagando arquivos, aplicado ao volume `/ram`. | Criar um arquivo em `/ram`, mostrá-lo com `cat` e apagá-lo, também por programa de usuário. | Concluído |
 | 11. Escrita no disco ATA | Gravar setores no disco ATA e tornar o `/disco` gravável pela mesma camada de escrita, com persistência entre boots. | Gravar um arquivo em `/disco`, reiniciar o QEMU e ler o arquivo. | Concluído |
-| 12. Rede básica com TCP/IP | Falar TCP/IP de forma básica, mas funcionando no QEMU: driver de placa de rede (RTL8139), ARP, IP, ICMP e TCP. | Trocar dados pela rede no QEMU (`rede`, `ping 10.0.2.2`, `run servidor cliente`); em hardware real (bare metal) deve funcionar com uma RTL8139, sem garantia. | Concluído |
+| 12. Rede básica com TCP/IP | Falar TCP/IP de forma básica, mas funcionando: driver de placa de rede, ARP, IP, UDP e TCP. | Trocar dados pela rede no QEMU ou em hardware real (bare metal). | Planejado |
 
 ### Detalhes dos marcos
 
@@ -232,24 +250,16 @@ usam `snapshot=on`, então o que se grava nessas execuções é descartado; para
 preservar dados, dá-se boot no QEMU à mão sobre uma **cópia** da imagem (veja
 [Preservando o disco entre boots](#preservando-o-disco-entre-boots)).
 Demonstrável: gravar um arquivo em `/disco`, reiniciar o QEMU e ler o arquivo.
-Depende do Marco 10. Foi o último marco do lote anterior; a rede veio no
-Marco 12.
+Depende do Marco 10. **Este é o último marco do lote atual.** O próximo lote
+acrescentará rede básica com TCP/IP, demonstrável no QEMU ou em hardware real
+(bare metal), básica mas funcionando.
 
-**Marco 12. Rede básica com TCP/IP.** Concluído. O kernel passou a falar
-TCP/IP: varre o barramento PCI, acha a placa Realtek RTL8139 (a que o QEMU
-emula) e a programa por polling, sem interrupção da placa; por cima dela rodam
-Ethernet II, ARP, IPv4, ICMP (só o eco, para o `ping`) e TCP, tudo escrito no
-projeto, sem crate de rede. Um loopback interno devolve à própria pilha os
-pacotes para `127.0.0.1`, e por isso dois programas conversam por TCP até sem
-placa. Os programas usam **sockets TCP** (sete syscalls novas, 17 a 23, contrato
-versão 8; `TcpListener` e `TcpStream` na biblioteca de runtime), e esperar a
-rede não gasta CPU: o programa fica bloqueado como no `read_line`, e o kernel
-dorme se todos esperam. O TCP é simples de propósito: um segmento sem
-confirmação por vez, só recebe em ordem, retransmite a cada 1 s, `TIME_WAIT` de
-1 s. O prompt ganhou `rede` e `ping`, e os programas `servidor` e `cliente`
-mostram dois programas conversando por TCP (`run servidor cliente`).
-Demonstrável no QEMU; em hardware real (bare metal) deve funcionar se houver uma
-RTL8139, mas isso não foi testado e não há garantia. Depende do Marco 11.
+**Marco 12. Rede básica com TCP/IP.** Planejado, ainda sem spec. É o primeiro
+marco do próximo lote: rede básica com TCP/IP, demonstrável no QEMU ou em
+hardware real (bare metal), básica mas funcionando. O escopo (driver de placa,
+PCI, ARP, IP, UDP, TCP e sockets) será definido na spec do marco. Hoje a rede
+está fora de escopo na constituição, que será atualizada antes dessa spec.
+Depende do Marco 11.
 
 ### Por que essa ordem
 
@@ -368,10 +378,6 @@ Confirme que o QEMU está acessível:
 qemu-system-x86_64 --version
 ```
 
-Os testes de rede (Marco 12) usam o `guestfwd` do QEMU, que roda o utilitário
-`cat` do computador para fazer um serviço de eco: ele existe no Linux e no
-macOS (no Windows esse teste de eco não roda).
-
 ## Compilando e rodando
 
 Com os três pré-requisitos acima instalados, a partir da raiz do
@@ -386,7 +392,7 @@ projeto (`x86_64-os_rust.json`), gerar uma imagem de boot com `bootimage`,
 e abrir uma janela do QEMU que dá boot via BIOS direto nesse binário. Em
 poucos segundos você deve ver o logo do os-rust (as 20 linhas do símbolo
 e do nome, no topo da tela), seguido da linha de identificação
-`os-rust v0.12.1` — a versão atual do projeto — e do prompt `os-rust> `
+`os-rust v0.11.0` — a versão atual do projeto — e do prompt `os-rust> `
 pronto para digitação, não um terminal comum.
 
 O mesmo `cargo run` também compila a biblioteca de runtime (`runtime/`) e
@@ -431,12 +437,10 @@ Não é preciso nenhum passo manual adicional para isso: é o mesmo
 | `apaga <caminho>` | Apaga um arquivo do `/ram` ou do `/disco` e devolve o espaço dele; um arquivo aberto por algum programa dá `arquivo em uso`. Só um volume que não aceita escrita (mais de 1 setor por cluster) dá `volume somente leitura` |
 | `mkdir <caminho>` | Cria um diretório vazio (`mkdir: criado <caminho>`); o pai precisa existir, e o diretório ocupa um cluster e não cresce (14 entradas). Um nome que já existe dá `ja existe` |
 | `rmdir <caminho>` | Remove um diretório vazio (`rmdir: removido <caminho>`); com entradas dá `diretorio nao vazio`, e a raiz de um volume ou um diretório aberto por algum programa dá `diretorio em uso` |
-| `rede [<ip> <mascara> <gateway>]` | Sem argumentos, mostra em quatro linhas a placa de rede (RTL8139 e o MAC), o endereço, os contadores de quadros e as conexões TCP em uso; com três argumentos, troca o endereço (só em memória; endereço inválido não muda nada). Veja [Rede no QEMU](#rede-no-qemu) |
-| `ping <ip>` | Manda 4 pedidos de eco ICMP (um por segundo) e mostra as respostas, por exemplo `ping 10.0.2.2` ou `ping 127.0.0.1`. **Não é o programa `ping` de `run ping pong`** (Marco 7), que só se alterna com o `pong` |
 | `data` | Mostra a data e a hora do relógio do computador, em UTC, no formato `AAAA-MM-DD HH:MM:SS UTC`; se o relógio estiver inválido ou não responder, mostra uma mensagem clara. Argumentos extras são ignorados |
 | `run <alvo> [<alvo>...]` | Executa programas de usuário em modo usuário (ring 3), até 4 ao mesmo tempo (o mesmo alvo pode se repetir), e volta ao prompt quando o último termina. Um alvo que começa com `/` é o caminho de um executável ELF64 (até 64 KiB) lido de um volume, como `/disco/bin/visita`; qualquer outro é o nome de um programa embutido na imagem. Os dois se misturam (`run /disco/bin/visita hello`). Sem argumento, com um alvo inválido ou com mais de 4 alvos, não inicia nenhum |
 
-### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `visita` e `labirint`
+### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `visita` e `labirint`
 
 O comando `run` executa programas escritos fora do kernel. Cada um vive em
 `programs/src/bin/` (exceto `visita` e `labirint`, em
@@ -530,52 +534,6 @@ O comando `run` executa programas escritos fora do kernel. Cada um vive em
   boots](#preservando-o-disco-entre-boots): no segundo boot, `cat
   /disco/diario/nota.txt` mostra `gravado no disco` e o terceiro `run caderno`
   mostra 3 linhas.
-- **`servidor`** e **`cliente`** (`run servidor cliente`): dois programas
-  conversam por TCP. O `servidor` ouve na porta 8000 e responde a uma
-  requisição com uma página HTTP/1.0 mínima (88 bytes: 65 de cabeçalho e 23 de
-  corpo); o `cliente` pergunta o endereço (Enter = `127.0.0.1`), manda um pedido
-  de 33 bytes e escreve a resposta na tela, sem os `\r`:
-
-  ```text
-  os-rust> run servidor cliente
-  servidor: ouvindo na porta 8000
-  cliente: endereco do servidor (vazio = 127.0.0.1):
-  servidor: recebi 33 bytes
-  HTTP/1.0 200 OK
-  Content-Type: text/plain
-  Content-Length: 23
-
-  ola da rede do os-rust
-  cliente: 88 bytes recebidos
-  servidor: respondi 23 bytes de corpo
-  ```
-
-  (a ordem das linhas dos dois programas pode variar). O tráfego vai pelo
-  loopback, sem rede. `run servidor` sozinho desiste em 30 s (`servidor: ninguem
-  se conectou em 30 s`); `run cliente` sem servidor mostra `cliente: nao
-  conectou em 127.0.0.1:8000: recusado`. Com o QEMU do passo a passo de [Rede no
-  QEMU](#rede-no-qemu), o computador de verdade também conversa com eles.
-- **`ftpd`** (`run ftpd`): um servidor FTP que troca arquivos entre o computador
-  de verdade e os volumes `/ram` e `/disco`, sem refazer a imagem. Cada comando
-  FTP vira uma chamada de arquivo, e os bytes viajam por TCP (a conexão de
-  controle na porta 21 e uma de dados na 2100). Pergunta o endereço que anuncia
-  no modo passivo (Enter = `127.0.0.1`), atende **um cliente por vez**, sem
-  senha, e termina com `SITE EXIT` ou depois de 30 s sem cliente. Precisa do QEMU
-  iniciado à mão com `hostfwd` ([Servidor FTP](#servidor-ftp)):
-
-  ```text
-  os-rust> run ftpd
-  ftpd: endereco a anunciar no modo passivo (vazio = 127.0.0.1):
-  ftpd: ouvindo na porta 21 (dados na porta 2100), anunciando 127.0.0.1
-  ftpd: cliente conectado
-  ftpd: enviou /ram/ola.txt (72 bytes)
-  ftpd: sessao encerrada
-  ```
-
-  e, no computador, `curl ftp://127.0.0.1:2121/` lista `ram` e `disco`,
-  `curl ftp://127.0.0.1:2121/ram/` mostra as entradas reais do ramdisk e `curl -o
-  copia.txt ftp://127.0.0.1:2121/ram/ola.txt` traz o arquivo, com os mesmos 72
-  bytes. Sem cliente, `ftpd: ninguem se conectou em 30 s, encerrando`.
 - **`leitor`** (`run leitor`): abre `/disco/docs/longo.txt`, um arquivo que
   ocupa mais de um cluster do disco, e escreve o conteúdo na tela, lendo em
   pedaços de 128 bytes pelas syscalls de arquivo. O programa nunca fala com o
@@ -746,170 +704,6 @@ aparece como indisponível (`ls /disco` diz `volume indisponivel`), porque o
 kernel só procura o disco ATA primário-escravo; e isto **não foi testado em
 hardware real**: é uma instrução de uso, sem garantia.
 
-### Rede no QEMU
-
-O Marco 12 dá ao os-rust uma pilha de rede. O `cargo run` já liga ao QEMU uma
-placa Realtek RTL8139 na rede de usuário do próprio QEMU (`-nic
-user,model=rtl8139`): o kernel recebe o endereço `10.0.2.15`, e o gateway
-`10.0.2.2` responde a ARP e a `ping` sozinho. Não precisa de internet nem de
-privilégio de administrador. Dentro do os-rust:
-
-```text
-os-rust> rede
-placa: RTL8139 mac 52:54:00:12:34:56
-ip: 10.0.2.15 mascara: 255.255.255.0 gateway: 10.0.2.2
-quadros: recebidos=0 enviados=0 descartados=0
-tcp: 0 de 8 conexoes em uso
-os-rust> ping 10.0.2.2
-ping 10.0.2.2: 4 pedidos
-resposta de 10.0.2.2: seq=1 tempo<10 ms
-...
-ping: 4 enviados, 4 recebidos
-os-rust> run servidor cliente
-```
-
-`rede <ip> <mascara> <gateway>` troca o endereço (só em memória). `run servidor
-cliente` (basta apertar Enter no endereço) leva dois programas a conversar por
-TCP pelo `127.0.0.1`, **sem nenhuma rede**: o loopback funciona até sem placa.
-
-**Falar com o computador de verdade.** O `cargo run` não abre nenhuma porta do
-computador (uma porta já ocupada impediria o QEMU de abrir). Para o computador
-falar com o os-rust, suba o QEMU à mão com `hostfwd`:
-
-```sh
-cargo bootimage
-qemu-system-x86_64 -drive format=raw,if=ide,index=0,file=target/x86_64-os_rust/debug/bootimage-os-rust.bin -drive format=raw,if=ide,index=1,file=target/imagens/disco.img,snapshot=on -nic user,model=rtl8139,hostfwd=tcp:127.0.0.1:8080-:8000 -serial stdio
-```
-
-O `hostfwd=tcp:127.0.0.1:8080-:8000` encaminha a porta 8080 do computador para a
-porta 8000 do os-rust (a do `servidor`). Duas demonstrações:
-
-- **O computador acessa o os-rust.** No prompt do os-rust, `run servidor`; no
-  computador, em outro terminal:
-
-  ```sh
-  curl http://127.0.0.1:8080/
-  ```
-
-  O `curl` mostra `ola da rede do os-rust` e o `servidor` escreve `servidor:
-  respondi 23 bytes de corpo`.
-- **O os-rust acessa o computador.** No computador, sirva a pasta atual na porta
-  8000:
-
-  ```sh
-  python3 -m http.server 8000
-  ```
-
-  No os-rust, `run cliente` e digite `10.0.2.2` (é o computador, visto de dentro
-  do QEMU): a listagem aparece, até 1024 bytes, seguida de `cliente: 1024 bytes
-  recebidos (cortado)`.
-
-Esse modo cobre **só TCP**: o `ping` do computador para o os-rust não funciona
-(precisaria de rede em ponte, fora do escopo). O comando `ping` do os-rust é
-outra coisa que o programa `ping` de `run ping pong` (Marco 7): o comando
-manda ecos ICMP; o programa só se alterna com o `pong`.
-
-**Hardware real.** O kernel só conhece a placa Realtek RTL8139 (PCI). Se o
-computador tiver uma, o `rede <ip> <mascara> <gateway>` configura o endereço da
-sua rede (não há DHCP). Nada disso foi testado fora do QEMU: é uma instrução de
-uso, sem garantia.
-
-### Servidor FTP
-
-O `ftpd` (`run ftpd`) deixa o computador de verdade **enviar arquivos para o
-os-rust e recebê-los de volta**, sem refazer a imagem e sem rebuildar nada. Antes
-da 0.12.1, o único jeito de pôr um arquivo no os-rust era colocá-lo em `discos/`
-e rodar `cargo run` de novo, e o único jeito de tirá-lo era `cat` na tela. Com o
-FTP você usa os clientes que o computador já tem (`curl`, Python, `lftp`,
-FileZilla). Um executável ELF64 de até 64 KiB, no formato do contrato
-(`SYSCALLS.md`), enviado para `/disco/bin/`, roda com `run /disco/bin/<nome>`.
-
-**Passo a passo, sem rebuildar.** O `ftpd` já está embutido na imagem de boot
-(como `servidor` e `cliente`); basta um `cargo bootimage`.
-
-**1.** Gere a imagem e uma cópia do disco (uma vez; veja [Preservando o disco entre
-boots](#preservando-o-disco-entre-boots)):
-
-```sh
-cargo bootimage
-cp target/imagens/disco.img ~/os-rust-disco.img
-```
-
-**2.** Suba o QEMU à mão, com as duas portas encaminhadas (a 2121 do computador vai
-para a porta 21 do os-rust, e a 2100 para a 2100). É **uma linha só**, e não
-tem `snapshot=on`, para o que você enviar ao `/disco` ficar guardado:
-
-```sh
-qemu-system-x86_64 -drive format=raw,if=ide,index=0,file=target/x86_64-os_rust/debug/bootimage-os-rust.bin -drive format=raw,if=ide,index=1,file=$HOME/os-rust-disco.img -nic user,model=rtl8139,hostfwd=tcp:127.0.0.1:2121-:21,hostfwd=tcp:127.0.0.1:2100-:2100 -serial stdio
-```
-
-**3.** No prompt do os-rust, `run ftpd` e Enter na pergunta do endereço.
-
-**4.** No computador, em outro terminal:
-
-```sh
-curl ftp://127.0.0.1:2121/
-curl ftp://127.0.0.1:2121/disco/
-curl -T nota.txt ftp://127.0.0.1:2121/disco/nota.txt
-curl -o copia.txt ftp://127.0.0.1:2121/disco/nota.txt
-curl -Q "DELE /disco/nota.txt" ftp://127.0.0.1:2121/
-```
-
-ou, em Python (`ftplib`):
-
-```python
-from ftplib import FTP
-
-ftp = FTP()
-ftp.connect("127.0.0.1", 2121)
-ftp.login()
-ftp.retrlines("LIST /disco")
-with open("nota.txt", "rb") as f:
-    ftp.storbinary("STOR /disco/nota.txt", f)
-with open("copia.txt", "wb") as f:
-    ftp.retrbinary("RETR /disco/nota.txt", f.write)
-ftp.delete("/disco/nota.txt")
-ftp.sendcmd("SITE EXIT")
-```
-
-**5.** **Para parar**, mande `SITE EXIT` (o `ftplib` acima faz isso; no `curl`, `curl
--Q "SITE EXIT" ftp://127.0.0.1:2121/`) ou espere 30 s sem nenhum cliente. O
-prompt volta. Depois, `cat /disco/nota.txt` mostra o que você enviou.
-
-O `/ram` volta ao conteúdo original a cada boot; o `/disco` só guarda o que você
-enviou porque o comando acima não tem `snapshot=on`. Feche o QEMU, suba-o de novo
-com o mesmo comando e o arquivo continua lá. Uma cópia de disco feita em versão
-anterior continua servindo.
-
-**Árvore e nomes.** O servidor mostra uma raiz virtual `/` com duas pastas, `ram`
-e `disco`; o resto é o sistema de arquivos de verdade. Os nomes seguem o 8.3 (até
-8 letras, ponto e até 3 de extensão), sem diferenciar maiúsculas de minúsculas, e
-o `ftpd` os mostra em minúsculas.
-
-**Limites.**
-
-- Nomes 8.3; caminho de até 64 bytes e 8 componentes.
-- Cada volume tem cerca de 2 MB, menos o que já está gravado.
-- Uma pasta que não é a raiz do volume guarda 14 entradas e não cresce: use `MKD`
-  para organizar.
-- **Um cliente por vez**; quem conecta durante outra sessão espera a vez.
-- **Só modo passivo** (`PASV` e `EPSV`); `PORT` e `EPRT` dão `502`.
-- **Sem senha**: qualquer `USER` e `PASS` entram. Por isso o `hostfwd` deve ficar
-  em `127.0.0.1`, como na linha acima; nunca abra essas portas para a rede.
-- **`STOR` não sobrescreve**: um nome que já existe dá `550`. Para trocar um
-  arquivo, apague-o antes (`DELE`).
-- Os bytes passam sem conversão (sempre binário), inclusive com `TYPE A`.
-- **É lento**: o TCP do os-rust envia um segmento de 1024 bytes por vez e espera a
-  confirmação. Arquivos de centenas de KB levam segundos; a velocidade não foi
-  medida e não é prometida.
-- Não existe Ctrl+C: o servidor tem tempos (30 s esperando cliente, 30 s sem
-  comando, 10 s por espera de dados) e o `SITE EXIT`.
-- Se você trocou o endereço do os-rust com `rede`, volte ao padrão (`10.0.2.15`):
-  é nele que o `hostfwd` do QEMU entrega.
-
-**No Windows**, o `ftp.exe` não serve: ele só fala o modo ativo. Use o `curl.exe`
-(vem com o Windows 10 e o 11), com as mesmas linhas de `curl` acima.
-
 ## Rodando os testes automatizados
 
 Com os mesmos três pré-requisitos da seção anterior instalados, rode:
@@ -1049,62 +843,6 @@ QEMU para ver o `/ram` voltar ao conteúdo inicial. A suíte automatizada
   mesmo arquivo, o `/disco` que não muda, volume indisponível, FAT adulterada,
   o `/ram` restaurado e o contrato e o guia (código literal dos programas).
 
-### O que os testes da versão 0.12.1 cobrem
-
-A 0.12.1 não é um marco: traz o `ftpd` ao Marco 12, sem mudar o kernel nem o
-contrato. A suíte automatizada (`cargo test`) cobre, além dos testes anteriores,
-em três binários de `tests/` (cada um cabe nos 60 s do `test-timeout`); nenhum usa
-a internet, privilégio de administrador ou porta aberta no computador. O cliente
-FTP dos testes roda dentro do QEMU, no gancho do escalonador, e fala com o `ftpd`
-pelo loopback:
-
-- `tests/ftpd.rs`: o início (a pergunta do endereço e a linha `ouvindo`, com
-  Enter, com `10.0.2.15` e com um endereço inválido), o login, `530`, `503`,
-  `501`, `502`, `SITE EXIT`, `PWD`, `CWD`, `CDUP` e `..`, `LIST` e `NLST` (formato
-  exato das linhas), `RETR` (inclusive `grande.bin`, 65537 bytes), `SIZE`, `STOR`
-  de 0, 1, 1024, 1025 e 3000 bytes conferido na volta, as recusas (nome que existe,
-  fora do 8.3, raiz, pasta inexistente), a pasta cheia sem arquivo parcial,
-  `MKD`/`RMD`/`DELE` e cada erro, comandos juntos, partidos e só com `\n`, a linha
-  longa, o cliente que some, 50 sessões sem vazar nada, `run ftpd ftpd`, o envio
-  de um ELF que roda com `run`, a versão 0.12.1, o guia (código literal), os
-  README e os CHANGELOG;
-- `tests/ftpd_espera.rs`: sem cliente, o `ftpd` desiste em 30 s e o kernel dorme;
-  uma conexão de dados que ninguém abre dá `425` em 10 s e apaga o arquivo criado;
-- `tests/ftpd_ocioso.rs`: um cliente parado por 30 s recebe `421` e o servidor
-  aceita outro; uma transferência que para dá `426` em 10 s e apaga o parcial.
-
-Conferir com clientes de verdade (`curl`, `ftplib`) é feito à mão, seguindo
-[Servidor FTP](#servidor-ftp): nenhum teste automático abre porta no computador.
-
-### O que os testes do Marco 12 cobrem
-
-Para conferir à mão, siga [Rede no QEMU](#rede-no-qemu). A suíte automatizada
-(`cargo test`) cobre, além dos testes anteriores. Os testes de rede ficam em
-cinco binários de `tests/` (cada um cabe nos 60 s do `test-timeout`); nenhum usa
-a internet, privilégio de administrador ou porta aberta no computador. A rede de
-usuário do QEMU responde a ARP e a `ping`, e os testes de TCP pela placa usam o
-`guestfwd` do QEMU, que roda o utilitário `cat` do computador (Linux e macOS):
-
-- `tests/rede_pilha.rs` (sem hardware, com uma placa falsa e o relógio injetado):
-  a soma de verificação (vetores da RFC 1071), Ethernet, ARP, IPv4 e ICMP byte a
-  byte e cada rejeição, o cache de ARP, o roteamento, o loopback, e a máquina de
-  estados do TCP: aperto de mão ativo e passivo, dados nos dois sentidos, segmento
-  fora de ordem e duplicado, retransmissão em exatamente 100 ticks e a queda
-  depois da quinta, RST, fechamento nos dois sentidos, `TIME_WAIT`, janela zero,
-  volta do número de sequência, limite de 8 conexões e fila de aceitação de 2;
-- `tests/rede.rs` (QEMU, placa de verdade): o PCI acha a RTL8139, `rede` e
-  `ping 10.0.2.2` (4 de 4), o `ping` no loopback e num endereço sem dono, a
-  configuração, o comportamento sem placa e o eco de TCP pelo `guestfwd`;
-- `tests/rede_syscalls.rs`: cada erro das sete syscalls na ordem do contrato
-  (ELFs montados à mão), `accept` bloqueando e acordando, o tempo limite exato, o
-  programa bloqueado que não atrasa o que computa, os limites de 4 sockets e de 8
-  conexões, o término por `exit` e por falha, e o envio com o buffer cheio;
-- `tests/rede_programas.rs`: `servidor` e `cliente` ponta a ponta (33 bytes
-  enviados, 88 recebidos), a recusa, o endereço inválido, 50 execuções sem vazar
-  nada, a versão 0.12.1, o contrato versão 8, o guia (código literal), o README
-  e os argumentos do QEMU no `Cargo.toml`;
-- `tests/rede_espera.rs`: o `servidor` sozinho desiste depois de 30 s.
-
 ### O que os testes do Marco 11 cobrem
 
 Para conferir à mão, siga a demonstração do `caderno` e o passo a passo de
@@ -1131,8 +869,8 @@ anteriores:
   diretório aberto e a liberação depois de `close`, de `exit` e de falha,
   `mkdir` com 4 arquivos abertos, o número 17, `caderno` ponta a ponta, o volume
   de 2 setores por cluster que continua somente leitura, disco ausente, 50
-  ciclos sem vazar clusters, frames nem descritores, a versão 0.12.1, o
-  contrato versão 8, o guia (código literal do `caderno`), o README (os
+  ciclos sem vazar clusters, frames nem descritores, a versão 0.11.0, o
+  contrato versão 7, o guia (código literal do `caderno`), o README (os
   comandos de preservar o disco e do pen drive) e `snapshot=on` no
   `Cargo.toml`.
 
@@ -1294,8 +1032,8 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   tempo) e a entrada e saída de ring 3 (`enter_user`, `resume_task`,
   `leave_user`).
 - `src/task.rs`: o que o kernel guarda de cada programa carregado: o estado
-  dele em ring 3 (`TaskContext`), em que ponto da vida está, o pedido de
-  teclado ou de rede em andamento e os sockets abertos.
+  dele em ring 3 (`TaskContext`), em que ponto da vida está e o pedido de
+  teclado em andamento.
 - `src/scheduler.rs`: o escalonador em rodízio: escolhe a próxima tarefa, troca
   de contexto (por `SYS_YIELD`, pelo timer ou por espera de teclado), entrega a
   linha digitada a quem pediu primeiro, dorme com `hlt` quando todos esperam, e
@@ -1319,21 +1057,14 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
 - `src/syscall.rs`: o mecanismo `syscall` (entrada pela instrução, retorno por
   `iretq`), o despachante e as syscalls `write`, `exit`, `read_line`, `alloc`,
   `yield`, `open`, `read`, `close`, `read_dir`, `time`, `create`, `open_append`,
-  `write_file`, `remove`, `mkdir`, `rmdir`, `tcp_listen`, `tcp_accept`, `tcp_connect`, `tcp_send`, `tcp_recv`, `tcp_close` e `tcp_timeout`.
-- `src/pci.rs`: a varredura do barramento PCI (portas `0xCF8`/`0xCFC`) que acha a
-  placa de rede.
-- `src/rtl8139.rs`: o driver da placa Realtek RTL8139, por polling: anel de
-  recepção e quatro buffers de transmissão em memória de DMA.
-- `src/net.rs` e `src/net/`: a pilha de rede escrita no projeto: a soma de
-  verificação, Ethernet, ARP, IPv4, ICMP, TCP, o loopback e os sockets de cada
-  programa.
+  `write_file`, `remove`, `mkdir` e `rmdir`.
 - `src/programs.rs`: a tabela dos programas embutidos, gerada pelo
   `build.rs`.
 - `src/allocator.rs`: a faixa fixa de endereços virtuais do heap, o
   alocador global (`Box`, `Vec`, `String`, ...) e o tratamento de heap
   esgotado.
 - `src/shell.rs`: o buffer de linha e o prompt de comandos (`help`,
-  `clear`, `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `ls`, `cat`, `grava`, `anexa`, `apaga`, `mkdir`, `rmdir`, `data`, `rede`, `ping`, `run <alvo>`).
+  `clear`, `echo`, `sobre`, `panic`, `mem`, `falha <tipo>`, `ls`, `cat`, `grava`, `anexa`, `apaga`, `mkdir`, `rmdir`, `data`, `run <alvo>`).
 - `abi/`: as constantes do contrato de syscalls (números, erros, limites),
   compartilhadas pelo kernel e pela biblioteca de runtime.
 - `runtime/`: a biblioteca de runtime dos programas de usuário (`entry!`,
@@ -1341,7 +1072,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   alocador global, tratador de `panic`).
 - `programs/`: a crate dos programas de usuário (`hello`, `crash`, `eco`,
   `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`,
-  `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, um arquivo por programa em `src/bin/`, mais `visita` e `labirint` em
+  `listador`, `hora`, `gravador`, `apagador`, `caderno`, um arquivo por programa em `src/bin/`, mais `visita` e `labirint` em
   `src/disco/`, que só vão para o disco), com o linker
   script (`link.ld`); compilada para o target de usuário pelo `build.rs` da
   raiz, nunca diretamente.
@@ -1354,7 +1085,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   kernel, gera as imagens do ramdisk (embutida no kernel) e do disco
   (`target/imagens/`, anexada ao QEMU com `snapshot=on`; regerada sempre que roda) e a lista de arquivos entregues que
   `tests/artefatos.rs` confere.
-- `SYSCALLS.md`: o contrato de syscalls (versão 8).
+- `SYSCALLS.md`: o contrato de syscalls (versão 7).
 - `tests/`: os testes de integração, cada um iniciando o kernel do zero
   em seu próprio binário — um teste de boot (que também confere a versão
   na mensagem de boas-vindas), um teste cujo resultado esperado é um
@@ -1367,7 +1098,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   preempção, isolamento e teclado), `disco_ata.rs` (o driver ATA),
   `escrita_no_ramdisk.rs` (escrita no `/ram`: comandos, syscalls, `gravador` e
   `apagador`), `escrita_no_disco.rs` (escrita no `/disco`, `mkdir`, `rmdir`,
-  `caderno`, o contrato versão 8 e o README), `rede.rs`, `rede_pilha.rs`, `rede_syscalls.rs`, `rede_programas.rs` e `rede_espera.rs` (a rede do Marco 12), `ftpd.rs`, `ftpd_espera.rs` e `ftpd_ocioso.rs` (o servidor FTP da 0.12.1), `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
+  `caderno`, o contrato versão 7 e o README), `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
   e volumes inválidos) e `artefatos.rs` (higiene dos arquivos entregues).
 - `x86_64-os_rust.json`: a especificação do target bare-metal customizado
   (sem sistema operacional por baixo).

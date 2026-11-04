@@ -58,27 +58,6 @@ pub const SYS_MKDIR: u64 = 15;
 /// aberto e que não é a raiz de um volume. Devolve `0`.
 pub const SYS_RMDIR: u64 = 16;
 
-/// `tcp_listen(port)`: abre um socket de escuta na porta. Devolve o número do
-/// socket (`0..MAX_SOCKETS`).
-pub const SYS_TCP_LISTEN: u64 = 17;
-/// `tcp_accept(sock)`: espera uma conexão estabelecida na fila do socket de
-/// escuta e devolve um socket novo para ela. Bloqueia (com tempo limite).
-pub const SYS_TCP_ACCEPT: u64 = 18;
-/// `tcp_connect(ip, port)`: abre uma conexão e espera o aperto de mão de três
-/// vias. Devolve o socket conectado. Bloqueia (tempo fixo de 3 s).
-pub const SYS_TCP_CONNECT: u64 = 19;
-/// `tcp_send(sock, ptr, len)`: copia até `len` bytes para o buffer de envio.
-/// Devolve os bytes aceitos.
-pub const SYS_TCP_SEND: u64 = 20;
-/// `tcp_recv(sock, ptr, len)`: copia até `len` bytes recebidos para `ptr`.
-/// Devolve os bytes copiados; `0` quando o par fechou.
-pub const SYS_TCP_RECV: u64 = 21;
-/// `tcp_close(sock)`: fecha o socket, sem esperar. Devolve `0`.
-pub const SYS_TCP_CLOSE: u64 = 22;
-/// `tcp_timeout(sock, ms)`: define o tempo limite das esperas do socket.
-/// Devolve `0`.
-pub const SYS_TCP_TIMEOUT: u64 = 23;
-
 /// Máximo de programas que `run` carrega ao mesmo tempo. Pedir mais que isso
 /// é recusado antes de iniciar qualquer programa.
 pub const MAX_TASKS: usize = 4;
@@ -118,16 +97,14 @@ pub const IO_MAX_LEN: u64 = 4096;
 /// O caminho (ou um componente dele) não existe.
 pub const ERR_NOENT: i64 = -4;
 /// Volume desconhecido, ou conhecido mas indisponível (sem disco, volume
-/// inválido, erro ao montar); em rede, a placa não existe e o destino não é
-/// `127.0.0.0/8`.
+/// inválido, erro ao montar).
 pub const ERR_NODEV: i64 = -5;
 /// Tipo errado: ler como arquivo um diretório, listar como diretório um
 /// arquivo, ou usar um arquivo como componente intermediário do caminho.
 pub const ERR_TYPE: i64 = -6;
 /// Descritor inválido: fora de `0..MAX_OPEN_FILES`, não aberto ou já fechado.
 pub const ERR_BADF: i64 = -7;
-/// O programa já tem `MAX_OPEN_FILES` arquivos abertos (ou `MAX_SOCKETS`
-/// sockets, nas syscalls de rede).
+/// O programa já tem `MAX_OPEN_FILES` arquivos abertos.
 pub const ERR_MFILE: i64 = -8;
 /// Caminho com mais de `MAX_PATH_LEN` bytes (ou profundidade demais).
 pub const ERR_NAMETOOLONG: i64 = -9;
@@ -150,26 +127,6 @@ pub const ERR_BUSY: i64 = -15;
 /// `SYS_RMDIR` de um diretório que tem qualquer entrada além de `.`, `..` e
 /// entradas apagadas.
 pub const ERR_NOTEMPTY: i64 = -16;
-/// O tempo limite do socket esgotou (`accept`, `recv`, `send`), ou a conexão
-/// desistiu (SYN sem resposta em 3 tentativas, dado sem confirmação em 5
-/// retransmissões).
-pub const ERR_TIMEDOUT: i64 = -17;
-/// `SYS_TCP_CONNECT`: o par respondeu RST ao SYN (inclusive o loopback sem
-/// servidor).
-pub const ERR_CONNREFUSED: i64 = -18;
-/// A conexão foi reiniciada pelo par (RST) depois de estabelecida.
-pub const ERR_CONNRESET: i64 = -19;
-/// `SYS_TCP_LISTEN` numa porta que já tem `listen`.
-pub const ERR_ADDRINUSE: i64 = -20;
-/// Já existem `MAX_TCP_CONNECTIONS` conexões TCP no kernel.
-pub const ERR_NOBUFS: i64 = -21;
-
-/// Sockets abertos ao mesmo tempo por programa (separados dos arquivos).
-pub const MAX_SOCKETS: usize = 4;
-/// Blocos de conexão TCP no kernel inteiro (incluindo os de escuta).
-pub const MAX_TCP_CONNECTIONS: usize = 8;
-/// Maior tempo limite aceito por `SYS_TCP_TIMEOUT`, em milissegundos.
-pub const TCP_MAX_TIMEOUT_MS: u64 = 60_000;
 
 /// Maior caminho aceito por `SYS_OPEN`, em bytes.
 pub const MAX_PATH_LEN: usize = 64;

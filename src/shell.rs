@@ -1,4 +1,4 @@
-//! Buffer de linha e prompt de comandos mínimo (`help`, `clear`, `echo`, `sobre`, `panic`, `mem`, `falha`, `ls`, `cat`, `grava`, `anexa`, `apaga`, `mkdir`, `rmdir`, `run`, `data`, `rede`, `ping`).
+//! Buffer de linha e prompt de comandos mínimo (`help`, `clear`, `echo`, `sobre`, `panic`, `mem`, `falha`, `ls`, `cat`, `grava`, `anexa`, `apaga`, `mkdir`, `rmdir`, `run`, `data`).
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -10,7 +10,6 @@ use abi::{DateTime, MAX_TASKS};
 use crate::fat::Kind;
 use crate::fs::{self, FsError, OpenFile, VolumeId};
 use crate::keyboard::LINE_CAPACITY;
-use crate::net::{self, CardStatus};
 use crate::rtc::{self, RtcError};
 use crate::user::{self, Finished, RunError, Termination};
 use crate::{
@@ -49,14 +48,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("mkdir", "cria um diretorio no /ram ou /disco (ex.: mkdir /ram/docs/novo)"),
     ("rmdir", "remove um diretorio vazio (ex.: rmdir /ram/docs/novo)"),
     ("data", "mostra a data e a hora (UTC) do relogio"),
-    (
-        "rede",
-        "mostra a placa e o endereco, ou configura (ex.: rede, rede 10.0.2.15 255.255.255.0 10.0.2.2)",
-    ),
-    (
-        "ping",
-        "envia 4 pedidos de eco a um IP (ex.: ping 10.0.2.2); nao e o programa ping de run",
-    ),
     (
         "run",
         "executa programas embutidos ou arquivos, juntos (ex.: run hello, run ping pong, run /disco/bin/visita)",
@@ -198,8 +189,6 @@ fn execute(line: &str) {
         "run" => cmd_run(rest),
         // Argumentos extras em `rest` são ignorados, como em `sobre`.
         "data" => cmd_data(),
-        "rede" => cmd_rede(rest),
-        "ping" => cmd_ping(rest),
         _ => println!("comando desconhecido: {} (digite help)", name),
     }
 }
@@ -233,132 +222,6 @@ fn format_clock(result: Result<DateTime, RtcError>) -> String {
         Ok(time) => alloc::format!("{} UTC", time),
         Err(error) => alloc::format!("data: {}", error),
     }
-}
-
-/// O texto `a.b.c.d` de um endereço.
-fn ip_text(ip: [u8; 4]) -> String {
-    alloc::format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
-}
-
-/// `rede`: sem argumentos mostra a placa, o endereço, os contadores e as
-/// conexões TCP; com três (`ip mascara gateway`) troca a configuração, só em
-/// memória. Argumentos inválidos não mudam nada.
-fn cmd_rede(rest: &str) {
-    let args: Vec<&str> = rest.split_whitespace().collect();
-    match args.len() {
-        0 => {
-            net::poll();
-            match net::card_status() {
-                CardStatus::Ready(m) => println!(
-                    "placa: RTL8139 mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                    m[0], m[1], m[2], m[3], m[4], m[5]
-                ),
-                CardStatus::Absent => println!("placa: nenhuma (RTL8139 nao encontrada)"),
-                CardStatus::Unavailable(reason) => println!("placa: indisponivel ({})", reason),
-            }
-            let config = net::config();
-            println!(
-                "ip: {} mascara: {} gateway: {}",
-                ip_text(config.ip),
-                ip_text(config.mask),
-                ip_text(config.gateway)
-            );
-            let stats = net::stats();
-            println!(
-                "quadros: recebidos={} enviados={} descartados={}",
-                stats.rx, stats.tx, stats.dropped
-            );
-            println!("tcp: {} de {} conexoes em uso", net::tcp_in_use(), abi::MAX_TCP_CONNECTIONS);
-        }
-        3 => {
-            let mut parsed = [[0u8; 4]; 3];
-            for (i, text) in args.iter().enumerate() {
-                match net::parse_ipv4(text) {
-                    Some(ip) => parsed[i] = ip,
-                    None => return println!("rede: endereco invalido: {}", text),
-                }
-            }
-            match net::configure(parsed[0], parsed[1], parsed[2]) {
-                Ok(()) => println!(
-                    "rede: configurado ip {} mascara {} gateway {}",
-                    args[0], args[1], args[2]
-                ),
-                Err(which) => println!("rede: endereco invalido: {}", args[which]),
-            }
-        }
-        _ => println!("uso: rede [<ip> <mascara> <gateway>]"),
-    }
-}
-
-/// Quantos ticks o `ping` espera cada resposta (1 s).
-const PING_WAIT_TICKS: u64 = 100;
-
-/// Espera até `until` ticks, andando a pilha, e devolve cedo se `done` disser
-/// que já chegou o que se esperava. Gira alguns instantes antes de dormir (a
-/// resposta do QEMU costuma chegar logo) e depois dorme até a próxima
-/// interrupção. Roda com as interrupções desligadas, menos durante o `hlt`.
-fn wait_net(until: u64, mut done: impl FnMut() -> bool) -> bool {
-    for _ in 0..2000 {
-        net::poll();
-        if done() {
-            return true;
-        }
-    }
-    while crate::timer::ticks() < until {
-        x86_64::instructions::interrupts::disable();
-        net::poll();
-        if done() {
-            return true;
-        }
-        x86_64::instructions::interrupts::enable_and_hlt();
-    }
-    x86_64::instructions::interrupts::disable();
-    net::poll();
-    done()
-}
-
-/// `ping <ip>`: quatro pedidos de eco, um por segundo. Não é o programa `ping`
-/// de `run ping pong`. Durante o comando o prompt não aceita outra coisa; as
-/// teclas ficam na fila do teclado.
-fn cmd_ping(rest: &str) {
-    let mut args = rest.split_whitespace();
-    let Some(text) = args.next() else {
-        return println!("uso: ping <ip>");
-    };
-    if args.next().is_some() {
-        return println!("uso: ping <ip>");
-    }
-    let Some(ip) = net::parse_ipv4(text) else {
-        return println!("ping: endereco invalido: {}", text);
-    };
-    if !net::can_reach(ip) {
-        return println!("ping: sem placa de rede");
-    }
-    println!("ping {}: 4 pedidos", text);
-    let mut received = 0;
-    for seq in 1..=4u16 {
-        let sent = crate::timer::ticks();
-        if net::ping_send(ip, seq).is_err() {
-            return println!("ping: sem placa de rede");
-        }
-        let until = sent + PING_WAIT_TICKS;
-        if wait_net(until, || net::ping_reply(seq).is_some()) {
-            let elapsed = net::ping_reply(seq).unwrap_or(sent).saturating_sub(sent);
-            if elapsed == 0 {
-                println!("resposta de {}: seq={} tempo<10 ms", text, seq);
-            } else {
-                println!("resposta de {}: seq={} tempo={} ms", text, seq, elapsed * 10);
-            }
-            received += 1;
-            // Um pedido por segundo: espera o resto do intervalo.
-            if seq < 4 {
-                wait_net(until, || false);
-            }
-        } else {
-            println!("sem resposta de {}: seq={}", text, seq);
-        }
-    }
-    println!("ping: 4 enviados, {} recebidos", received);
 }
 
 fn cmd_panic() {
