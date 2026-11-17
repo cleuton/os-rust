@@ -61,6 +61,7 @@ const COMMANDS: &[(&str, &str)] = &[
         "run",
         "executa programas embutidos ou arquivos, juntos (ex.: run hello, run ping pong, run /disco/bin/visita)",
     ),
+    ("exec", "executa um programa com argumentos (ex.: exec teclas /ram/a.txt)"),
 ];
 
 /// Acumulador de tamanho fixo dos caracteres digitados até o próximo
@@ -131,6 +132,8 @@ pub fn print_prompt() {
 pub fn poll_keyboard() {
     x86_64::instructions::interrupts::without_interrupts(|| {
         while let Some(scancode) = interrupts::next_scancode() {
+            // O decodificador vê todo scancode, para o Ctrl nunca ficar preso.
+            keyboard::decode(scancode);
             if let Some(byte) = keyboard::translate(scancode) {
                 feed(byte);
             }
@@ -196,6 +199,7 @@ fn execute(line: &str) {
         "mkdir" => cmd_mkdir(rest),
         "rmdir" => cmd_rmdir(rest),
         "run" => cmd_run(rest),
+        "exec" => cmd_exec(rest),
         // Argumentos extras em `rest` são ignorados, como em `sobre`.
         "data" => cmd_data(),
         "rede" => cmd_rede(rest),
@@ -851,39 +855,106 @@ fn cmd_run(rest: &str) {
     // Resolve **todos** os alvos antes de iniciar qualquer um.
     let mut sources: Vec<(String, Source)> = Vec::new();
     for target in &targets {
-        if target.starts_with('/') {
-            match fs::read_whole(target.as_bytes(), fs::MAX_EXEC_SIZE) {
-                Ok(data) => sources.push((file_name_of(target), Source::File(data))),
-                Err(error) => return report_fs_error("run", target, error),
-            }
-        } else {
-            match user::builtin_image(target) {
-                Some(image) => sources.push((String::from(*target), Source::Builtin(image))),
-                None => {
-                    println!("programa desconhecido: {}", target);
-                    print_available_programs();
-                    return;
-                }
-            }
+        match resolve_target("run", target) {
+            Some(source) => sources.push(source),
+            None => return,
         }
     }
     let images: Vec<(&str, &[u8])> = sources.iter().map(|(name, source)| (name.as_str(), source.bytes())).collect();
-    match user::run_images(&images, Some(report_finished)) {
-        Ok(_) => {}
-        Err(RunError::LoadFailed { index, error }) => {
+    let result = user::run_images(&images, Some(report_finished));
+    if let Err(error) = result {
+        report_run_error(&sources, error);
+    }
+    finish_run();
+}
+
+/// Resolve **um** alvo de `run` ou de `exec`: um caminho (começa com `/`) é um
+/// arquivo executável lido inteiro do volume (até `MAX_EXEC_SIZE` bytes); o
+/// resto é o nome de um programa embutido. Em caso de erro mostra a mensagem,
+/// com `command` (`run` ou `exec`) onde a mensagem cita o comando, e devolve
+/// `None`. Os dois comandos compartilham esta função para falarem igual.
+fn resolve_target(command: &str, target: &str) -> Option<(String, Source)> {
+    if target.starts_with('/') {
+        match fs::read_whole(target.as_bytes(), fs::MAX_EXEC_SIZE) {
+            Ok(data) => Some((file_name_of(target), Source::File(data))),
+            Err(error) => {
+                report_fs_error(command, target, error);
+                None
+            }
+        }
+    } else {
+        match user::builtin_image(target) {
+            Some(image) => Some((String::from(target), Source::Builtin(image))),
+            None => {
+                println!("programa desconhecido: {}", target);
+                print_available_programs();
+                None
+            }
+        }
+    }
+}
+
+/// Mostra por que `run_images` recusou o pedido. Os prefixos `[run] ...` ficam
+/// literais também no `exec`: são a mesma mensagem de carga dos dois comandos.
+fn report_run_error(sources: &[(String, Source)], error: RunError) {
+    match error {
+        RunError::LoadFailed { index, error } => {
             say(format_args!("[run] erro ao carregar {}: {}", sources[index].0, error));
         }
-        Err(RunError::Load(error)) => {
+        RunError::Load(error) => {
             say(format_args!("[run] erro ao carregar {}: {}", sources[0].0, error));
         }
-        Err(RunError::UnknownProgram) => {
+        RunError::UnknownProgram => {
             println!("programa desconhecido");
             print_available_programs();
         }
-        Err(RunError::TooManyPrograms { max }) => {
+        RunError::TooManyPrograms { max } => {
             println!("run: no maximo {} programas ao mesmo tempo", max);
         }
     }
+}
+
+/// O que `run` e `exec` fazem ao devolver o prompt: restauram a tela, se algum
+/// programa a usou (`SYS_SCREEN`: apaga a última linha e volta à cor padrão),
+/// e descartam um prefixo de tecla que tenha ficado pendente (`0xE0`/`0xE1`),
+/// para uma sequência cortada não estragar a próxima tecla do prompt. O estado
+/// de Ctrl não é zerado: a tecla pode continuar apertada.
+fn finish_run() {
+    vga_buffer::restore_prompt_line();
+    keyboard::reset_prefix();
+}
+
+/// `exec <programa> [argumentos...]`: inicia **um** programa, embutido ou
+/// arquivo (como o `run`), e entrega a ele o resto da linha como texto de
+/// argumentos (`SYS_ARGS`), sem os espaços do começo e do fim e sem aspas nem
+/// escapes. O `run` não faz isso porque trata cada palavra depois dele como
+/// outro programa a iniciar junto (`run ping pong`).
+fn cmd_exec(rest: &str) {
+    let rest = rest.trim();
+    let (target, args) = match rest.split_once(' ') {
+        Some((target, args)) => (target, args.trim()),
+        None => (rest, ""),
+    };
+    if target.is_empty() {
+        println!("exec: informe o programa.");
+        print_available_programs();
+        return;
+    }
+    // Recusa antes de resolver ou iniciar qualquer coisa. O prompt limita a
+    // linha a 128 bytes (com `exec` e o nome dentro), então só uma chamada
+    // direta (os testes de unidade) chega a este limite.
+    if args.len() > abi::MAX_ARGS_LEN {
+        println!("exec: argumentos longos demais (maximo {} bytes)", abi::MAX_ARGS_LEN);
+        return;
+    }
+    let Some(source) = resolve_target("exec", target) else { return };
+    let sources = [source];
+    let images = [(sources[0].0.as_str(), sources[0].1.bytes())];
+    let result = user::run_images_with_args(&images, args, Some(report_finished));
+    if let Err(error) = result {
+        report_run_error(&sources, error);
+    }
+    finish_run();
 }
 
 #[cfg(test)]
@@ -1464,5 +1535,84 @@ mod tests {
                 assert!(descricao.contains("/ram"));
             }
         }
+    }
+
+    // --- exec e o decodificador no prompt (Marco 13) ---
+
+    #[test_case]
+    fn ctrl_apertado_pelo_prompt_e_solto_depois_nao_fica_preso() {
+        keyboard::reset_decoder();
+        // Ctrl apertado (0x1D) passa pelo prompt e o decodificador o vê.
+        interrupts::push_scancode(0x1D);
+        poll_keyboard();
+        assert_eq!(keyboard::decode(0x10), Some(abi::KEY_CTRL | b'q' as u32));
+        // Solto pelo prompt, a tecla volta ao normal.
+        interrupts::push_scancode(0x9D);
+        poll_keyboard();
+        assert_eq!(keyboard::decode(0x10), Some(b'q' as u32));
+        keyboard::reset_decoder();
+    }
+
+    #[test_case]
+    fn exec_sem_programa_mostra_erro_e_a_lista() {
+        vga_buffer::clear_screen();
+        execute("exec");
+        assert!(vga_buffer::screen_contains("exec: informe o programa."));
+        assert!(vga_buffer::screen_contains("disponiveis: "));
+    }
+
+    #[test_case]
+    fn exec_com_nome_inexistente_mostra_erro_e_lista() {
+        vga_buffer::clear_screen();
+        execute("exec xpto a b");
+        assert!(vga_buffer::screen_contains("programa desconhecido: xpto"));
+        assert!(vga_buffer::screen_contains("disponiveis: "));
+    }
+
+    #[test_case]
+    fn exec_de_caminho_que_nao_abre_usa_a_mensagem_do_run_com_exec() {
+        vga_buffer::clear_screen();
+        execute("run /ram/nada.bin");
+        assert!(vga_buffer::screen_contains("run: "));
+        vga_buffer::clear_screen();
+        execute("exec /ram/nada.bin");
+        assert!(vga_buffer::screen_contains("exec: "));
+        assert!(!vga_buffer::screen_contains("run: "));
+    }
+
+    #[test_case]
+    fn exec_inicia_o_programa_e_aceita_ate_128_bytes_de_argumentos() {
+        let longo = alloc::string::String::from_utf8(alloc::vec![b'x'; abi::MAX_ARGS_LEN]).unwrap();
+        vga_buffer::clear_screen();
+        cmd_exec(&alloc::format!("hello {}", longo));
+        assert!(vga_buffer::screen_contains("Ola do ring 3!"));
+        assert!(!vga_buffer::screen_contains("argumentos longos demais"));
+    }
+
+    #[test_case]
+    fn exec_recusa_mais_de_128_bytes_de_argumentos_e_nao_inicia_nada() {
+        let longo = alloc::string::String::from_utf8(alloc::vec![b'x'; abi::MAX_ARGS_LEN + 1]).unwrap();
+        vga_buffer::clear_screen();
+        cmd_exec(&alloc::format!("hello {}", longo));
+        assert!(vga_buffer::screen_contains("exec: argumentos longos demais (maximo 128 bytes)"));
+        assert!(!vga_buffer::screen_contains("Ola do ring 3!"));
+    }
+
+    #[test_case]
+    fn exec_de_programa_embutido_sem_argumentos_roda_como_o_run() {
+        vga_buffer::clear_screen();
+        execute("exec hello");
+        assert!(vga_buffer::screen_contains("Ola do ring 3!"));
+    }
+
+    #[test_case]
+    fn help_lista_o_exec_logo_depois_do_run_e_a_primeira_linha_continua_visivel() {
+        vga_buffer::clear_screen();
+        execute("help");
+        assert!(vga_buffer::screen_contains("exec - executa um programa com argumentos (ex.: exec teclas /ram/a.txt)"));
+        assert!(vga_buffer::screen_contains("lista os comandos disponiveis"));
+        let nomes: Vec<&str> = COMMANDS.iter().map(|(nome, _)| *nome).collect();
+        let run = nomes.iter().position(|n| *n == "run").unwrap();
+        assert_eq!(nomes[run + 1], "exec");
     }
 }

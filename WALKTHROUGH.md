@@ -2062,3 +2062,48 @@ congestionamento, janela deslizante com vários segmentos no ar, mais de uma pla
 e proteção contra ataques (o número de sequência inicial é previsível). Hardware
 real não foi testado. E um HTTP de verdade: o `servidor` devolve sempre a mesma
 página mínima.
+
+
+## Marco 13: teclado cru, tela e arquivo regravável
+
+Até o Marco 12, um programa só lia o teclado **por linha** (`SYS_READ_LINE`), só escrevia texto em sequência no pé da tela, sempre na mesma cor, só criava arquivos novos ou acrescentava ao fim deles, e não recebia argumentos. Isso basta para `eco`, `caderno` e `servidor`, mas não para um programa interativo de verdade. Este marco abre exatamente essas portas: tecla crua, tela, regravar um arquivo e argumentos, mais o programa `teclas` que mostra tudo funcionando. **O editor de textos não faz parte dele**: as quatro syscalls novas (24 a 27, contrato versão 9) e o comando `exec` são o que falta para que um editor de tela cheia seja escrito depois como programa de usuário.
+
+### Scancodes do Set 1 e o prefixo `0xE0`
+
+O teclado PS/2 manda **scancodes**. No Scan Code Set 1, apertar uma tecla manda um byte (o *make code*, por exemplo `0x1E` para `a`) e soltar manda o mesmo byte com o bit 7 ligado (`0x9E`). As teclas "estendidas" (setas, Home, End, Page Up, Page Down, Insert, Delete, o Ctrl direito, o Enter e a barra do teclado numérico) mandam antes o prefixo `0xE0`: a seta para cima é `0xE0 0x48`, e `0xE0 0xC8` ao soltar. Algumas mandam até um "falso Shift" (`0xE0 0x2A` antes e `0xE0 0xAA` depois), e o Pause manda uma sequência de seis bytes que começa com `0xE1`.
+
+O `translate` do Marco 1 não sabia nada disso: ele devolve um byte ASCII para letras, dígitos e pontuação, e ignora o resto. Por isso nasceu o **decodificador** (`keyboard::decode`), uma pequena máquina de estados com três fatos na memória: se há um prefixo pendente (`0xE0`, ou o resto do Pause), e se cada um dos dois Ctrl está apertado. Depois de `0xE0`, o byte seguinte **não** passa por `translate`, e é assim que o falso Shift nunca liga o Shift. Só **pressionar** gera um evento; soltar nunca.
+
+### O estado de Ctrl, e por que ele enxerga tudo
+
+Ctrl é um estado que dura entre dois scancodes: apertar num momento, soltar muito depois. Se um scancode de Ctrl fosse consumido por um lugar que não olha o decodificador, o Ctrl ficaria preso. Por isso `decode` é chamado nos **três** lugares que tiram scancodes da fila: o prompt, a espera de linha e a leitura bloqueante de teste. Um Ctrl apertado durante um `read_line` e solto depois não fica preso.
+
+### Por que Ctrl+letra é "letra mais um bit"
+
+Em terminais antigos, Ctrl+J vira o byte `0x0A` (o mesmo do Enter) e Ctrl+H vira `0x08` (o mesmo do Backspace): o programa não consegue distinguir. Aqui o código da tecla é um inteiro: o ASCII para as teclas de texto, `0x100` em diante para as especiais, e o bit `KEY_CTRL` (`0x1_0000`) **somado** quando Ctrl está apertado. Com Ctrl, a letra vem sempre minúscula (Shift não conta). Assim `Ctrl+J` e Enter são códigos diferentes.
+
+### A tecla crua usa a mesma espera da linha
+
+`SYS_READ_KEY` não inventou um mecanismo novo. O pedido pendente de teclado (`PendingRead`) ganhou um tipo, linha ou tecla, e o resto continua igual: a tarefa vai para `WaitingKeyboard`, o primeiro pedido (menor número de ordem) recebe o que chega, e se todos esperam o kernel dorme em `hlt`. Para um leitor de linha, os scancodes vão para o editor de linha, com eco; para um leitor de tecla, cada scancode passa pelo decodificador e o primeiro evento é a tecla dele, entregue em `rax` quando a tarefa volta a rodar. Um leitor de linha que já está montando uma linha continua dono do teclado até o Enter.
+
+### A grade VGA de texto, o byte de atributo e o vídeo reverso
+
+O modo de texto do VGA é uma grade de 25 por 80 **células** de dois bytes: o caractere e um byte de **atributo** (a cor). Os 4 bits de baixo são a cor do texto (16 cores), os 3 bits seguintes são a cor do fundo (8 cores) e o último bit, no modo padrão, faz o caractere **piscar**. Por isso o fundo só vai de 0 a 7: o kernel não oferece piscar. O **vídeo reverso** não tem mecanismo próprio: é escolher texto escuro sobre fundo claro, isto é, trocar as duas cores.
+
+Antes deste marco o `Writer` só tinha **uma coluna**: a linha era sempre a última, e quebrar a linha rolava a tela. E tinha **uma cor só**, amarelo sobre preto. Agora ele tem a **linha do cursor** e a **cor atual**. A regra de rolagem é a de sempre na última linha; acima dela, `\n` e a quebra de coluna só descem o cursor, sem rolar nem apagar nada, para o desenho do programa nunca ser tocado pelo kernel. Enquanto ninguém usa `SYS_SCREEN`, o `Writer` se comporta exatamente como antes. O cursor de hardware, com a linha cheia, passou a ficar na coluna 79 (a posição 80 não existe na grade).
+
+### Argumentos: `exec`, o texto na tarefa e `SYS_ARGS`
+
+O `run` trata toda palavra depois dele como **outro programa** (`run ping pong`), então não havia onde pôr argumentos sem mudar o que o `run` faz. O comando novo, `exec <programa> [argumentos...]`, inicia **um** programa e guarda o resto da linha (sem os espaços das pontas) no campo `args` da própria **tarefa**; `SYS_ARGS` copia esse texto para o buffer do programa e devolve o tamanho **total** (se o buffer for menor, a cópia é cortada e o valor maior avisa). O texto vive na tarefa e some com ela: nenhum programa herda o de outro. O `run` não mudou: o programa que ele inicia recebe argumentos vazios. A carga continua sendo uma só função, `run_images`, agora um caso particular de `run_images_with_args` com texto vazio.
+
+### A volta ao prompt
+
+Se um programa usou a tela, a última linha do pé tem restos dele. Quando o `run` ou o `exec` devolve o prompt, o kernel leva o cursor a `(24, 0)`, volta à cor padrão e apaga **só** a linha 24: as outras 24 ficam, com as cores, como o programa as deixou. Quem restaura é o prompt (os dois comandos), e a restauração também descarta um prefixo de tecla que tenha ficado pendente.
+
+### Esvaziar um arquivo na FAT
+
+`SYS_OPEN_WRITE` cria o arquivo se não existe e o **zera** se existe. Zerar segue a mesma ordem do `remove` (Marco 10): **primeiro** grava a entrada do diretório com tamanho 0 e primeiro cluster 0 (uma única escrita de setor, que não mexe em nome, atributos, data nem hora), e **depois** libera os clusters da cadeia em todas as cópias da FAT. Se a energia acabar no meio, o arquivo está como antes ou vazio, e no pior caso sobram clusters usados sem dono, nunca um arquivo cuja cadeia já foi liberada. Antes de escrever qualquer coisa, tudo o que pode falhar é conferido (volume, pai, tipo, arquivo aberto por alguém, tabela cheia, espaço, cadeia válida): `ERR_MFILE` nunca esvazia o arquivo.
+
+### O que ficou de fora
+
+O editor de textos, leitura de tecla sem esperar, Caps Lock, Alt, F1 a F12, teclado numérico como números, layouts que não sejam o US, acentos, mouse, `Ctrl+C` como interrupção, sequências de escape ANSI, piscar, mais de 16 cores, ler o conteúdo da tela, janelas, mais de um programa dono da tela, `seek`, truncar para um tamanho qualquer, argumentos com aspas e variáveis de ambiente.

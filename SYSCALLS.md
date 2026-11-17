@@ -2,9 +2,9 @@
 
 # Contrato de syscalls do os-rust
 
-**Versão do contrato**: 8
+**Versão do contrato**: 9
 
-**Válido a partir de**: os-rust 0.12.0 (Marco 12)
+**Válido a partir de**: os-rust 0.13.0 (Marco 13)
 
 Este documento é tudo que um programa precisa saber para rodar no os-rust.
 O kernel e os programas nunca dependem de nada que não esteja aqui. Uma
@@ -102,7 +102,7 @@ unsafe {
 
 ## 5. Syscalls
 
-Números do contrato v8. **Qualquer outro número** (inclusive `0`)
+Números do contrato v9. **Qualquer outro número** (inclusive `0`)
 encerra o programa (§7).
 
 | Nº | Nome | Argumentos | Resultado |
@@ -130,6 +130,10 @@ encerra o programa (§7).
 | 21 | `SYS_TCP_RECV` | `rdi = sock`, `rsi = ptr`, `rdx = len` | bytes recebidos (`≥ 0`; `0` = o par fechou) ou erro (`< 0`) |
 | 22 | `SYS_TCP_CLOSE` | `rdi = sock` | `0` ou erro (`< 0`) |
 | 23 | `SYS_TCP_TIMEOUT` | `rdi = sock`, `rsi = ms` | `0` ou erro (`< 0`) |
+| 24 | `SYS_READ_KEY` | nenhum | código da tecla (`≥ 1`); nunca falha |
+| 25 | `SYS_SCREEN` | `rdi = op`, `rsi = a`, `rdx = b` | `0` ou `ERR_INVAL` |
+| 26 | `SYS_OPEN_WRITE` | `rdi = path_ptr`, `rsi = path_len` | descritor para acrescentar (`≥ 0`) ou erro (`< 0`) |
+| 27 | `SYS_ARGS` | `rdi = buf_ptr`, `rsi = buf_len` | tamanho **total** do texto (`0..=128`) ou erro (`< 0`) |
 
 ### `SYS_WRITE` (1)
 
@@ -478,6 +482,152 @@ fora dos limites; (2) `ERR_FAULT` para ponteiro inválido (`SYS_TCP_SEND` e
 `SYS_TCP_RECV`), **antes** de qualquer efeito; (3) `ERR_BADF` e `ERR_TYPE` para o
 socket; (4) o resto, como descrito em cada chamada.
 
+### `SYS_READ_KEY` (24)
+
+Espera uma tecla ser **pressionada** e devolve o código dela. Os registradores
+de argumento são ignorados. **Nunca falha.** O programa fica bloqueado, sem
+gastar CPU e sem tempo limite, no mesmo estado de espera de `SYS_READ_LINE`: se
+mais de um programa espera o teclado, a tecla vai para o que pediu **primeiro**
+(seção 8). O kernel **não ecoa** nada na tela. Só pressionar gera evento;
+soltar não gera. Teclas digitadas antes do pedido são entregues primeiro, na
+ordem em que foram digitadas.
+
+O teclado continua sendo o PS/2 em Scan Code Set 1, layout US. O código é um
+inteiro de 64 bits `≥ 1` (nunca negativo, então nunca se confunde com erro):
+
+| Código | Tecla |
+|--------|-------|
+| `0x20` a `0x7E` | o caractere (com Shift aplicado, layout US) |
+| `0x0A` | Enter (inclusive o do teclado numérico) |
+| `0x08` | Backspace |
+| `0x09` | Tab |
+| `0x1B` | Esc |
+| `KEY_UP` `0x100`, `KEY_DOWN` `0x101`, `KEY_LEFT` `0x102`, `KEY_RIGHT` `0x103` | setas |
+| `KEY_HOME` `0x104`, `KEY_END` `0x105` | Home, End |
+| `KEY_PAGE_UP` `0x106`, `KEY_PAGE_DOWN` `0x107` | Page Up, Page Down |
+| `KEY_DELETE` `0x108`, `KEY_INSERT` `0x109` | Delete, Insert |
+
+Com `Ctrl` pressionado (qualquer dos dois), o bit `KEY_CTRL` (`0x1_0000`) é
+somado ao código. Com Ctrl, uma letra vem sempre **minúscula** (Shift não
+conta); `Ctrl+X` é `KEY_CTRL | 0x78`, e `Ctrl+Left` é `KEY_CTRL | KEY_LEFT`. O
+bit fica acima das teclas especiais para `Ctrl+J` e Enter, ou `Ctrl+H` e
+Backspace, não ficarem iguais. Teclas que não estão na tabela (F1 a F12, Alt,
+Caps Lock, Windows, o teclado numérico sem prefixo, PrintScreen, Pause) não
+geram evento, e Shift, Ctrl e Alt sozinhos também não. `Ctrl+C` não interrompe
+nada: é só uma tecla (`KEY_CTRL | 0x63`).
+
+### `SYS_SCREEN` (25)
+
+Controla a tela, que tem **25 linhas por 80 colunas** (`SCREEN_ROWS`,
+`SCREEN_COLS`). `rdi` é a operação; `rsi` e `rdx` são os argumentos dela.
+Devolve `0`.
+
+| Operação | Valor | Efeito |
+|----------|-------|--------|
+| `SCREEN_CLEAR` | 1 | Apaga as 25 linhas (espaços, com a cor atual) e leva o cursor a `(0, 0)`. `rsi` e `rdx` são ignorados. |
+| `SCREEN_MOVE` | 2 | Leva o cursor à linha `rsi` (`0..=24`) e à coluna `rdx` (`0..=79`). Fora desses limites, `ERR_INVAL`, e nada muda. |
+| `SCREEN_COLOR` | 3 | Escolhe a cor atual: texto `rsi` (`0..=15`) e fundo `rdx` (`0..=7`). Fora desses limites, `ERR_INVAL`, e nada muda. Não move o cursor nem muda o que já está na tela. |
+
+Uma operação desconhecida é `ERR_INVAL`. Os valores são conferidos **antes** de
+qualquer efeito. As três operações, quando aceitas, marcam que a tela deste
+`run` foi posicionada (para a regra de volta ao prompt, abaixo).
+
+**O cursor.** Depois de `SYS_SCREEN`, o `SYS_WRITE` escreve **a partir do
+cursor**: cada caractere imprimível ocupa uma célula e avança a coluna; `\n`
+leva o cursor ao início da linha seguinte; qualquer outro byte aparece como o
+quadrado de sempre. O kernel não apaga nada e não rola a tela, **exceto na
+última linha**: `\n` na linha 24 rola a tela uma linha para cima, e um
+caractere escrito **depois** da coluna 79 continua no início da linha seguinte
+(na linha 24, rola). Preencher a célula `(24, 79)` não rola; a quebra só
+acontece quando o caractere seguinte chega. O cursor de hardware (o traço que
+pisca) acompanha o cursor do kernel o tempo todo: vai para `(linha, coluna)`
+**na hora** em que `SCREEN_MOVE` ou `SCREEN_CLEAR` executa, mesmo sem escrever
+nada, e depois de cada escrita fica logo após a última célula escrita,
+**exceto** quando a última célula escrita é a da coluna 79: aí o cursor de
+hardware fica **na própria coluna 79** (a coluna 80 não existe na grade), e o
+caractere seguinte quebra a linha, como sempre.
+
+**A cor.** A cor atual começa em `COLOR_DEFAULT_TEXT` (14, amarelo) sobre
+`COLOR_DEFAULT_BACKGROUND` (0, preto). Vale para tudo o que `SYS_WRITE`
+escreve (cada célula guarda o byte de cor com que foi escrita: `fundo << 4 |
+texto`), para a linha nova que a rolagem da última linha abre e para o
+`SCREEN_CLEAR`, que pinta as 25 linhas, espaços inclusive, com a cor atual.
+`SCREEN_COLOR` muda **só** a cor atual. As cores são as do VGA:
+
+| 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|---|---|
+| `COLOR_BLACK` preto | `COLOR_BLUE` azul | `COLOR_GREEN` verde | `COLOR_CYAN` ciano | `COLOR_RED` vermelho | `COLOR_MAGENTA` magenta | `COLOR_BROWN` marrom | `COLOR_LIGHT_GRAY` cinza claro |
+
+| 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 |
+|---|---|---|---|---|---|---|---|
+| `COLOR_DARK_GRAY` cinza escuro | `COLOR_LIGHT_BLUE` azul claro | `COLOR_LIGHT_GREEN` verde claro | `COLOR_LIGHT_CYAN` ciano claro | `COLOR_LIGHT_RED` vermelho claro | `COLOR_PINK` rosa | `COLOR_YELLOW` amarelo | `COLOR_WHITE` branco |
+
+O texto usa as 16 cores; o fundo, só de 0 a 7, porque no modo de texto padrão
+o bit mais alto do fundo faz o caractere piscar, e o kernel não oferece
+piscar. **Vídeo reverso** é trocar as duas cores: por exemplo, texto
+`COLOR_BLACK` sobre fundo `COLOR_LIGHT_GRAY`. Para uma barra cheia, o programa
+escreve espaços. O cursor de hardware não tem cor própria e não é afetado.
+
+**Volta ao prompt.** Quando o `run` ou o `exec` devolve o prompt e algum
+programa usou `SYS_SCREEN` (qualquer das três operações), o kernel leva o
+cursor a `(24, 0)`, volta à cor padrão e apaga a linha 24 com ela. As linhas 0
+a 23 não são tocadas (as cores ficam). Quem faz isso é o prompt (`run` e
+`exec`); um programa iniciado por outro caminho do kernel não dispara a
+restauração. Se nenhum programa usou `SYS_SCREEN`, nada disso acontece e a tela
+se comporta como sempre se comportou. Programas que usam a tela devem rodar
+**sozinhos**: dois programas escrevendo ao mesmo tempo disputam o único cursor
+e o desenho sai misturado (não há erro).
+
+### `SYS_OPEN_WRITE` (26)
+
+Abre o arquivo `path` para acrescentar e o **zera**: se o arquivo não existe, é
+criado vazio; se existe, o tamanho passa a `0` e os clusters dele voltam a
+ficar livres. Devolve um descritor (`0..=3`) que só aceita `SYS_WRITE_FILE` e
+`SYS_CLOSE`, como o de `SYS_CREATE`. Segue as **regras comuns** das syscalls
+de caminho (`SYS_CREATE`, `SYS_OPEN_APPEND`, `SYS_REMOVE`): `path_len == 0` é
+`ERR_INVAL` e `path_len > 64` é `ERR_NAMETOOLONG` (nenhum dos dois olha o
+ponteiro); o intervalo do caminho precisa estar na região do usuário e
+mapeado (`ERR_FAULT`); caminho malformado é `ERR_INVAL`, mais de 8
+componentes é `ERR_NAMETOOLONG`, volume desconhecido ou indisponível é
+`ERR_NODEV`. Depois, nesta ordem:
+
+1. Volume que não aceita escrita: `ERR_ROFS`.
+2. Diretório pai: inexistente `ERR_NOENT`; arquivo no meio `ERR_TYPE`.
+3. O último componente: é diretório ou raiz de volume, `ERR_TYPE`; é arquivo
+   aberto por **qualquer** programa, inclusive o que chama, `ERR_BUSY`.
+4. O programa já tem 4 arquivos abertos: `ERR_MFILE`, **antes** de esvaziar
+   qualquer coisa.
+5. Se o arquivo não existe: sem entrada livre no pai ou sem cluster livre,
+   `ERR_NOSPC`.
+6. Cadeia inconsistente ou erro ao ler ou gravar o volume: `ERR_IO`.
+
+**Nenhuma** dessas falhas altera o volume. Esvaziar segue a ordem do
+`SYS_REMOVE`: primeiro grava a entrada do diretório (tamanho `0`, primeiro
+cluster `0`; nome, atributos, data e hora não mudam), depois libera os
+clusters da cadeia em todas as cópias da FAT. Se for interrompido no meio, o
+arquivo está como antes ou vazio, e no pior caso sobram clusters usados sem dono.
+
+### `SYS_ARGS` (27)
+
+Copia para o buffer do programa (`buf_ptr`, `buf_len`) o **texto de argumentos**
+e devolve o **tamanho total** do texto, de `0` a `MAX_ARGS_LEN` (128; pelo
+prompt, no máximo 119). Copia no máximo `buf_len` bytes: se o texto é maior que
+o buffer, a cópia é cortada e o valor devolvido, maior que `buf_len`, avisa
+disso. Não há terminador. O texto é o que vem depois do nome do programa na
+linha do comando `exec`, **sem os espaços do começo e do fim** (os do meio
+ficam), só com ASCII imprimível (o que o prompt aceita). Um programa iniciado
+pelo `run` recebe `0`. Com `buf_len == 0` o ponteiro não é olhado e só o
+tamanho é devolvido. Com `buf_len > 0`, o intervalo inteiro precisa estar na
+região do usuário, mapeado e **gravável** (a mesma regra de `SYS_READ_LINE`),
+senão `ERR_FAULT` e nada é copiado; um `buf_len` enorme também é `ERR_FAULT`. Nunca bloqueia, e chamadas
+repetidas dão o mesmo resultado. O kernel não interpreta o texto: sem aspas,
+sem escapes, sem separar palavras (separar é do programa).
+
+O comando `exec <programa> [argumentos...]` é do prompt (fora do contrato de
+syscalls) e inicia **um** programa, embutido ou arquivo (começa com `/`), como
+o `run` faria, entregando o resto da linha como texto de argumentos. O `run`
+não muda: trata cada palavra depois dele como outro programa a iniciar junto.
+
 ## 6. Resultado e códigos de erro
 
 O resultado em `rax` é um inteiro com sinal de 64 bits: `≥ 0` é sucesso
@@ -485,21 +635,21 @@ O resultado em `rax` é um inteiro com sinal de 64 bits: `≥ 0` é sucesso
 
 | Constante | Valor | Quando |
 |-----------|-------|--------|
-| `ERR_FAULT` | `-1` | Ponteiro ou intervalo inválido (fora da região, não mapeado, cruzando páginas não mapeadas, ou não gravável em `SYS_READ_LINE`, `SYS_READ`, `SYS_READ_DIR` e `SYS_TIME`). |
-| `ERR_INVAL` | `-2` | Argumento fora dos limites permitidos (`len > 4096`, `size == 0` em `SYS_ALLOC`, `path_len == 0`, caminho malformado, ou `len != 8` em `SYS_TIME`). |
+| `ERR_FAULT` | `-1` | Ponteiro ou intervalo inválido (fora da região, não mapeado, cruzando páginas não mapeadas, ou não gravável em `SYS_READ_LINE`, `SYS_READ`, `SYS_READ_DIR`, `SYS_TIME` e `SYS_ARGS`). |
+| `ERR_INVAL` | `-2` | Argumento fora dos limites permitidos (`len > 4096`, `size == 0` em `SYS_ALLOC`, `path_len == 0`, caminho malformado, `len != 8` em `SYS_TIME`, ou, em `SYS_SCREEN`, operação desconhecida, posição fora da grade ou cor fora dos limites). |
 | `ERR_NOMEM` | `-3` | `SYS_ALLOC` não pôde dar a memória pedida (limite de 1 MiB do heap ou falta de memória física). |
 | `ERR_NOENT` | `-4` | O caminho, ou um componente dele, não existe. |
 | `ERR_NODEV` | `-5` | Volume desconhecido, ou conhecido mas indisponível (sem disco, volume inválido); em rede, a placa não existe e o destino não é `127.0.0.0/8`. |
-| `ERR_TYPE` | `-6` | Tipo errado: `SYS_READ` em diretório, `SYS_READ_DIR` em arquivo, arquivo no meio do caminho, acrescentar ou remover (`SYS_REMOVE`) um diretório, ou `SYS_RMDIR` de um arquivo; nas syscalls de rede, usar um socket de escuta para `SYS_TCP_SEND` ou `SYS_TCP_RECV`, ou um socket de conexão para `SYS_TCP_ACCEPT`. |
+| `ERR_TYPE` | `-6` | Tipo errado: `SYS_READ` em diretório, `SYS_READ_DIR` em arquivo, arquivo no meio do caminho, acrescentar, regravar (`SYS_OPEN_WRITE`) ou remover (`SYS_REMOVE`) um diretório, ou `SYS_RMDIR` de um arquivo; nas syscalls de rede, usar um socket de escuta para `SYS_TCP_SEND` ou `SYS_TCP_RECV`, ou um socket de conexão para `SYS_TCP_ACCEPT`. |
 | `ERR_BADF` | `-7` | Descritor inválido: fora de `0..=3`, não aberto ou já fechado, ou usado no modo errado (`SYS_READ` em descritor de acrescentar, `SYS_WRITE_FILE` em descritor de leitura); nas syscalls de rede, socket fora de `0..=3`, não aberto ou já fechado. |
-| `ERR_MFILE` | `-8` | O programa já tem 4 arquivos abertos (ou 4 sockets, nas syscalls de rede). |
+| `ERR_MFILE` | `-8` | O programa já tem 4 arquivos abertos (ou 4 sockets, nas syscalls de rede); também em `SYS_OPEN_WRITE`, sem esvaziar nada. |
 | `ERR_NAMETOOLONG` | `-9` | Caminho com mais de 64 bytes, ou com mais de 8 componentes. |
 | `ERR_IO` | `-10` | Erro ao ler o volume: disco que não responde, erro do disco ou estrutura FAT corrompida. |
 | `ERR_CLOCK` | `-11` | `SYS_TIME`: o relógio devolveu valores impossíveis, não se estabilizou ou não respondeu. |
 | `ERR_EXIST` | `-12` | `SYS_CREATE`: o nome já existe (arquivo, diretório ou a raiz do volume). |
-| `ERR_NOSPC` | `-13` | Sem cluster livre, ou diretório sem entrada livre (também em `SYS_MKDIR`). |
+| `ERR_NOSPC` | `-13` | Sem cluster livre, ou diretório sem entrada livre (também em `SYS_MKDIR` e na criação de `SYS_OPEN_WRITE`). |
 | `ERR_ROFS` | `-14` | O volume existe, está montado e não aceita escrita (um volume com mais de 1 setor por cluster, ou um dispositivo que não sabe gravar: a gravação no `/disco` funciona). |
-| `ERR_BUSY` | `-15` | `SYS_REMOVE` de um arquivo, ou `SYS_RMDIR` de um diretório, que algum programa tem aberto; `SYS_RMDIR` da raiz de um volume. |
+| `ERR_BUSY` | `-15` | `SYS_REMOVE` ou `SYS_OPEN_WRITE` de um arquivo, ou `SYS_RMDIR` de um diretório, que algum programa tem aberto; `SYS_RMDIR` da raiz de um volume. |
 | `ERR_NOTEMPTY` | `-16` | `SYS_RMDIR` de um diretório que tem qualquer entrada além de `.`, `..` e entradas apagadas. |
 | `ERR_TIMEDOUT` | `-17` | O tempo limite do socket esgotou (`SYS_TCP_ACCEPT`, `SYS_TCP_RECV`, `SYS_TCP_SEND`), ou a conexão desistiu: SYN sem resposta em 3 tentativas (3 s), ou dado sem confirmação em 5 retransmissões. |
 | `ERR_CONNREFUSED` | `-18` | `SYS_TCP_CONNECT`: o par respondeu RST ao SYN (inclusive o loopback sem servidor). |
@@ -517,7 +667,7 @@ Não há errno: o programa recebe só o valor em `rax`.
 | `SYS_EXIT(n)`, `n ≠ 0` | `[run] <nome> terminou com codigo <n>` | idem |
 | Acesso inválido à memória (`#PF`) em ring 3 | `[run] <nome> encerrado por erro de memoria: #PF (Page Fault) em <rip>` + `codigo de erro: <código>` + `endereco de falha: <endereço>` | idem |
 | Outra exceção de CPU em ring 3 (`#DE`, `#UD`, `#GP`, `#SS`, `#NP`) | `[run] <nome> encerrado por erro: <sigla> (<nome da exceção>) em <rip>` (+ código de erro, quando houver) | idem |
-| Número de syscall inexistente (qualquer um fora de 1 a 23) | `[run] <nome> encerrado: syscall inexistente (<n>)` | idem |
+| Número de syscall inexistente (qualquer um fora de 1 a 27) | `[run] <nome> encerrado: syscall inexistente (<n>)` | idem |
 
 A mensagem aparece **na hora** em que aquele programa termina, em tela e
 serial, mesmo que outros continuem rodando. Uma falha do programa **nunca**
@@ -584,10 +734,13 @@ Cada espera termina no máximo no tempo limite do socket (seção 10).
 
 ### Teclado
 
-O teclado é entregue ao programa que está esperando uma linha em
-`SYS_READ_LINE`. Se mais de um espera, recebe o que pediu **primeiro**; os
-demais continuam esperando e só começam a receber depois. Uma tecla nunca vai
-a dois programas nem se perde. Um programa esperando não consome CPU.
+O teclado é entregue ao programa que está esperando: uma **linha**
+(`SYS_READ_LINE`) ou uma **tecla** (`SYS_READ_KEY`). Se mais de um espera,
+recebe o que pediu **primeiro**; os demais continuam esperando e só começam a
+receber depois. Uma tecla nunca vai a dois programas nem se perde. Um programa
+esperando não consome CPU, e se todos esperam o teclado o kernel dorme (`hlt`).
+Um leitor de linha que já está montando uma linha continua dono do teclado até
+o Enter.
 
 O prompt não lê o teclado enquanto há algum programa vivo. O que nenhum
 programa pediu não é perdido: fica na fila do teclado (16 posições; se
@@ -596,6 +749,15 @@ encher, a tecla mais antiga é descartada) e o prompt o recebe quando o
 meio de uma linha (fica bloqueado em `SYS_READ_LINE` até o Enter); o que
 sobra é digitação antecipada, que o prompt recebe intacta, e o que for
 digitado depois aparece nele sem perdas.
+
+O estado de Ctrl e dos prefixos `0xE0`/`0xE1` reflete **todo** scancode que o
+kernel consome, inclusive os que passam pelo prompt e por `SYS_READ_LINE`: um
+Ctrl apertado num lugar e solto em outro não fica preso. Quando o último
+programa de um `run` termina, um prefixo pendente é descartado (o estado de
+Ctrl não é zerado). Se a fila encher no meio de uma sequência, o decodificador
+pode errar uma tecla ou ficar com Ctrl preso até ele ser apertado e solto de
+novo. O prompt, o editor de linha e `SYS_READ_LINE` não mudam: Tab, Esc e as
+teclas estendidas continuam sem efeito neles.
 
 ## 9. Sistema de arquivos
 
@@ -606,7 +768,8 @@ que foi gravado **na imagem em que o QEMU está rodando**: no `cargo run` e no
 `cargo test` (`snapshot=on`) isso é descartado ao fechar o QEMU, e só persiste
 entre boots rodando o QEMU à mão sobre uma cópia da imagem (README, "Preservando
 o disco entre boots"). Não existe syscall para renomear, mover, posicionar,
-sobrescrever no meio nem truncar.
+sobrescrever no meio nem truncar para um tamanho qualquer; regravar um arquivo
+do zero é `SYS_OPEN_WRITE`.
 
 ### Volumes
 
@@ -622,8 +785,13 @@ de boot inválido, erro de leitura) faz as operações sobre ele devolverem
 ### Escrever
 
 - **Só pelo fim.** Um arquivo nasce vazio (`SYS_CREATE`) e só cresce por
-  `SYS_WRITE_FILE`, sempre no fim atual. Quem quiser trocar o conteúdo apaga e
-  cria de novo.
+  `SYS_WRITE_FILE`, sempre no fim atual. Quem quiser trocar o conteúdo abre o
+  arquivo com `SYS_OPEN_WRITE`, que o zera (ou o cria, se não existe) sem
+  precisar apagar e criar de novo: uma falha no meio não perde o texto antigo
+  antes da hora.
+- **Regravar.** `SYS_OPEN_WRITE` esvazia o arquivo na ordem do `SYS_REMOVE`
+  (a entrada do diretório primeiro, depois os clusters), e um arquivo aberto
+  por qualquer programa dá `ERR_BUSY`.
 - **Sem cache.** Cada escrita termina com os dados, a FAT e o tamanho já no
   volume. Se a operação for interrompida entre dois setores, o volume continua
   legível; no pior caso sobram clusters usados sem dono.
@@ -737,3 +905,4 @@ ARP, IPv4, ICMP (só o eco) e TCP, mais um **loopback** interno. Os programas us
 | 6 | 10 (os-rust 0.10.0) | `SYS_CREATE` (11), `SYS_OPEN_APPEND` (12), `SYS_WRITE_FILE` (13), `SYS_REMOVE` (14); erros `ERR_EXIST` (`-12`) a `ERR_BUSY` (`-15`); `/ram` passa a aceitar escrita (só pelo fim); `/disco` continua somente leitura; `ERR_TYPE` e `ERR_BADF` cobrem também o modo errado do descritor. Programas v1 a v5 continuam funcionando. |
 | 7 | 11 (os-rust 0.11.0) | `SYS_MKDIR` (15), `SYS_RMDIR` (16); erro `ERR_NOTEMPTY` (`-16`); `/disco` passa a aceitar escrita (cada setor é descarregado do cache do disco); `ERR_BUSY` cobre também diretório aberto e a raiz de um volume, `ERR_NOSPC` cobre `SYS_MKDIR`, e `ERR_ROFS` só vale para o volume que não aceita escrita. Programas v1 a v6 continuam funcionando. |
 | 8 | 12 (os-rust 0.12.0) | `SYS_TCP_LISTEN` (17), `SYS_TCP_ACCEPT` (18), `SYS_TCP_CONNECT` (19), `SYS_TCP_SEND` (20), `SYS_TCP_RECV` (21), `SYS_TCP_CLOSE` (22), `SYS_TCP_TIMEOUT` (23); erros `ERR_TIMEDOUT` (`-17`) a `ERR_NOBUFS` (`-21`); sockets TCP por programa (até 4, 8 conexões no kernel), esperas de rede sem gastar CPU com tempo limite, loopback `127.0.0.0/8`; `ERR_NODEV`, `ERR_MFILE`, `ERR_TYPE` e `ERR_BADF` cobrem também as syscalls de rede. Programas v1 a v7 continuam funcionando. |
+| 9 | 13 (os-rust 0.13.0) | `SYS_READ_KEY` (24), `SYS_SCREEN` (25), `SYS_OPEN_WRITE` (26), `SYS_ARGS` (27); nenhum erro novo (o último continua `ERR_NOBUFS`); tecla crua com setas e Ctrl, tela de 25 por 80 com cursor e cores (vídeo reverso inclusive), arquivo regravável do zero e argumentos de linha de comando pelo `exec` (o `run` não muda); `ERR_INVAL`, `ERR_FAULT`, `ERR_TYPE`, `ERR_BUSY`, `ERR_MFILE` e `ERR_NOSPC` cobrem também as syscalls novas; a seção do teclado vale para linha e tecla. Programas v1 a v8 continuam funcionando. |

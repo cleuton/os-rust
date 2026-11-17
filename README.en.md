@@ -30,7 +30,7 @@ multitasking.
 
 The project documentation is also available in English (see the `ENGLISH VERSION` link at the top of each `.md` file).
 
-**Current version: 0.12.1.** Milestones 0 (boot in VGA text mode, with a
+**Current version: 0.13.0.** Milestones 0 (boot in VGA text mode, with a
 welcome message, scrolling and readable panic handling), 1 (interrupts,
 keyboard and command prompt), 2 (debugging infrastructure: serial output
 and automated tests inside QEMU), 3 (memory: physical frame allocator,
@@ -54,17 +54,22 @@ from the prompt and from user programs, with `run gravador` and `run
 apagador`) and 11 (ATA disk writing: `/disco` also accepts writes, directories
 can be created and removed, and data persists across boots when QEMU runs over
 a copy of the image, with `run caderno`) and 12 (basic TCP/IP networking: RTL8139
-card, ARP, IP, ICMP and TCP, with `rede`, `ping` and `run servidor cliente`) are
-completed and are what this repository runs today. Version 0.12.1 brings the
+card, ARP, IP, ICMP and TCP, with `rede`, `ping` and `run servidor cliente`) and 13
+(raw keyboard, screen and a file that can be rewritten: arrows and Ctrl, cursor and
+colors, rewriting a file and command-line arguments, with `run teclas` and `exec`)
+are completed and are what this repository runs today. Version 0.12.1 brings the
 `ftpd` program to Milestone 12: an FTP server to exchange files with the real
-computer without rebuilding (see [FTP server](#ftp-server)). The
+computer without rebuilding (see [FTP server](#ftp-server)). Version 0.13.0
+delivers Milestone 13: what a full-screen editor needs, which will come later as a
+user program (see the [programmer's guide](PROGRAMMERS_GUIDE.md), section
+**Keyboard and screen**). The
 original talk demo, in the format used in class, is preserved
 in the git tag `v1.0-demo` and can still be used as is.
 
 ## Roadmap
 
 os-rust advances in numbered milestones, each ending in something visible in
-QEMU. The table below summarizes the first fourteen planned milestones; the
+QEMU. The table below summarizes the first fifteen planned milestones; the
 details of each follow.
 
 | Milestone | Goal | Demonstrable | Status |
@@ -83,6 +88,7 @@ details of each follow.
 | 10. Ramdisk writing | Write to FAT16, creating, writing, extending and deleting files, applied to the `/ram` volume. | Create a file in `/ram`, show it with `cat` and delete it, also from a user program. | Completed |
 | 11. ATA disk writing | Write sectors to the ATA disk and make `/disco` writable through the same writing layer, with persistence across boots. | Write a file to `/disco`, restart QEMU and read the file. | Completed |
 | 12. Basic TCP/IP networking | Speak TCP/IP in a basic but working way in QEMU: network card driver (RTL8139), ARP, IP, ICMP and TCP. | Exchange data over the network in QEMU (`rede`, `ping 10.0.2.2`, `run servidor cliente`); on real hardware (bare metal) it should work with an RTL8139, with no guarantee. | Completed |
+| 13. Raw keyboard, screen and a file that can be rewritten | Give user programs the raw key (arrows, Ctrl), control of the screen, cursor and colors, rewriting files and command-line arguments (`exec`), what a full-screen interface needs. | `run teclas`: the `@` moves around the screen with the arrows, with colors and reverse video, and the program rewrites `/ram/teclas.txt` (or the file given in `exec teclas <file>`). | Completed |
 
 ### Milestone details
 
@@ -250,6 +256,23 @@ cliente`). Demonstrable in QEMU; on real hardware (bare metal) it should work if
 there is an RTL8139, but that was not tested and there is no guarantee. Depends
 on Milestone 11.
 
+**Milestone 13. Raw keyboard, screen and a file that can be rewritten.**
+Completed. A program can wait for any key (arrows and Ctrl included, with no
+echo), draw wherever it wants on the 25 by 80 grid choosing the colors (reverse
+video included), rewrite a file from scratch and receive command-line arguments.
+Delivered: four new syscalls, `SYS_READ_KEY` (24), `SYS_SCREEN` (25),
+`SYS_OPEN_WRITE` (26) and `SYS_ARGS` (27), in contract version 9, with no new
+error; a key decoder in the kernel (the `0xE0` prefix, Pause, Ctrl); the VGA
+`Writer` with a cursor row and a current color, and the return to the prompt that
+erases only the last row; emptying a file in the FAT (the entry first, the
+clusters afterwards); the `exec` command, which starts a program and hands the
+rest of the line over to it (`run` takes no arguments); `Key`, `KeyEvent`,
+`screen`, `args` and `FileWriter::overwrite` in the runtime library; and the
+`teclas` program, which shows it all working. Demonstrable: `run teclas` and
+`exec teclas /ram/contagem.txt`. **The text editor is not part of this
+milestone**: these syscalls and `exec` are what is missing for it to be written
+later, as a user program, in another spec. Depends on Milestone 12.
+
 ### Why this order
 
 The first user program (Milestone 5) depends neither on a file system nor on
@@ -265,11 +288,13 @@ The programming interface between the kernel and user programs (the syscall
 contract: numbers, semantics, register conventions, error codes, executable
 format, load region and initial stack) is documented in a single versioned
 file, [`SYSCALLS.md`](SYSCALLS.md), since Milestone 5 (contract version 1:
-`write` and `exit`). The current version is 7, from Milestone 11, which adds
+`write` and `exit`). The current version is 9, from Milestone 13, which adds
 to what was already there (reading a line from the keyboard and memory, in
 Milestone 6; yielding the CPU, in Milestone 7; reading files, in Milestone
 8; the time, `SYS_TIME`, in Milestone 9; writing files in `/ram`, in Milestone
-10) creating and removing directories and writing to `/disco`. It is the only source of this interface: no
+10; creating and removing directories and writing to `/disco`, in Milestone 11;
+networking, in Milestone 12) the raw keyboard, the screen with colors, rewriting
+files and command-line arguments (Milestone 13). It is the only source of this interface: no
 syscall exists without being in it, and an automated test checks that the
 text keeps matching the code. An incompatible change to the contract
 increases its version and requires updating, in the same milestone, the
@@ -384,7 +409,7 @@ This will: compile the kernel for this project's custom bare-metal target
 QEMU window that boots via BIOS straight into that binary. Within a few
 seconds you should see the os-rust logo (the 20 lines of the symbol and the
 name, at the top of the screen), followed by the identification line
-`os-rust v0.12.1` — the project's current version — and the `os-rust> `
+`os-rust v0.13.0` — the project's current version — and the `os-rust> `
 prompt ready for typing, not an ordinary terminal.
 
 The same `cargo run` also compiles the runtime library (`runtime/`) and the
@@ -431,8 +456,9 @@ is needed for this: it is the same `cargo run` as always.
 | `ping <ip>` | Sends 4 ICMP echo requests (one per second) and shows the replies, for example `ping 10.0.2.2` or `ping 127.0.0.1`. **It is not the `ping` program of `run ping pong`** (Milestone 7), which only alternates with `pong` |
 | `data` | Shows the date and time of the computer's clock, in UTC, in the format `AAAA-MM-DD HH:MM:SS UTC`; if the clock is invalid or does not respond, shows a clear message. Extra arguments are ignored |
 | `run <target> [<target>...]` | Executes user programs in user mode (ring 3), up to 4 at the same time (the same target may repeat), and returns to the prompt when the last one ends. A target that starts with `/` is the path of an ELF64 executable (up to 64 KiB) read from a volume, like `/disco/bin/visita`; any other is the name of a program embedded in the image. The two can be mixed (`run /disco/bin/visita hello`). With no argument, with an invalid target or with more than 4 targets, it starts none |
+| `exec <program> [<arguments>...]` | Starts **one** program (built in or a file, as in `run`) and hands the rest of the line over to it as argument text, which the program reads with `SYS_ARGS` (without leading and trailing spaces, no quotes or escapes), for example `exec teclas /ram/contagem.txt`. `run` does **not** take arguments: it treats each word after it as another program to start together. The text has at most 128 bytes (through the prompt, less: the whole line has 128) |
 
-### User programs: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `visita` and `labirint`
+### User programs: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `teclas`, `visita` and `labirint`
 
 The `run` command executes programs written outside the kernel. Each one
 lives in `programs/src/bin/` (except `visita` and `labirint`, in
@@ -576,6 +602,28 @@ lives in `programs/src/bin/` (except `visita` and `labirint`, in
   `curl ftp://127.0.0.1:2121/ram/` shows the real entries of the ramdisk and `curl
   -o copia.txt ftp://127.0.0.1:2121/ram/ola.txt` brings the file, with the same
   72 bytes. With no client, `ftpd: ninguem se conectou em 30 s, encerrando`.
+- **`teclas`** (`run teclas` or `exec teclas <file>`): the Milestone 13 demo. It
+  clears the screen, shows a title bar in **reverse video** (black text on a light
+  gray background, across the 80 columns) and a green `@` in the middle. Every key
+  read (arrows, Home, End, Ctrl, any key) appears by name and counts; the arrows
+  move the `@` through rows 5 to 18. `Ctrl+Q` quits: the program **rewrites** the
+  file (`/ram/teclas.txt`, or the one given in `exec teclas <file>`) with the total
+  of keys read, never appending, and shows the result further down; the prompt
+  comes back on a clean row, with the drawing above still in view. Run it alone:
+  the program uses the whole screen.
+
+  ```text
+  os-rust> run teclas
+  (press a, right arrow, right arrow, down arrow, Enter and Ctrl+Q)
+  teclas: 6 teclas lidas
+  teclas: gravado em /ram/teclas.txt (2 bytes)
+  os-rust> cat /ram/teclas.txt
+  6
+  os-rust> exec teclas /ram/contagem.txt
+  ```
+
+  With more than one word (`exec teclas a b`) or a path longer than 40 bytes, it
+  writes the usage message and exits with code 1, without touching the screen.
 - **`leitor`** (`run leitor`): opens `/disco/docs/longo.txt`, a file that
   takes up more than one cluster of the disk, and writes the contents to the
   screen, reading in 128-byte chunks through the file syscalls. The program
@@ -1050,6 +1098,29 @@ QEMU to see `/ram` go back to its initial contents. The automated suite
   to the same file, `/disco` unchanged, unavailable volume, tampered FAT,
   `/ram` restored, and the contract and the guide (literal program code).
 
+### What the Milestone 13 tests cover
+
+The automated suite (`cargo test`) covers, besides the earlier tests. No test
+depends on a physical keyboard: they push scancodes into the kernel queue, and the
+support programs are hand-built ELFs.
+
+- Unit tests of the key decoder (each row of the table, Shift, left and right
+  Ctrl, the fake Shift, Pause, the keys that generate no event), of the `Writer`
+  (cursor row, scrolling only on the last row, current color, return to the
+  prompt), of `Fat::truncate` (entry first, simulated interruption after every
+  sector write, tampered chain), of `open_write` and of `exec`;
+- `tests/teclado_tela.rs`: `SYS_READ_KEY` (each code, Ctrl, type-ahead, no echo,
+  the waiting program does not delay one that computes, the kernel sleeps, line and
+  key waiting together), `SYS_SCREEN` (clear, move, the limits, scrolling, the
+  return to the prompt after `exit`, a CPU fault and a memory fault), colors and
+  reverse video (the 16 text colors with the 8 backgrounds), `SYS_ARGS` and `exec`
+  (including `u64::MAX` as the buffer size), `teclas` end to end (the Story 1
+  sequence, the four runs that leave 6, 1, 11 and 2, the edges of the `@`, a full
+  `/ram`), contract version 9, the guide (literal `teclas.rs` code) and this README;
+- `tests/regravar_arquivo.rs`: `SYS_OPEN_WRITE` on `/ram` and `/disco` (create,
+  zero, each error in contract order, `ERR_MFILE` without emptying the file,
+  `ERR_BUSY` for any program, a read-only volume, a tampered chain).
+
 ### What the version 0.12.1 tests cover
 
 0.12.1 is not a milestone: it brings `ftpd` to Milestone 12, without changing the
@@ -1068,7 +1139,7 @@ and talks to `ftpd` over the loopback:
   a partial file, `MKD`/`RMD`/`DELE` and each error, commands together, split and
   with just `\n`, the long line, the client that disappears, 50 sessions without
   leaking anything, `run ftpd ftpd`, sending an ELF that runs with `run`, version
-  0.12.1, the guide (literal code), the READMEs and the CHANGELOGs;
+  0.13.0, the guide (literal code), the READMEs and the CHANGELOGs;
 - `tests/ftpd_espera.rs`: with no client, `ftpd` gives up after 30 s and the
   kernel sleeps; a data connection nobody opens gives `425` in 10 s and deletes
   the created file;
@@ -1105,7 +1176,7 @@ QEMU's `guestfwd`, which runs the computer's `cat` utility (Linux and macOS):
   buffer;
 - `tests/rede_programas.rs`: `servidor` and `cliente` end to end (33 bytes sent,
   88 received), the refusal, the invalid address, 50 runs without leaking
-  anything, version 0.12.1, contract version 8, the guide (literal code), the
+  anything, version 0.13.0, contract version 9, the guide (literal code), the
   README and the QEMU arguments in `Cargo.toml`;
 - `tests/rede_espera.rs`: the `servidor` alone gives up after 30 s.
 
@@ -1135,7 +1206,7 @@ tests:
   for an open directory and the release after `close`, `exit` and a fault,
   `mkdir` with 4 open files, number 17, `caderno` end to end, the 2-sectors-per-cluster
   volume that stays read-only, a missing disk, 50 cycles without leaking
-  clusters, frames or descriptors, version 0.12.1, contract version 8, the
+  clusters, frames or descriptors, version 0.13.0, contract version 9, the
   guide (literal `caderno` code), the README (the keep-the-disk and USB-stick
   commands) and `snapshot=on` in `Cargo.toml`.
 
@@ -1364,7 +1435,7 @@ chapter in [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   in the kernel, generates the ramdisk images (embedded in the kernel) and
   the disk (`target/imagens/`, attached to QEMU with `snapshot=on`; regenerated every time it runs) and the list of delivered
   files that `tests/artefatos.rs` checks.
-- `SYSCALLS.md`: the syscall contract (version 8).
+- `SYSCALLS.md`: the syscall contract (version 9).
 - `tests/`: the integration tests, each one starting the kernel from scratch
   in its own binary — a boot test (which also checks the version in the
   welcome message), a test whose expected result is a panic, tests of the
@@ -1376,7 +1447,7 @@ chapter in [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   time: context switching, preemption, isolation and keyboard),
   `disco_ata.rs` (the ATA driver), `escrita_no_ramdisk.rs` (writing to `/ram`: commands, syscalls, `gravador` and
   `apagador`), `escrita_no_disco.rs` (writing to `/disco`, `mkdir`, `rmdir`,
-  `caderno`, contract version 8 and the README), `rede.rs`, `rede_pilha.rs`, `rede_syscalls.rs`, `rede_programas.rs` and `rede_espera.rs` (the Milestone 12 networking), `ftpd.rs`, `ftpd_espera.rs` and `ftpd_ocioso.rs` (the 0.12.1 FTP server), `sistema_de_arquivos.rs` (`ls`, `cat`,
+  `caderno`, contract version 9 and the README), `rede.rs`, `rede_pilha.rs`, `rede_syscalls.rs`, `rede_programas.rs` and `rede_espera.rs` (the Milestone 12 networking), `ftpd.rs`, `ftpd_espera.rs` and `ftpd_ocioso.rs` (the 0.12.1 FTP server), `teclado_tela.rs` and `regravar_arquivo.rs` (the raw keyboard, the screen, the arguments, `exec`, `teclas` and file rewriting of Milestone 13), `sistema_de_arquivos.rs` (`ls`, `cat`,
   `run` by path, file syscalls and invalid volumes) and `artefatos.rs`
   (hygiene of the delivered files).
 - `x86_64-os_rust.json`: the custom bare-metal target specification (no

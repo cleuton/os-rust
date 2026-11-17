@@ -15,6 +15,10 @@
 //!   (só o `/ram` aceita escrita);
 //! - [`TcpListener`], [`TcpStream`], [`Ipv4`] e [`NetError`]: falar TCP pela
 //!   rede (ou pelo loopback `127.0.0.1`);
+//! - [`read_key`], [`Key`] e [`KeyEvent`]: ler uma tecla crua (setas e Ctrl
+//!   inclusive), sem eco;
+//! - [`screen`]: limpar a tela, mover o cursor e escolher cores;
+//! - [`args`]: ler os argumentos que o comando `exec` passa;
 //! - [`time::now`]: a data e a hora atuais, em UTC;
 //! - [`exit`]: encerra o programa mais cedo;
 //! - [`yield_now`]: cede a CPU a outro programa (multitarefa);
@@ -27,15 +31,19 @@
 
 #![no_std]
 
+pub mod args;
 pub mod fs;
 pub mod heap;
 pub mod io;
+pub mod key;
 pub mod net;
+pub mod screen;
 pub mod sys;
 pub mod time;
 
 pub use fs::{mkdir, remove, rmdir, Dir, DirEntry, File, FileWriter, FsError};
 pub use io::read_line;
+pub use key::{read_key, Key, KeyEvent};
 pub use net::{Ipv4, NetError, TcpListener, TcpStream};
 pub use sys::{exit, yield_now};
 pub use time::{DateTime, TimeError};

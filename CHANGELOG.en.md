@@ -5,6 +5,64 @@ at a time. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/), and the versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.13.0] - 2026-11-17
+
+Milestone 13: raw keyboard, screen and a file that can be rewritten. The syscall
+contract goes from version 8 to 9, only adding: programs of versions 1 to 8 keep
+working. **The text editor is not in this version**: these syscalls and the `exec`
+command are what is missing for a full-screen editor to be written later, as a user
+program.
+
+### Added
+
+- The four new syscalls, with no new error: `SYS_READ_KEY` (24, any key, arrows and
+  Ctrl included, no echo), `SYS_SCREEN` (25, clear, move the cursor and choose the
+  colors, reverse video included), `SYS_OPEN_WRITE` (26, open a file zeroing its
+  contents) and `SYS_ARGS` (27, the argument text).
+- The prompt command `exec <program> [arguments...]`, which starts a program and
+  hands the rest of the line over to it (`run` does not change and still takes no
+  arguments).
+- `SCREEN_COLOR` and the 16 VGA color constants (`COLOR_BLACK` to `COLOR_WHITE`,
+  `COLOR_DEFAULT_TEXT`, `COLOR_DEFAULT_BACKGROUND`), the `KEY_*` codes and
+  `KEY_CTRL`, `SCREEN_*` and `MAX_ARGS_LEN` in the `abi` crate.
+- The kernel key decoder (`keyboard::decode`), with the `0xE0` prefix, the Pause
+  sequence and the Ctrl state, which sees every scancode the kernel consumes.
+- The cursor row and the current color of the VGA `Writer`, the "screen positioned"
+  mark and the return to the prompt that erases only the last row and restores the
+  default color.
+- Emptying a file in the FAT (`Fat::truncate`): the directory entry first and the
+  clusters afterwards, like `remove`.
+- In the runtime library: `Key`, `KeyEvent` and `read_key`, the `screen` module
+  (`clear`, `move_to`, `set_color`, `reset_color`), the `args` module (`read`,
+  `words`) and `FileWriter::overwrite`.
+- `teclas` program (`programs/src/bin/teclas.rs`, embedded in the boot image): the
+  arrows move a colored `@`, the title bar shows in reverse video, `Ctrl+Q` quits
+  and the program rewrites the file given in `exec teclas <file>` (by default
+  `/ram/teclas.txt`) with the total number of keys read.
+- Programmer's guides (Portuguese and English): the **Keyboard and screen** and
+  **Command-line arguments** sections, "Example program 16: teclas" and
+  `FileWriter::overwrite`; a Milestone 13 chapter in the walkthrough
+  (`WALKTHROUGH.md` and `WALKTHROUGH.en.md`); Milestone 13 and `exec` in the README.
+- Tests: `tests/teclado_tela.rs` and `tests/regravar_arquivo.rs`, plus the unit
+  tests of the decoder, of the `Writer`, of `Fat::truncate`, of `open_write` and of
+  `exec`.
+
+### Changed
+
+- Syscall contract at version 9 (`SYSCALLS.md` and `SYSCALLS.en.md`): the four
+  syscalls, the key code table, the screen and the colors, `exec`, the keyboard
+  section (delivered to the waiting program, line or key) and "outside 1 to 27".
+- The return to the prompt, in `run` and `exec`, restores the screen when a program
+  used `SYS_SCREEN` (erases the last row and goes back to yellow on black) and
+  discards a pending key prefix.
+- The hardware cursor, with a full row, stays on column 79 instead of position 80,
+  which does not exist in the grid.
+- Version `0.13.0` in `Cargo.toml` (the boot identification, `sobre` and the error
+  screens follow).
+- The existing tests that pinned version 0.12.1 or contract 8 now check `0.13.0` and
+  contract 9, and the ones that used number 24 as "nonexistent syscall" now use 28
+  (the first free number of contract 9).
+
 ## [0.12.1] - 2026-10-24
 
 Maintenance release: brings `ftpd` to Milestone 12. There is no new milestone, no

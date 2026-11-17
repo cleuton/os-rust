@@ -78,6 +78,105 @@ pub const SYS_TCP_CLOSE: u64 = 22;
 /// `tcp_timeout(sock, ms)`: define o tempo limite das esperas do socket.
 /// Devolve `0`.
 pub const SYS_TCP_TIMEOUT: u64 = 23;
+/// `read_key()`: espera uma tecla ser pressionada e devolve o código dela
+/// (`>= 1`, nunca negativo). Não ecoa nada. Ver `KEY_*`.
+pub const SYS_READ_KEY: u64 = 24;
+/// `screen(op, a, b)`: controla a tela de 25 por 80 (limpar, mover o cursor,
+/// escolher a cor). Devolve `0`, ou `ERR_INVAL`. Ver `SCREEN_*`.
+pub const SYS_SCREEN: u64 = 25;
+/// `open_write(path_ptr, path_len)`: abre um arquivo para acrescentar,
+/// criando-o se não existe e **zerando-o** se existe. Devolve o descritor.
+pub const SYS_OPEN_WRITE: u64 = 26;
+/// `args(buf_ptr, buf_len)`: copia o texto de argumentos do programa (o que
+/// vem depois do nome no comando `exec`) e devolve o tamanho **total**.
+pub const SYS_ARGS: u64 = 27;
+
+// Códigos de tecla de `SYS_READ_KEY`. Teclas de texto valem o próprio ASCII;
+// as especiais começam em 0x100 para nunca colidir com ele. São `u32` porque
+// o decodificador do kernel devolve `Option<u32>`.
+
+/// Seta para cima.
+pub const KEY_UP: u32 = 0x100;
+/// Seta para baixo.
+pub const KEY_DOWN: u32 = 0x101;
+/// Seta para a esquerda.
+pub const KEY_LEFT: u32 = 0x102;
+/// Seta para a direita.
+pub const KEY_RIGHT: u32 = 0x103;
+/// Home.
+pub const KEY_HOME: u32 = 0x104;
+/// End.
+pub const KEY_END: u32 = 0x105;
+/// Page Up.
+pub const KEY_PAGE_UP: u32 = 0x106;
+/// Page Down.
+pub const KEY_PAGE_DOWN: u32 = 0x107;
+/// Delete.
+pub const KEY_DELETE: u32 = 0x108;
+/// Insert.
+pub const KEY_INSERT: u32 = 0x109;
+/// Bit somado ao código quando Ctrl está pressionado. Fica acima das teclas
+/// especiais para `Ctrl+J` e Enter (ou `Ctrl+H` e Backspace) não ficarem
+/// iguais, como ficariam se Ctrl virasse byte de controle.
+pub const KEY_CTRL: u32 = 0x1_0000;
+
+// Operações de `SYS_SCREEN` (primeiro argumento).
+
+/// Apaga as 25 linhas (com a cor atual) e leva o cursor a `(0, 0)`.
+pub const SCREEN_CLEAR: u64 = 1;
+/// Leva o cursor à linha `a` (`0..=24`) e à coluna `b` (`0..=79`).
+pub const SCREEN_MOVE: u64 = 2;
+/// Escolhe a cor atual: texto `a` (`0..=15`) e fundo `b` (`0..=7`).
+pub const SCREEN_COLOR: u64 = 3;
+/// Linhas da tela de texto.
+pub const SCREEN_ROWS: usize = 25;
+/// Colunas da tela de texto.
+pub const SCREEN_COLS: usize = 80;
+
+// Cores do VGA em modo texto. O fundo só vai de 0 a 7: no modo padrão o bit
+// mais alto do fundo faz o caractere piscar, e o kernel não oferece piscar.
+
+/// Preto.
+pub const COLOR_BLACK: u8 = 0;
+/// Azul.
+pub const COLOR_BLUE: u8 = 1;
+/// Verde.
+pub const COLOR_GREEN: u8 = 2;
+/// Ciano.
+pub const COLOR_CYAN: u8 = 3;
+/// Vermelho.
+pub const COLOR_RED: u8 = 4;
+/// Magenta.
+pub const COLOR_MAGENTA: u8 = 5;
+/// Marrom.
+pub const COLOR_BROWN: u8 = 6;
+/// Cinza claro.
+pub const COLOR_LIGHT_GRAY: u8 = 7;
+/// Cinza escuro.
+pub const COLOR_DARK_GRAY: u8 = 8;
+/// Azul claro.
+pub const COLOR_LIGHT_BLUE: u8 = 9;
+/// Verde claro.
+pub const COLOR_LIGHT_GREEN: u8 = 10;
+/// Ciano claro.
+pub const COLOR_LIGHT_CYAN: u8 = 11;
+/// Vermelho claro.
+pub const COLOR_LIGHT_RED: u8 = 12;
+/// Rosa.
+pub const COLOR_PINK: u8 = 13;
+/// Amarelo.
+pub const COLOR_YELLOW: u8 = 14;
+/// Branco.
+pub const COLOR_WHITE: u8 = 15;
+/// Cor do texto no começo e na volta ao prompt (amarelo).
+pub const COLOR_DEFAULT_TEXT: u8 = COLOR_YELLOW;
+/// Cor do fundo no começo e na volta ao prompt (preto).
+pub const COLOR_DEFAULT_BACKGROUND: u8 = COLOR_BLACK;
+
+/// Maior texto de argumentos que `SYS_ARGS` entrega, em bytes. O prompt limita
+/// a linha a 128 bytes (com `exec` e o nome do programa dentro), então por ele
+/// o texto é sempre menor.
+pub const MAX_ARGS_LEN: usize = 128;
 
 /// Máximo de programas que `run` carrega ao mesmo tempo. Pedir mais que isso
 /// é recusado antes de iniciar qualquer programa.

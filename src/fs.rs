@@ -433,6 +433,47 @@ pub fn create_commit(pending: PendingCreate) -> Result<OpenFile, FsError> {
     })
 }
 
+/// O que `SYS_OPEN_WRITE` vai fazer, decidido **sem escrever nada**: criar o
+/// arquivo (ele não existe) ou esvaziá-lo (existe, é arquivo e ninguém o tem
+/// aberto).
+pub enum WritePlan {
+    /// O arquivo não existe: criar (planejado como em `create_plan`).
+    Create(PendingCreate),
+    /// O arquivo existe: esvaziar a entrada em `loc`.
+    Truncate { volume: VolumeId, loc: EntryLoc },
+}
+
+/// Planeja abrir `path` para regravar, **sem escrever nada**, na ordem do
+/// contrato: caminho malformado, volume desconhecido ou indisponível, volume
+/// que não aceita escrita, diretório pai (inexistente, arquivo no meio), o
+/// último componente (diretório ou raiz do volume: `IsADirectory`; arquivo
+/// aberto por qualquer programa: `Busy`) e, se o arquivo não existe, entrada
+/// livre no pai (`NoSpace`). Quem chama confere o que falta (descritores
+/// livres) antes de [`FileTable::open_write`] escrever, para que nenhuma falha
+/// altere o volume.
+pub fn write_plan(path: &[u8]) -> Result<WritePlan, FsError> {
+    let parsed = parse(path)?;
+    // Volume indisponível e volume somente leitura vêm antes de tudo.
+    with_fat_write(parsed.volume, |_| Ok(()))?;
+    let found = with_fat_write(parsed.volume, |fat| match fat.locate(parsed.components()) {
+        Ok((loc, _)) => Ok(Some(loc)),
+        Err(FatError::NotFound) => Ok(None),
+        Err(error) => Err(error),
+    })?;
+    match found {
+        Some(loc) => {
+            if is_open(parsed.volume, loc) {
+                return Err(FsError::Busy);
+            }
+            Ok(WritePlan::Truncate { volume: parsed.volume, loc })
+        }
+        None => {
+            let plan = with_fat_write(parsed.volume, |fat| fat.plan_create(parsed.components()))?;
+            Ok(WritePlan::Create(PendingCreate { volume: parsed.volume, plan }))
+        }
+    }
+}
+
 /// Apaga o arquivo `path`. Recusa, sem alterar nada, um arquivo que algum
 /// programa tem aberto (`Busy`): um leitor poderia passar a ler clusters que
 /// já foram reaproveitados.
@@ -633,6 +674,32 @@ impl FileTable {
             return Err(FsError::TooManyOpen);
         }
         let file = create_commit(pending)?;
+        self.insert(file)
+    }
+
+    /// Abre `path` para gravar **do zero**: cria o arquivo se não existe e o
+    /// esvazia se existe, e o deixa aberto para acrescentar (como `create`).
+    /// Tudo o que pode falhar é conferido antes de escrever, inclusive a tabela
+    /// cheia: um `TooManyOpen` nunca deixa o arquivo esvaziado.
+    pub fn open_write(&mut self, path: &[u8]) -> Result<usize, FsError> {
+        let plan = write_plan(path)?;
+        if self.slots.iter().all(|slot| slot.is_some()) {
+            return Err(FsError::TooManyOpen);
+        }
+        let file = match plan {
+            WritePlan::Create(pending) => create_commit(pending)?,
+            WritePlan::Truncate { volume, loc } => {
+                with_fat_write(volume, |fat| fat.truncate(loc))?;
+                OpenFile {
+                    volume,
+                    node: Node { kind: Kind::File, first_cluster: 0, size: 0 },
+                    mode: Mode::Append,
+                    cursor: None,
+                    entries_read: 0,
+                    loc: Some(loc),
+                }
+            }
+        };
         self.insert(file)
     }
 
@@ -1113,6 +1180,142 @@ mod tests {
             assert_eq!(leitor.read(&mut buf).unwrap(), 0);
             // Uma nova abertura vê tudo.
             assert_eq!(read_whole(b"/ram/l.txt", 16).unwrap(), b"abcdef");
+        });
+    }
+
+    // ---- regravar um arquivo (Marco 13) ----
+
+    /// Cria `path` com `n` bytes de `0xAB`, repetindo `write` até gravar tudo.
+    fn arquivo_de(path: &[u8], n: usize) {
+        let mut file = OpenFile::create(path).unwrap();
+        let dados = alloc::vec![0xABu8; n];
+        let mut feito = 0;
+        while feito < n {
+            feito += file.write(&dados[feito..]).unwrap();
+        }
+    }
+
+    #[test_case]
+    fn open_write_cria_quando_nao_existe_e_acrescenta() {
+        com_ram_limpo(|| {
+            let mut tabela = FileTable::new();
+            let fd = tabela.open_write(b"/ram/novo.txt").unwrap();
+            assert_eq!(read_whole(b"/ram/novo.txt", 100).unwrap(), b"");
+            assert_eq!(tabela.write(fd, b"abc").unwrap(), 3);
+            assert_eq!(tabela.write(fd, b"de").unwrap(), 2);
+            tabela.close(fd).unwrap();
+            assert_eq!(read_whole(b"/ram/novo.txt", 100).unwrap(), b"abcde");
+        });
+    }
+
+    #[test_case]
+    fn open_write_zera_o_arquivo_e_devolve_os_clusters() {
+        com_ram_limpo(|| {
+            arquivo_de(b"/ram/g.bin", 1000);
+            let com_arquivo = free_clusters(VolumeId::Ram).unwrap();
+            let mut tabela = FileTable::new();
+            let fd = tabela.open_write(b"/ram/g.bin").unwrap();
+            // Os dois clusters voltaram a ficar livres e o tamanho é 0.
+            assert_eq!(free_clusters(VolumeId::Ram).unwrap(), com_arquivo + 2);
+            assert_eq!(read_whole(b"/ram/g.bin", 2000).unwrap(), b"");
+            assert_eq!(tabela.write(fd, b"0123456789").unwrap(), 10);
+            tabela.close(fd).unwrap();
+            assert_eq!(read_whole(b"/ram/g.bin", 2000).unwrap(), b"0123456789");
+        });
+    }
+
+    #[test_case]
+    fn open_write_de_arquivo_vazio_funciona_sem_liberar_nada() {
+        com_ram_limpo(|| {
+            let livres = free_clusters(VolumeId::Ram).unwrap();
+            let mut tabela = FileTable::new();
+            let fd = tabela.open_write(b"/ram/vazio.txt").unwrap();
+            assert_eq!(free_clusters(VolumeId::Ram).unwrap(), livres);
+            tabela.close(fd).unwrap();
+        });
+    }
+
+    #[test_case]
+    fn open_write_de_arquivo_aberto_por_qualquer_um_e_busy_e_nao_muda_nada() {
+        com_ram_limpo(|| {
+            arquivo_de(b"/ram/g.bin", 700);
+            let mut dono = FileTable::new();
+            let mut outro = FileTable::new();
+            // Aberto para leitura, para acrescentar e por `open_write`, em
+            // outra tabela e na mesma.
+            for abrir in 0..3 {
+                let fd = match abrir {
+                    0 => dono.open(b"/ram/g.bin").unwrap(),
+                    1 => dono.open_append(b"/ram/g.bin").unwrap(),
+                    _ => {
+                        // Só depois de os outros fecharem: `open_write` precisa
+                        // abrir o arquivo uma vez para o teste seguinte.
+                        dono.close(0).ok();
+                        dono.close(1).ok();
+                        dono.open_write(b"/ram/h.bin").unwrap()
+                    }
+                };
+                if abrir < 2 {
+                    assert_eq!(outro.open_write(b"/ram/g.bin").err(), Some(FsError::Busy));
+                    assert_eq!(dono.open_write(b"/ram/g.bin").err(), Some(FsError::Busy));
+                    assert_eq!(read_whole(b"/ram/g.bin", 2000).unwrap().len(), 700);
+                    dono.close(fd).unwrap();
+                } else {
+                    assert_eq!(outro.open_write(b"/ram/h.bin").err(), Some(FsError::Busy));
+                    dono.close(fd).unwrap();
+                }
+            }
+            // Fechado, `open_write` volta a funcionar.
+            let fd = outro.open_write(b"/ram/g.bin").unwrap();
+            outro.close(fd).unwrap();
+        });
+    }
+
+    #[test_case]
+    fn open_write_recusa_diretorio_raiz_pai_inexistente_e_arquivo_no_meio() {
+        com_ram_limpo(|| {
+            let mut tabela = FileTable::new();
+            assert_eq!(tabela.open_write(b"/ram/docs").err(), Some(FsError::IsADirectory));
+            assert_eq!(tabela.open_write(b"/ram").err(), Some(FsError::IsADirectory));
+            assert_eq!(tabela.open_write(b"/ram/nada/x.txt").err(), Some(FsError::NotFound));
+            assert_eq!(tabela.open_write(b"/ram/ola.txt/x").err(), Some(FsError::NotADirectory));
+            assert_eq!(tabela.open_write(b"/ram/nome_longo_demais.txt").err(), Some(FsError::InvalidPath));
+            assert_eq!(tabela.open_write(b"/nada/x.txt").err(), Some(FsError::UnknownVolume));
+        });
+    }
+
+    #[test_case]
+    fn open_write_com_a_tabela_cheia_e_too_many_open_e_nao_esvazia() {
+        com_ram_limpo(|| {
+            arquivo_de(b"/ram/g.bin", 1000);
+            let mut tabela = FileTable::new();
+            for caminho in [&b"/ram/ola.txt"[..], b"/ram/vazio.txt", b"/ram/docs", b"/ram"] {
+                tabela.open(caminho).unwrap();
+            }
+            assert_eq!(tabela.open_write(b"/ram/g.bin").err(), Some(FsError::TooManyOpen));
+            assert_eq!(read_whole(b"/ram/g.bin", 2000).unwrap().len(), 1000);
+            // Também para um arquivo que não existe: nada é criado.
+            assert_eq!(tabela.open_write(b"/ram/novo.txt").err(), Some(FsError::TooManyOpen));
+            assert_eq!(lookup(b"/ram/novo.txt").err(), Some(FsError::NotFound));
+        });
+    }
+
+    #[test_case]
+    fn open_write_com_volume_indisponivel_e_reportado_antes_do_resto() {
+        let old = replace_volume(VolumeId::Disco, VolumeState::Unavailable(Reason::NoDisk));
+        let mut tabela = FileTable::new();
+        assert_eq!(tabela.open_write(b"/disco/x.txt").err(), Some(FsError::Unavailable(Reason::NoDisk)));
+        replace_volume(VolumeId::Disco, old);
+    }
+
+    #[test_case]
+    fn descritor_de_open_write_registra_o_arquivo_e_remove_e_rmdir_dao_busy() {
+        com_ram_limpo(|| {
+            let mut tabela = FileTable::new();
+            let fd = tabela.open_write(b"/ram/g.bin").unwrap();
+            assert_eq!(remove(b"/ram/g.bin").err(), Some(FsError::Busy));
+            tabela.close(fd).unwrap();
+            remove(b"/ram/g.bin").unwrap();
         });
     }
 }

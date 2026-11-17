@@ -240,8 +240,8 @@ fn rodar_comando(comando: &str) -> Vec<String> {
 
 #[test_case]
 fn a_versao_0_12_1_aparece_e_o_que_existia_continua_igual() {
-    assert_eq!(os_rust::VERSION, "os-rust v0.12.1");
-    exige(&rodar_comando("sobre"), "os-rust v0.12.1");
+    assert_eq!(os_rust::VERSION, "os-rust v0.13.0");
+    exige(&rodar_comando("sobre"), "os-rust v0.13.0");
     // Um comando de cada marco anterior segue funcionando.
     exige(&rodar_comando("ls /ram"), "ola.txt");
     exige(&rodar_comando("cat /ram/ola.txt"), "ola");
@@ -258,12 +258,12 @@ const CONTRATO_EN: &str = include_str!("../SYSCALLS.en.md");
 #[test_case]
 fn o_contrato_concorda_com_as_constantes_da_rede() {
     use abi::*;
-    assert!(CONTRATO.contains("**Versão do contrato**: 8"));
-    assert!(CONTRATO.contains("os-rust 0.12.0 (Marco 12)"));
-    assert!(CONTRATO.contains("fora de 1 a 23"));
-    assert!(CONTRATO_EN.contains("**Contract version**: 8"));
-    assert!(CONTRATO_EN.contains("os-rust 0.12.0"));
-    assert!(CONTRATO_EN.contains("outside 1 to 23"));
+    assert!(CONTRATO.contains("**Versão do contrato**: 9"));
+    assert!(CONTRATO.contains("os-rust 0.13.0 (Marco 13)"));
+    assert!(CONTRATO.contains("fora de 1 a 27"));
+    assert!(CONTRATO_EN.contains("**Contract version**: 9"));
+    assert!(CONTRATO_EN.contains("os-rust 0.13.0"));
+    assert!(CONTRATO_EN.contains("outside 1 to 27"));
     let syscalls = [
         (SYS_TCP_LISTEN, "SYS_TCP_LISTEN", 17),
         (SYS_TCP_ACCEPT, "SYS_TCP_ACCEPT", 18),
@@ -334,7 +334,7 @@ fn o_readme_ensina_a_rede_no_qemu_nos_dois_idiomas() {
         let linha_12 = readme.lines().find(|l| l.starts_with("| 12.")).expect("linha do Marco 12");
         assert!(linha_12.ends_with("Concluído |") || linha_12.ends_with("Completed |"), "{}: {}", nome, linha_12);
         assert!(!linha_12.contains("UDP"), "{}: {}", nome, linha_12);
-        assert!(readme.contains("0.12.1"), "{}", nome);
+        assert!(readme.contains("0.13.0"), "{}", nome);
     }
 }
 
@@ -352,5 +352,5 @@ fn o_cargo_toml_traz_a_placa_e_mantem_o_snapshot() {
     assert!(teste.contains("user,model=rtl8139,guestfwd=tcp:10.0.2.100:7-cmd:cat"), "{}", teste);
     assert!(!teste.contains("hostfwd"), "{}", teste);
     assert_eq!(teste.matches("snapshot=on").count(), 2, "os dois discos continuam com snapshot=on");
-    assert!(toml.contains("version = \"0.12.1\""));
+    assert!(toml.contains("version = \"0.13.0\""));
 }

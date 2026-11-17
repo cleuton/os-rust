@@ -342,6 +342,19 @@ pub fn run_images(
     images: &[(&str, &[u8])],
     on_end: Option<fn(&Finished)>,
 ) -> Result<RunReport, RunError> {
+    run_images_with_args(images, "", on_end)
+}
+
+/// Como [`run_images`], entregando `args` (o texto de argumentos, que o
+/// programa lê com `SYS_ARGS`) a **cada** programa carregado. É o que o `exec`
+/// usa, com uma imagem só; `run_images` passa o texto vazio, então o `run` não
+/// muda. O texto vive na própria tarefa e some com ela: nenhum programa herda
+/// o de outro. Quem chama garante `args.len() <= MAX_ARGS_LEN`.
+pub fn run_images_with_args(
+    images: &[(&str, &[u8])],
+    args: &str,
+    on_end: Option<fn(&Finished)>,
+) -> Result<RunReport, RunError> {
     if images.len() > MAX_TASKS {
         return Err(RunError::TooManyPrograms { max: MAX_TASKS });
     }
@@ -351,7 +364,9 @@ pub fn run_images(
         match loaded {
             Ok((entry, space)) => {
                 let context = TaskContext::initial(entry, USER_INITIAL_RSP);
-                tasks.push(Task::new(ProgramName::new(name), context, space));
+                let mut task = Task::new(ProgramName::new(name), context, space);
+                task.args.set(args);
+                tasks.push(task);
             }
             Err(error) => {
                 // Nada começou a rodar: devolve o que já foi carregado.

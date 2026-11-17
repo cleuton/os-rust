@@ -142,13 +142,27 @@ pub enum TaskState {
     WaitingNet,
 }
 
-/// Um `SYS_READ_LINE` em andamento: onde a linha deve ser entregue (já
-/// validado), a ordem do pedido, e a linha pronta à espera de ser copiada para
-/// a memória do programa quando ele voltar a rodar.
+/// O que um programa espera do teclado: uma linha inteira (`SYS_READ_LINE`) ou
+/// uma tecla só (`SYS_READ_KEY`). As duas usam a mesma espera e a mesma ordem
+/// de pedidos; só muda como o escalonador usa cada scancode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PendingKind {
+    /// `SYS_READ_LINE`: monta uma linha com eco até o Enter.
+    Line,
+    /// `SYS_READ_KEY`: entrega a próxima tecla pressionada, sem eco.
+    Key,
+}
+
+/// Um pedido de teclado em andamento: o tipo, onde a linha deve ser entregue
+/// (já validado, só para `Line`), a ordem do pedido, e o resultado à espera de
+/// ser entregue quando o programa voltar a rodar (a linha pronta, ou o código
+/// da tecla).
 pub struct PendingRead {
-    /// Endereço do buffer do programa.
+    /// Linha ou tecla.
+    pub kind: PendingKind,
+    /// Endereço do buffer do programa (`Line`).
     pub ptr: u64,
-    /// Tamanho do buffer do programa.
+    /// Tamanho do buffer do programa (`Line`).
     pub len: u64,
     /// Número de ordem do pedido: o menor é o que pediu primeiro.
     pub ticket: u64,
@@ -156,6 +170,44 @@ pub struct PendingRead {
     pub line: [u8; LINE_CAPACITY],
     /// Quantos bytes de `line` valem; `0` enquanto a linha não ficou pronta.
     pub written: usize,
+    /// O código da tecla já recebida (`Key`); `0` enquanto nenhuma chegou (um
+    /// código válido é sempre `>= 1`).
+    pub key: u32,
+}
+
+/// O texto de argumentos de uma tarefa (o que `exec` passa e `SYS_ARGS`
+/// entrega): até `MAX_ARGS_LEN` bytes num array fixo, sem usar o heap. Nasce
+/// vazio e some junto com a tarefa, então nunca passa de um programa para outro.
+#[derive(Clone, Copy)]
+pub struct TaskArgs {
+    bytes: [u8; abi::MAX_ARGS_LEN],
+    len: u8,
+}
+
+impl TaskArgs {
+    /// Sem argumentos.
+    pub const fn new() -> TaskArgs {
+        TaskArgs { bytes: [0; abi::MAX_ARGS_LEN], len: 0 }
+    }
+
+    /// Guarda `text` (no máximo `MAX_ARGS_LEN` bytes; o que passar é cortado,
+    /// mas quem chama já recusou textos maiores).
+    pub fn set(&mut self, text: &str) {
+        let n = text.len().min(abi::MAX_ARGS_LEN);
+        self.bytes[..n].copy_from_slice(&text.as_bytes()[..n]);
+        self.len = n as u8;
+    }
+
+    /// Os bytes do texto.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len as usize]
+    }
+}
+
+impl Default for TaskArgs {
+    fn default() -> Self {
+        TaskArgs::new()
+    }
 }
 
 /// Uma instância carregada de um programa de usuário.
@@ -178,6 +230,8 @@ pub struct Task {
     pub sockets: SocketTable,
     /// O pedido de rede em andamento, se está em `WaitingNet`.
     pub pending_net: Option<PendingNet>,
+    /// O texto de argumentos (vazio, salvo se veio de `exec`).
+    pub args: TaskArgs,
     /// Quantas vezes foi colocada na CPU (os testes usam para provar que cada
     /// tarefa rodou em mais de uma fatia).
     pub slices: u32,
@@ -196,6 +250,7 @@ impl Task {
             files: FileTable::new(),
             sockets: SocketTable::new(),
             pending_net: None,
+            args: TaskArgs::new(),
             slices: 0,
         }
     }
@@ -205,6 +260,25 @@ impl Task {
 mod tests {
     use super::*;
     use core::mem::{offset_of, size_of};
+
+    #[test_case]
+    fn argumentos_comecam_vazios_e_guardam_o_texto() {
+        let mut args = TaskArgs::new();
+        assert_eq!(args.as_bytes(), b"");
+        args.set("a   b");
+        assert_eq!(args.as_bytes(), b"a   b");
+        assert_eq!(args.as_bytes().len(), 5);
+        args.set("");
+        assert_eq!(args.as_bytes(), b"");
+    }
+
+    #[test_case]
+    fn argumentos_cortam_no_maximo_do_contrato() {
+        let longo = "x".repeat(abi::MAX_ARGS_LEN + 10);
+        let mut args = TaskArgs::new();
+        args.set(&longo);
+        assert_eq!(args.as_bytes().len(), abi::MAX_ARGS_LEN);
+    }
 
     #[test_case]
     fn nome_de_programa_guarda_o_texto_sem_cortar_nomes_embutidos() {

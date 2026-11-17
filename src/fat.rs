@@ -917,6 +917,38 @@ impl<'a> Fat<'a> {
         }
     }
 
+    /// Esvazia o arquivo cuja entrada está em `loc`: o tamanho passa a `0`, o
+    /// primeiro cluster a `0` e todos os clusters dele voltam a ficar livres.
+    ///
+    /// Antes de escrever qualquer coisa confere o volume e a cadeia inteira
+    /// (limite de `cluster_count` passos; ciclo, cluster fora do volume,
+    /// entrada livre ou reservada no meio ou cadeia mais curta que o tamanho
+    /// são `Corrupt`, sem nada alterado). Depois, na mesma ordem de `remove`:
+    /// (1) **uma** escrita de setor grava a entrada com tamanho `0` e primeiro
+    /// cluster `0` (nome, atributos, data e hora não mudam); (2) cada cluster é
+    /// liberado em todas as cópias da FAT. A entrada vai primeiro: uma
+    /// interrupção entre as duas deixa, no pior caso, clusters usados sem dono,
+    /// nunca um arquivo cuja cadeia já foi liberada. Um arquivo já vazio não
+    /// toca em nada.
+    pub fn truncate(&self, loc: EntryLoc) -> Result<(), FatError> {
+        self.check_writable()?;
+        let (_, size, first) = self.read_file_entry(loc)?;
+        self.check_chain(size, first)?;
+        if first == 0 {
+            return Ok(());
+        }
+        self.update_entry(loc, 0, Some(0))?;
+        let mut cluster = first;
+        loop {
+            let next = self.next_cluster(cluster)?;
+            self.set_fat_entry(cluster, 0)?;
+            match next {
+                Some(n) => cluster = n,
+                None => return Ok(()),
+            }
+        }
+    }
+
     /// Cria o diretório vazio cujo último componente é `components[n - 1]`.
     ///
     /// Antes de qualquer escrita confere tudo o que pode falhar por falta de
@@ -2442,5 +2474,128 @@ mod tests {
                 }
             },
         );
+    }
+
+    // ---- esvaziar um arquivo (Marco 13) ----
+
+    /// Esvazia `x.bin` num volume gravável e confere tudo o que o contrato
+    /// promete: tamanho e primeiro cluster zerados, clusters livres, as duas
+    /// cópias da FAT iguais e o volume inteiro legível.
+    fn esvazia_x(tamanho: usize) {
+        let disk = RwDisk::new(com_x(tamanho));
+        let fat = Fat::mount(&disk).unwrap();
+        let (loc, _) = fat.locate(&comps(&["x.bin"])).unwrap();
+        let livres = fat.free_clusters().unwrap();
+        let usados = tamanho.div_ceil(SECTOR_SIZE) as u32;
+        fat.truncate(loc).unwrap();
+        let node = lookup(&fat, &["x.bin"]).unwrap();
+        assert_eq!((node.size, node.first_cluster), (0, 0));
+        assert_eq!(fat.free_clusters().unwrap(), livres + usados);
+        assert!(copias_iguais(&disk));
+        assert_eq!(conteudo(&fat, &["x.bin"]), Vec::<u8>::new());
+        walk_all(&fat).unwrap();
+    }
+
+    #[test_case]
+    fn esvaziar_arquivo_de_0_1_e_muitos_clusters() {
+        esvazia_x(0);
+        esvazia_x(1);
+        esvazia_x(512);
+        esvazia_x(513);
+        esvazia_x(3000);
+    }
+
+    #[test_case]
+    fn esvaziar_arquivo_ja_vazio_nao_escreve_nada() {
+        let disk = RwDisk::new(com_x(0));
+        let fat = Fat::mount(&disk).unwrap();
+        let (loc, _) = fat.locate(&comps(&["x.bin"])).unwrap();
+        fat.truncate(loc).unwrap();
+        assert_eq!(disk.writes(), 0);
+    }
+
+    #[test_case]
+    fn esvaziar_grava_a_entrada_primeiro_e_os_clusters_depois() {
+        let disk = RwDisk::new(com_x(1500));
+        let fat = Fat::mount(&disk).unwrap();
+        let (loc, _) = fat.locate(&comps(&["x.bin"])).unwrap();
+        let antes = disk.written.borrow().len();
+        fat.truncate(loc).unwrap();
+        let escritos: Vec<u32> = disk.written.borrow()[antes..].to_vec();
+        // Uma escrita no setor da entrada (da raiz) e depois as da FAT (setores
+        // 1 a 34), duas cópias por cluster liberado: 3 clusters, 6 escritas.
+        assert_eq!(escritos[0], loc.lba);
+        assert!(escritos[1..].iter().all(|&lba| lba < 35));
+        assert_eq!(escritos.len(), 1 + 3 * 2);
+    }
+
+    #[test_case]
+    fn esvaziar_preserva_nome_atributos_data_e_hora_da_entrada() {
+        let mut img = com_x(1500);
+        // Põe uma hora e uma data reconhecíveis na entrada de `x.bin`.
+        let disk0 = MemDisk(img.clone());
+        let (loc, _) = Fat::mount(&disk0).unwrap().locate(&comps(&["x.bin"])).unwrap();
+        let at = loc.lba as usize * SECTOR_SIZE + loc.offset as usize;
+        img[at + 22..at + 26].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        let disk = RwDisk::new(img);
+        let fat = Fat::mount(&disk).unwrap();
+        let antes = disk.bytes();
+        fat.truncate(loc).unwrap();
+        let depois = disk.bytes();
+        // Tudo igual na entrada, menos o primeiro cluster (26..28) e o tamanho (28..32).
+        assert_eq!(&antes[at..at + 26], &depois[at..at + 26]);
+        assert_eq!(&depois[at + 26..at + 32], &[0u8; 6]);
+    }
+
+    #[test_case]
+    fn esvaziar_cadeia_adulterada_e_corrupt_sem_escrever_nada() {
+        let base = com_x(1500);
+        let primeiro = first_cluster(&base, &["x.bin"]);
+        // Ciclo: o primeiro cluster aponta para ele mesmo.
+        let mut ciclo = base.clone();
+        set_fat(&mut ciclo, primeiro, primeiro);
+        // Cluster fora do volume.
+        let mut fora = base.clone();
+        set_fat(&mut fora, primeiro, 0x7FFF);
+        // Entrada livre no meio da cadeia.
+        let mut livre = base.clone();
+        set_fat(&mut livre, primeiro, 0);
+        for img in [ciclo, fora, livre] {
+            let disk = RwDisk::new(img);
+            let fat = Fat::mount(&disk).unwrap();
+            let (loc, _) = fat.locate(&comps(&["x.bin"])).unwrap();
+            assert_eq!(fat.truncate(loc).err(), Some(FatError::Corrupt));
+            assert_eq!(disk.writes(), 0);
+        }
+    }
+
+    #[test_case]
+    fn esvaziar_em_dispositivo_sem_escrita_e_read_only() {
+        let disk = MemDisk(com_x(100));
+        let fat = Fat::mount(&disk).unwrap();
+        let (loc, _) = fat.locate(&comps(&["x.bin"])).unwrap();
+        assert_eq!(fat.truncate(loc).err(), Some(FatError::ReadOnly));
+    }
+
+    #[test_case]
+    fn interrupcao_ao_esvaziar_deixa_o_volume_consistente() {
+        for tamanho in [100usize, 512, 1500] {
+            let velho = pattern(tamanho, 7);
+            interrompe(
+                &com_x(tamanho),
+                |fat| {
+                    let (loc, _) = fat.locate(&comps(&["x.bin"])).unwrap();
+                    fat.truncate(loc).is_ok()
+                },
+                |antes, depois| {
+                    anteriores_intactos(antes, depois, "/x.bin");
+                    // O arquivo está como antes ou vazio; nunca com a cadeia
+                    // liberada e o tamanho antigo. No pior caso sobram clusters
+                    // sem dono, e o leitor percorreu tudo sem `Corrupt`.
+                    let x = &depois["/x.bin"];
+                    assert!(x.is_empty() || x == &velho);
+                },
+            );
+        }
     }
 }

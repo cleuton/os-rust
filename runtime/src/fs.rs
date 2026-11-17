@@ -157,6 +157,17 @@ impl FileWriter {
         Ok(FileWriter { fd: check(sys::create(path.as_bytes()))? })
     }
 
+    /// Abre o arquivo `path` para gravar **do zero**: se não existe é criado
+    /// vazio, e se existe o conteúdo é descartado (o tamanho volta a `0`). É o
+    /// que falta para salvar um texto sem apagar e recriar o arquivo. Difere de
+    /// [`FileWriter::create`] (falha se o nome já existe) e de
+    /// [`FileWriter::append`] (exige que exista e preserva o que há).
+    /// Um arquivo aberto por qualquer programa, inclusive este, dá
+    /// [`FsError::Busy`].
+    pub fn overwrite(path: &str) -> Result<FileWriter, FsError> {
+        Ok(FileWriter { fd: check(sys::open_write(path.as_bytes()))? })
+    }
+
     /// Abre um arquivo que já existe para acrescentar ao fim dele.
     pub fn append(path: &str) -> Result<FileWriter, FsError> {
         Ok(FileWriter { fd: check(sys::open_append(path.as_bytes()))? })

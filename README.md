@@ -32,7 +32,7 @@ sistema de arquivos ou multitarefa completa.
 
 A documentação do projeto também está disponível em inglês (veja o link `ENGLISH VERSION` no início de cada arquivo `.md`).
 
-**Versão atual: 0.12.1.** Os Marcos 0 (boot em modo texto VGA, com
+**Versão atual: 0.13.0.** Os Marcos 0 (boot em modo texto VGA, com
 mensagem de boas-vindas, rolagem e tratamento de panic legível), 1
 (interrupções, teclado e prompt de comandos), 2 (infraestrutura de
 depuração: saída serial e testes automatizados dentro do QEMU), 3
@@ -57,17 +57,21 @@ usuário, com `run gravador` e `run apagador`) e 11 (escrita no disco ATA: o
 `/disco` também grava, criar e remover diretórios, e os dados persistem entre
 boots quando o QEMU roda sobre uma cópia da imagem, com `run caderno`) e 12
 (rede básica com TCP/IP: placa RTL8139, ARP, IP, ICMP e TCP, com `rede`, `ping`
-e `run servidor cliente`) estão concluídos e são o que este repositório executa
+e `run servidor cliente`) e 13 (teclado cru, tela e arquivo regravável: setas e
+Ctrl, cursor e cores, regravar um arquivo e argumentos de linha de comando, com
+`run teclas` e `exec`) estão concluídos e são o que este repositório executa
 hoje. A versão 0.12.1 traz o programa `ftpd` ao Marco 12: um servidor FTP para
 trocar arquivos com o computador de verdade, sem rebuildar (veja [Servidor
-FTP](#servidor-ftp)). A demonstração original de palestra, no
+FTP](#servidor-ftp)). A versão 0.13.0 entrega o Marco 13: o que falta para um
+editor de tela cheia, que virá depois como programa de usuário (veja o
+[guia do programador](GUIA_DO_PROGRAMADOR.md), seção **Teclado e tela**). A demonstração original de palestra, no
 formato usado em aula, está preservada na tag git `v1.0-demo` e continua
 podendo ser usada como está.
 
 ## Roadmap
 
 O os-rust avança em marcos numerados, cada um terminando em algo visível
-no QEMU. A tabela abaixo resume os catorze primeiros marcos planejados; os
+no QEMU. A tabela abaixo resume os quinze primeiros marcos planejados; os
 detalhes de cada um vêm na sequência.
 
 | Marco | Objetivo | Demonstrável | Status |
@@ -86,6 +90,7 @@ detalhes de cada um vêm na sequência.
 | 10. Escrita no ramdisk | Escrever em FAT16, criando, gravando, ampliando e apagando arquivos, aplicado ao volume `/ram`. | Criar um arquivo em `/ram`, mostrá-lo com `cat` e apagá-lo, também por programa de usuário. | Concluído |
 | 11. Escrita no disco ATA | Gravar setores no disco ATA e tornar o `/disco` gravável pela mesma camada de escrita, com persistência entre boots. | Gravar um arquivo em `/disco`, reiniciar o QEMU e ler o arquivo. | Concluído |
 | 12. Rede básica com TCP/IP | Falar TCP/IP de forma básica, mas funcionando no QEMU: driver de placa de rede (RTL8139), ARP, IP, ICMP e TCP. | Trocar dados pela rede no QEMU (`rede`, `ping 10.0.2.2`, `run servidor cliente`); em hardware real (bare metal) deve funcionar com uma RTL8139, sem garantia. | Concluído |
+| 13. Teclado cru, tela e arquivo regravável | Dar aos programas de usuário a tecla crua (setas, Ctrl), o controle de tela, cursor e cores, a regravação de arquivos e os argumentos de linha de comando (`exec`), o que falta para uma interface de tela cheia. | `run teclas`: o `@` anda pela tela com as setas, com cores e vídeo reverso, e o programa regrava `/ram/teclas.txt` (ou o arquivo dado em `exec teclas <arquivo>`). | Concluído |
 
 ### Detalhes dos marcos
 
@@ -251,6 +256,23 @@ mostram dois programas conversando por TCP (`run servidor cliente`).
 Demonstrável no QEMU; em hardware real (bare metal) deve funcionar se houver uma
 RTL8139, mas isso não foi testado e não há garantia. Depende do Marco 11.
 
+**Marco 13. Teclado cru, tela e arquivo regravável.** Concluído. Um programa
+pode esperar uma tecla qualquer (setas e Ctrl inclusive, sem eco), desenhar onde
+quiser na grade de 25 por 80 escolhendo as cores (vídeo reverso inclusive),
+regravar um arquivo do zero e receber argumentos de linha de comando. Entregue:
+quatro syscalls novas, `SYS_READ_KEY` (24), `SYS_SCREEN` (25), `SYS_OPEN_WRITE`
+(26) e `SYS_ARGS` (27), no contrato versão 9, sem erro novo; um decodificador de
+teclas no kernel (prefixo `0xE0`, Pause, Ctrl); o `Writer` do VGA com linha do
+cursor e cor atual, e a volta ao prompt que apaga só a última linha; esvaziar um
+arquivo na FAT (a entrada primeiro, os clusters depois); o comando `exec`, que
+inicia um programa e passa o resto da linha a ele (o `run` não recebe
+argumentos); `Key`, `KeyEvent`, `screen`, `args` e `FileWriter::overwrite` na
+biblioteca de runtime; e o programa `teclas`, que mostra tudo funcionando.
+Demonstrável: `run teclas` e `exec teclas /ram/contagem.txt`. **O editor de
+textos não faz parte deste marco**: estas syscalls e o `exec` são o que falta
+para que ele seja escrito depois, como programa de usuário, em outra spec.
+Depende do Marco 12.
+
 ### Por que essa ordem
 
 O primeiro programa de usuário (Marco 5) não depende de sistema de
@@ -267,10 +289,12 @@ contrato de syscalls: números, semântica, convenções de registradores,
 códigos de erro, formato de executável, região de carga e pilha inicial)
 está documentada em um único arquivo versionado, [`SYSCALLS.md`](SYSCALLS.md),
 desde o Marco 5 (versão 1 do contrato: `write` e `exit`). A versão atual é a
-7, do Marco 11, que acrescenta ao que já havia (leitura de uma linha do
+9, do Marco 13, que acrescenta ao que já havia (leitura de uma linha do
 teclado e memória, no Marco 6; ceder a CPU, no Marco 7; leitura de arquivos,
 no Marco 8; a hora, `SYS_TIME`, no Marco 9; a escrita de arquivos no `/ram`, no
-Marco 10) criar e remover diretórios e a escrita no `/disco`. Ele é a única fonte dessa
+Marco 10; criar e remover diretórios e a escrita no `/disco`, no Marco 11; a rede,
+no Marco 12) o teclado cru, a tela com cores, a regravação de arquivos e os
+argumentos de linha de comando (Marco 13). Ele é a única fonte dessa
 interface: nenhuma syscall existe sem estar nele, e um teste automatizado
 confere que o texto continua batendo com o código. Uma mudança incompatível
 no contrato aumenta a versão dele e exige atualizar, no mesmo marco, a
@@ -386,7 +410,7 @@ projeto (`x86_64-os_rust.json`), gerar uma imagem de boot com `bootimage`,
 e abrir uma janela do QEMU que dá boot via BIOS direto nesse binário. Em
 poucos segundos você deve ver o logo do os-rust (as 20 linhas do símbolo
 e do nome, no topo da tela), seguido da linha de identificação
-`os-rust v0.12.1` — a versão atual do projeto — e do prompt `os-rust> `
+`os-rust v0.13.0` — a versão atual do projeto — e do prompt `os-rust> `
 pronto para digitação, não um terminal comum.
 
 O mesmo `cargo run` também compila a biblioteca de runtime (`runtime/`) e
@@ -435,8 +459,9 @@ Não é preciso nenhum passo manual adicional para isso: é o mesmo
 | `ping <ip>` | Manda 4 pedidos de eco ICMP (um por segundo) e mostra as respostas, por exemplo `ping 10.0.2.2` ou `ping 127.0.0.1`. **Não é o programa `ping` de `run ping pong`** (Marco 7), que só se alterna com o `pong` |
 | `data` | Mostra a data e a hora do relógio do computador, em UTC, no formato `AAAA-MM-DD HH:MM:SS UTC`; se o relógio estiver inválido ou não responder, mostra uma mensagem clara. Argumentos extras são ignorados |
 | `run <alvo> [<alvo>...]` | Executa programas de usuário em modo usuário (ring 3), até 4 ao mesmo tempo (o mesmo alvo pode se repetir), e volta ao prompt quando o último termina. Um alvo que começa com `/` é o caminho de um executável ELF64 (até 64 KiB) lido de um volume, como `/disco/bin/visita`; qualquer outro é o nome de um programa embutido na imagem. Os dois se misturam (`run /disco/bin/visita hello`). Sem argumento, com um alvo inválido ou com mais de 4 alvos, não inicia nenhum |
+| `exec <programa> [<argumentos>...]` | Inicia **um** programa (embutido ou arquivo, como no `run`) e entrega a ele o resto da linha como texto de argumentos, que o programa lê com `SYS_ARGS` (sem os espaços das pontas, sem aspas nem escapes), por exemplo `exec teclas /ram/contagem.txt`. O `run` **não** recebe argumentos: ele trata cada palavra depois dele como outro programa a iniciar junto. O texto tem no máximo 128 bytes (pelo prompt, menos: a linha toda tem 128) |
 
-### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `visita` e `labirint`
+### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `teclas`, `visita` e `labirint`
 
 O comando `run` executa programas escritos fora do kernel. Cada um vive em
 `programs/src/bin/` (exceto `visita` e `labirint`, em
@@ -576,6 +601,28 @@ O comando `run` executa programas escritos fora do kernel. Cada um vive em
   `curl ftp://127.0.0.1:2121/ram/` mostra as entradas reais do ramdisk e `curl -o
   copia.txt ftp://127.0.0.1:2121/ram/ola.txt` traz o arquivo, com os mesmos 72
   bytes. Sem cliente, `ftpd: ninguem se conectou em 30 s, encerrando`.
+- **`teclas`** (`run teclas` ou `exec teclas <arquivo>`): a demonstração do
+  Marco 13. Limpa a tela, mostra uma barra de título em **vídeo reverso** (texto
+  preto sobre fundo cinza claro, nas 80 colunas) e um `@` verde no meio. Cada
+  tecla lida (setas, Home, End, Ctrl, qualquer uma) aparece pelo nome e entra na
+  contagem; as setas movem o `@` pelas linhas 5 a 18. `Ctrl+Q` sai: o programa
+  **regrava** o arquivo (`/ram/teclas.txt`, ou o dado em `exec teclas <arquivo>`)
+  com o total de teclas lidas, nunca acrescentando, e mostra o resultado mais
+  abaixo; o prompt volta numa linha limpa, com o desenho de cima à vista. Rode
+  sozinho: o programa usa a tela inteira.
+
+  ```text
+  os-rust> run teclas
+  (aperte a, seta direita, seta direita, seta abaixo, Enter e Ctrl+Q)
+  teclas: 6 teclas lidas
+  teclas: gravado em /ram/teclas.txt (2 bytes)
+  os-rust> cat /ram/teclas.txt
+  6
+  os-rust> exec teclas /ram/contagem.txt
+  ```
+
+  Com mais de uma palavra (`exec teclas a b`) ou um caminho de mais de 40
+  bytes, escreve a mensagem de uso e sai com o código 1, sem mexer na tela.
 - **`leitor`** (`run leitor`): abre `/disco/docs/longo.txt`, um arquivo que
   ocupa mais de um cluster do disco, e escreve o conteúdo na tela, lendo em
   pedaços de 128 bytes pelas syscalls de arquivo. O programa nunca fala com o
@@ -1049,6 +1096,30 @@ QEMU para ver o `/ram` voltar ao conteúdo inicial. A suíte automatizada
   mesmo arquivo, o `/disco` que não muda, volume indisponível, FAT adulterada,
   o `/ram` restaurado e o contrato e o guia (código literal dos programas).
 
+### O que os testes do Marco 13 cobrem
+
+A suíte automatizada (`cargo test`) cobre, além dos testes anteriores. Nenhum
+teste depende de teclado físico: eles empurram scancodes na fila do kernel, e os
+programas de apoio são ELFs montados à mão.
+
+- Testes de unidade do decodificador de teclas (cada linha da tabela, Shift,
+  Ctrl esquerdo e direito, o falso Shift, o Pause, as teclas que não geram
+  evento), do `Writer` (linha do cursor, rolagem só na última linha, cor atual,
+  volta ao prompt), de `Fat::truncate` (entrada primeiro, interrupção simulada
+  depois de cada escrita de setor, cadeia adulterada), de `open_write` e do `exec`;
+- `tests/teclado_tela.rs`: `SYS_READ_KEY` (cada código, Ctrl, digitação
+  antecipada, sem eco, o programa que espera não atrasa quem computa, o kernel
+  dorme, linha e tecla esperando juntas), `SYS_SCREEN` (limpar, mover, os limites,
+  a rolagem, a volta ao prompt depois de `exit`, falha de CPU e falha de memória),
+  as cores e o vídeo reverso (as 16 de texto com as 8 de fundo), `SYS_ARGS` e o
+  `exec` (inclusive `u64::MAX` como tamanho do buffer), o `teclas` de ponta a
+  ponta (a sequência da História 1, as quatro execuções que deixam 6, 1, 11 e 2,
+  as bordas do `@`, o `/ram` cheio), o contrato versão 9, o guia (código literal
+  de `teclas.rs`) e este README;
+- `tests/regravar_arquivo.rs`: `SYS_OPEN_WRITE` no `/ram` e no `/disco` (criar,
+  zerar, cada erro na ordem do contrato, `ERR_MFILE` sem esvaziar o arquivo,
+  `ERR_BUSY` para qualquer programa, volume somente leitura, cadeia adulterada).
+
 ### O que os testes da versão 0.12.1 cobrem
 
 A 0.12.1 não é um marco: traz o `ftpd` ao Marco 12, sem mudar o kernel nem o
@@ -1066,7 +1137,7 @@ pelo loopback:
   fora do 8.3, raiz, pasta inexistente), a pasta cheia sem arquivo parcial,
   `MKD`/`RMD`/`DELE` e cada erro, comandos juntos, partidos e só com `\n`, a linha
   longa, o cliente que some, 50 sessões sem vazar nada, `run ftpd ftpd`, o envio
-  de um ELF que roda com `run`, a versão 0.12.1, o guia (código literal), os
+  de um ELF que roda com `run`, a versão 0.13.0, o guia (código literal), os
   README e os CHANGELOG;
 - `tests/ftpd_espera.rs`: sem cliente, o `ftpd` desiste em 30 s e o kernel dorme;
   uma conexão de dados que ninguém abre dá `425` em 10 s e apaga o arquivo criado;
@@ -1101,7 +1172,7 @@ usuário do QEMU responde a ARP e a `ping`, e os testes de TCP pela placa usam o
   conexões, o término por `exit` e por falha, e o envio com o buffer cheio;
 - `tests/rede_programas.rs`: `servidor` e `cliente` ponta a ponta (33 bytes
   enviados, 88 recebidos), a recusa, o endereço inválido, 50 execuções sem vazar
-  nada, a versão 0.12.1, o contrato versão 8, o guia (código literal), o README
+  nada, a versão 0.13.0, o contrato versão 9, o guia (código literal), o README
   e os argumentos do QEMU no `Cargo.toml`;
 - `tests/rede_espera.rs`: o `servidor` sozinho desiste depois de 30 s.
 
@@ -1131,8 +1202,8 @@ anteriores:
   diretório aberto e a liberação depois de `close`, de `exit` e de falha,
   `mkdir` com 4 arquivos abertos, o número 17, `caderno` ponta a ponta, o volume
   de 2 setores por cluster que continua somente leitura, disco ausente, 50
-  ciclos sem vazar clusters, frames nem descritores, a versão 0.12.1, o
-  contrato versão 8, o guia (código literal do `caderno`), o README (os
+  ciclos sem vazar clusters, frames nem descritores, a versão 0.13.0, o
+  contrato versão 9, o guia (código literal do `caderno`), o README (os
   comandos de preservar o disco e do pen drive) e `snapshot=on` no
   `Cargo.toml`.
 
@@ -1354,7 +1425,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   kernel, gera as imagens do ramdisk (embutida no kernel) e do disco
   (`target/imagens/`, anexada ao QEMU com `snapshot=on`; regerada sempre que roda) e a lista de arquivos entregues que
   `tests/artefatos.rs` confere.
-- `SYSCALLS.md`: o contrato de syscalls (versão 8).
+- `SYSCALLS.md`: o contrato de syscalls (versão 9).
 - `tests/`: os testes de integração, cada um iniciando o kernel do zero
   em seu próprio binário — um teste de boot (que também confere a versão
   na mensagem de boas-vindas), um teste cujo resultado esperado é um
@@ -1367,7 +1438,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   preempção, isolamento e teclado), `disco_ata.rs` (o driver ATA),
   `escrita_no_ramdisk.rs` (escrita no `/ram`: comandos, syscalls, `gravador` e
   `apagador`), `escrita_no_disco.rs` (escrita no `/disco`, `mkdir`, `rmdir`,
-  `caderno`, o contrato versão 8 e o README), `rede.rs`, `rede_pilha.rs`, `rede_syscalls.rs`, `rede_programas.rs` e `rede_espera.rs` (a rede do Marco 12), `ftpd.rs`, `ftpd_espera.rs` e `ftpd_ocioso.rs` (o servidor FTP da 0.12.1), `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
+  `caderno`, o contrato versão 9 e o README), `rede.rs`, `rede_pilha.rs`, `rede_syscalls.rs`, `rede_programas.rs` e `rede_espera.rs` (a rede do Marco 12), `ftpd.rs`, `ftpd_espera.rs` e `ftpd_ocioso.rs` (o servidor FTP da 0.12.1), `teclado_tela.rs` e `regravar_arquivo.rs` (o teclado cru, a tela, os argumentos, o `exec`, o `teclas` e a regravação de arquivos do Marco 13), `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
   e volumes inválidos) e `artefatos.rs` (higiene dos arquivos entregues).
 - `x86_64-os_rust.json`: a especificação do target bare-metal customizado
   (sem sistema operacional por baixo).

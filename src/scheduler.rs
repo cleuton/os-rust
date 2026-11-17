@@ -35,7 +35,7 @@ use x86_64::instructions::interrupts;
 use crate::keyboard::{LineEditor, LINE_CAPACITY};
 use crate::memory;
 use crate::net::socket::{PendingNet, SocketTable};
-use crate::task::{PendingRead, Task, TaskContext, TaskState};
+use crate::task::{PendingKind, PendingRead, Task, TaskContext, TaskState};
 use crate::timer;
 use crate::user::{self, Finished, Termination};
 
@@ -160,6 +160,16 @@ static SCHED: Mutex<Scheduler> = Mutex::new(Scheduler::new());
 /// sobreviver a `start`, que reinicia o escalonador a cada `run`.
 static POLL_HOOK: Mutex<Option<fn()>> = Mutex::new(None);
 
+/// Quantas tarefas esperam o teclado agora (`WaitingKeyboard`). Só para os
+/// testes: uma tarefa que espera já terminou de desenhar o que tinha para
+/// desenhar, então é o momento seguro de olhar a tela ou de empurrar a tecla
+/// seguinte, sem depender de tempo. Pode ser chamada do gancho
+/// (`set_poll_hook`), que roda sem a trava do escalonador.
+#[doc(hidden)]
+pub fn keyboard_waiters() -> usize {
+    SCHED.lock().tasks.iter().flatten().filter(|task| task.state == TaskState::WaitingKeyboard).count()
+}
+
 /// Registra (ou, com `None`, remove) uma função chamada no começo de **toda**
 /// `poll_keyboard()` (bloqueio, `yield`, tick vindo de ring 3, volta do laço
 /// ocioso), sempre com as interrupções desligadas. Existe para os testes
@@ -252,6 +262,27 @@ fn poll_keyboard() {
     loop {
         let Some(owner) = sched.first_waiter() else { return };
 
+        // Quem espera uma **tecla** não usa o editor de linha: cada scancode
+        // passa pelo decodificador e o primeiro evento é a tecla dele. O que
+        // não gera evento (soltar, Shift, Ctrl, teclas fora da tabela) é só
+        // consumido, e o laço lê o próximo scancode.
+        let kind = sched.tasks[owner]
+            .as_ref()
+            .and_then(|task| task.read.as_ref())
+            .map_or(PendingKind::Line, |read| read.kind);
+        if kind == PendingKind::Key {
+            let Some(scancode) = crate::interrupts::next_scancode() else { return };
+            if let Some(code) = crate::keyboard::decode(scancode) {
+                if let Some(task) = sched.tasks[owner].as_mut() {
+                    if let Some(read) = task.read.as_mut() {
+                        read.key = code;
+                    }
+                    task.state = TaskState::Ready;
+                }
+            }
+            continue;
+        }
+
         // Linha nova para quem agora é o primeiro da espera.
         if sched.editor_owner != Some(owner) {
             let max_chars = sched.tasks[owner]
@@ -263,6 +294,8 @@ fn poll_keyboard() {
         }
 
         let Some(scancode) = crate::interrupts::next_scancode() else { return };
+        // O decodificador vê todo scancode, para o Ctrl nunca ficar preso.
+        crate::keyboard::decode(scancode);
         let finished_line = sched.editor.feed(scancode);
         if let Some(written) = finished_line {
             let Scheduler { editor, tasks, editor_owner, .. } = &mut *sched;
@@ -320,7 +353,7 @@ pub(crate) extern "C" fn run_next() -> ! {
                             task.state = TaskState::Running;
                             task.slices += 1;
                             task.space.activate();
-                            deliver_line(task);
+                            deliver_input(task);
                             complete_net(task);
                             Decision::Run(&task.context as *const TaskContext)
                         }
@@ -350,12 +383,19 @@ pub(crate) extern "C" fn run_next() -> ! {
     }
 }
 
-/// Entrega à tarefa que vai voltar a rodar a linha que ela esperava, se a linha
-/// já ficou pronta: copia para o buffer dela (que está mapeado agora, porque o
-/// espaço dela acabou de ser ativado) e grava o resultado de `SYS_READ_LINE`
-/// em `rax`.
-fn deliver_line(task: &mut Task) {
+/// Entrega à tarefa que vai voltar a rodar o que ela esperava do teclado. Uma
+/// **tecla** (`SYS_READ_KEY`) vai em `rax`, sem tocar na memória do programa.
+/// Uma **linha** (`SYS_READ_LINE`), se já ficou pronta, é copiada para o buffer
+/// dela (que está mapeado agora, porque o espaço dela acabou de ser ativado) e
+/// o resultado vai em `rax`.
+fn deliver_input(task: &mut Task) {
     let Some(read) = task.read.take() else { return };
+    if read.kind == PendingKind::Key {
+        if read.key != 0 {
+            task.context.rax = read.key as u64;
+        }
+        return;
+    }
     if read.written == 0 {
         return;
     }
@@ -391,6 +431,32 @@ fn finish() -> ! {
     unsafe { user::leave_user() }
 }
 
+/// `SYS_READ_KEY`: bloqueia a tarefa atual até uma tecla ser pressionada e passa
+/// a CPU adiante. Usa a mesma espera e a mesma ordem de pedidos de
+/// `SYS_READ_LINE`, mas não tem buffer nem eco: o código da tecla só é gravado
+/// em `rax` quando a tarefa volta a rodar (`deliver_input`). Nunca retorna.
+pub(crate) fn block_on_key(ctx: &mut TaskContext) -> ! {
+    {
+        let mut sched = SCHED.lock();
+        let ticket = sched.next_ticket;
+        sched.next_ticket += 1;
+        if let Some(task) = sched.current.and_then(|i| sched.tasks[i].as_mut()) {
+            task.context = *ctx;
+            task.state = TaskState::WaitingKeyboard;
+            task.read = Some(PendingRead {
+                kind: PendingKind::Key,
+                ptr: 0,
+                len: 0,
+                ticket,
+                line: [0; LINE_CAPACITY],
+                written: 0,
+                key: 0,
+            });
+        }
+    }
+    run_next()
+}
+
 /// `SYS_READ_LINE`, depois de validado: bloqueia a tarefa atual até o Enter e
 /// passa a CPU adiante. O resultado (os bytes escritos) só é gravado quando a
 /// linha ficar pronta, por `deliver_line`. Nunca retorna.
@@ -403,11 +469,13 @@ pub(crate) fn block_on_keyboard(ctx: &mut TaskContext, ptr: u64, len: u64) -> ! 
             task.context = *ctx;
             task.state = TaskState::WaitingKeyboard;
             task.read = Some(PendingRead {
+                kind: PendingKind::Line,
                 ptr,
                 len,
                 ticket,
                 line: [0; LINE_CAPACITY],
                 written: 0,
+                key: 0,
             });
         }
     }
@@ -427,6 +495,13 @@ pub(crate) fn block_on_net(ctx: &mut TaskContext, pending: PendingNet) -> ! {
         }
     }
     run_next()
+}
+
+/// Roda `f` com o texto de argumentos da tarefa atual (`SYS_ARGS`).
+pub(crate) fn with_current_args<R>(f: impl FnOnce(&crate::task::TaskArgs) -> R) -> Option<R> {
+    let sched = SCHED.lock();
+    let index = sched.current?;
+    sched.tasks[index].as_ref().map(|task| f(&task.args))
 }
 
 /// Roda `f` com a tabela de sockets da tarefa atual. A trava do escalonador fica

@@ -11,7 +11,7 @@ use abi::{
     DateTime, SYS_ALLOC, SYS_CLOSE, SYS_CREATE, SYS_EXIT, SYS_MKDIR, SYS_OPEN, SYS_OPEN_APPEND,
     SYS_READ, SYS_READ_DIR, SYS_READ_LINE, SYS_REMOVE, SYS_RMDIR, SYS_TIME, SYS_WRITE,
     SYS_TCP_ACCEPT, SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_LISTEN, SYS_TCP_RECV, SYS_TCP_SEND,
-    SYS_TCP_TIMEOUT, SYS_WRITE_FILE, SYS_YIELD,
+    SYS_TCP_TIMEOUT, SYS_WRITE_FILE, SYS_YIELD, SYS_ARGS, SYS_OPEN_WRITE, SYS_READ_KEY, SYS_SCREEN,
     TIME_SIZE,
 };
 
@@ -109,6 +109,40 @@ pub fn read_line_raw(buf: &mut [u8]) -> i64 {
     // (memória mapeada e gravável), que é o que `SYS_READ_LINE` exige do
     // intervalo em que o kernel vai escrever.
     unsafe { syscall2(SYS_READ_LINE, buf.as_mut_ptr() as u64, buf.len() as u64) }
+}
+
+/// Espera uma tecla ser pressionada e devolve o código dela (`>= 1`, ver
+/// `abi::KEY_*`). Bloqueia sem gastar CPU, não ecoa nada e nunca falha.
+pub fn read_key() -> i64 {
+    // SAFETY: `SYS_READ_KEY` não recebe ponteiros nem argumentos (o kernel os
+    // ignora), então nenhum valor é inválido.
+    unsafe { syscall2(SYS_READ_KEY, 0, 0) }
+}
+
+/// Controla a tela: `op` é `abi::SCREEN_CLEAR`, `SCREEN_MOVE` (`a` = linha,
+/// `b` = coluna) ou `SCREEN_COLOR` (`a` = texto, `b` = fundo). Devolve `0`, ou
+/// `abi::ERR_INVAL` se algum valor está fora dos limites (e então nada muda).
+pub fn screen(op: u64, a: u64, b: u64) -> i64 {
+    // SAFETY: `SYS_SCREEN` não recebe ponteiros; o kernel valida os valores
+    // antes de qualquer efeito.
+    unsafe { syscall3(SYS_SCREEN, op, a, b) }
+}
+
+/// Abre o arquivo `path` para acrescentar, criando-o se não existe e **zerando**
+/// o conteúdo se existe. Devolve o descritor ou um código de erro.
+pub fn open_write(path: &[u8]) -> i64 {
+    // SAFETY: como em `create`: fatia viva do programa.
+    unsafe { syscall2(SYS_OPEN_WRITE, path.as_ptr() as u64, path.len() as u64) }
+}
+
+/// Copia o texto de argumentos para `buf` e devolve o tamanho **total** do
+/// texto (que pode ser maior que `buf.len()`, e então a cópia foi cortada), ou
+/// um código de erro. Com `buf` vazio só devolve o tamanho.
+pub fn args(buf: &mut [u8]) -> i64 {
+    // SAFETY: o ponteiro e o tamanho vêm de uma fatia mutável viva do programa
+    // (memória mapeada e gravável), que é o que `SYS_ARGS` exige do intervalo
+    // em que o kernel vai escrever; com tamanho 0 o kernel nem olha o ponteiro.
+    unsafe { syscall2(SYS_ARGS, buf.as_mut_ptr() as u64, buf.len() as u64) }
 }
 
 /// Pede ao kernel `size` bytes de memória (arredondados para cima até

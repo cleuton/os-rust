@@ -310,11 +310,11 @@ fn connect_sem_rede_para_fora_do_loopback_e_nodev_e_com_loopback_e_recusado() {
 #[test_case]
 fn numero_24_continua_encerrando_so_o_programa() {
     let elf = programa(&[], |a, _| {
-        a.movabs(Rax, nr(24));
+        a.movabs(Rax, nr(28));
         a.syscall();
     });
     let (relatorio, _) = rodar(&[("n24", &elf)]);
-    assert_eq!(relatorio.finished[0].termination, Termination::BadSyscall { number: 24 });
+    assert_eq!(relatorio.finished[0].termination, Termination::BadSyscall { number: 28 });
 }
 
 // ---------------------------------------------------------------------------

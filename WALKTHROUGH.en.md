@@ -2063,3 +2063,48 @@ control, a sliding window with several segments in flight, more than one card an
 protection against attacks (the initial sequence number is predictable). Real
 hardware was not tested. And a real HTTP: the `servidor` always returns the same
 minimal page.
+
+
+## Milestone 13: raw keyboard, screen and a file that can be rewritten
+
+Up to Milestone 12, a program could only read the keyboard **by line** (`SYS_READ_LINE`), only wrote text in sequence at the bottom of the screen, always in the same color, only created new files or appended to the end of them, and received no arguments. That is enough for `eco`, `caderno` and `servidor`, but not for a truly interactive program. This milestone opens exactly those doors: raw keys, the screen, rewriting a file and arguments, plus the `teclas` program that shows it all working. **The text editor is not part of it**: the four new syscalls (24 to 27, contract version 9) and the `exec` command are what is missing for a full-screen editor to be written later as a user program.
+
+### Set 1 scancodes and the `0xE0` prefix
+
+The PS/2 keyboard sends **scancodes**. In Scan Code Set 1, pressing a key sends one byte (the *make code*, for example `0x1E` for `a`) and releasing sends the same byte with bit 7 set (`0x9E`). The "extended" keys (arrows, Home, End, Page Up, Page Down, Insert, Delete, the right Ctrl, and the keypad Enter and slash) first send the `0xE0` prefix: the up arrow is `0xE0 0x48`, and `0xE0 0xC8` on release. Some even send a "fake Shift" (`0xE0 0x2A` before and `0xE0 0xAA` after), and Pause sends a six-byte sequence that starts with `0xE1`.
+
+The Milestone 1 `translate` knew none of this: it returns an ASCII byte for letters, digits and punctuation, and ignores the rest. That is why the **decoder** (`keyboard::decode`) was born, a small state machine with three facts in memory: whether a prefix is pending (`0xE0`, or the rest of Pause), and whether each of the two Ctrl keys is pressed. After `0xE0`, the next byte does **not** go through `translate`, which is how the fake Shift never turns Shift on. Only **pressing** generates an event; releasing never does.
+
+### The Ctrl state, and why it sees everything
+
+Ctrl is a state that lasts between two scancodes: pressed at one moment, released much later. If a Ctrl scancode were consumed somewhere that does not look at the decoder, Ctrl would get stuck. That is why `decode` is called in **all three** places that take scancodes from the queue: the prompt, the line wait and the blocking test read. A Ctrl pressed during a `read_line` and released later does not get stuck.
+
+### Why Ctrl+letter is "the letter plus a bit"
+
+In old terminals, Ctrl+J becomes byte `0x0A` (the same as Enter) and Ctrl+H becomes `0x08` (the same as Backspace): the program cannot tell them apart. Here the key code is an integer: ASCII for text keys, `0x100` upward for special keys, and the `KEY_CTRL` bit (`0x1_0000`) **added** when Ctrl is pressed. With Ctrl, the letter always comes in lowercase (Shift does not count). So `Ctrl+J` and Enter are different codes.
+
+### The raw key uses the same wait as the line
+
+`SYS_READ_KEY` did not invent a new mechanism. The pending keyboard request (`PendingRead`) gained a kind, line or key, and the rest stays the same: the task goes to `WaitingKeyboard`, the first request (lowest order number) receives what arrives, and if everyone waits the kernel sleeps in `hlt`. For a line reader, the scancodes go to the line editor, with echo; for a key reader, each scancode goes through the decoder and the first event is its key, delivered in `rax` when the task runs again. A line reader that is already building a line remains the owner of the keyboard until Enter.
+
+### The VGA text grid, the attribute byte and reverse video
+
+The VGA text mode is a grid of 25 by 80 two-byte **cells**: the character and an **attribute** byte (the color). The low 4 bits are the text color (16 colors), the next 3 bits are the background color (8 colors) and the last bit, in the default mode, makes the character **blink**. That is why the background only goes from 0 to 7: the kernel does not offer blinking. **Reverse video** has no mechanism of its own: it is choosing dark text on a light background, that is, swapping the two colors.
+
+Before this milestone the `Writer` only had **a column**: the row was always the last, and breaking the line scrolled the screen. And it had **a single color**, yellow on black. Now it has the **cursor row** and the **current color**. The scrolling rule is the usual one on the last row; above it, `\n` and the column wrap only move the cursor down, without scrolling or erasing anything, so the program's drawing is never touched by the kernel. As long as nobody uses `SYS_SCREEN`, the `Writer` behaves exactly as before. The hardware cursor, with a full row, now stays on column 79 (position 80 does not exist in the grid).
+
+### Arguments: `exec`, the text in the task and `SYS_ARGS`
+
+`run` treats every word after it as **another program** (`run ping pong`), so there was nowhere to put arguments without changing what `run` does. The new command, `exec <program> [arguments...]`, starts **one** program and stores the rest of the line (without the leading and trailing spaces) in the `args` field of the **task** itself; `SYS_ARGS` copies that text into the program's buffer and returns the **total** size (if the buffer is smaller, the copy is cut and the larger value says so). The text lives in the task and disappears with it: no program inherits another one's. `run` did not change: the program it starts receives empty arguments. Loading is still a single function, `run_images`, now a particular case of `run_images_with_args` with empty text.
+
+### Return to the prompt
+
+If a program used the screen, the last row at the bottom has leftovers from it. When `run` or `exec` gives the prompt back, the kernel moves the cursor to `(24, 0)`, goes back to the default color and erases **only** row 24: the other 24 stay as the program left them, with the colors. The prompt does the restoring (both commands), and the restoration also discards a key prefix that was left pending.
+
+### Emptying a file in the FAT
+
+`SYS_OPEN_WRITE` creates the file if it does not exist and **zeroes** it if it does. Zeroing follows the same order as `remove` (Milestone 10): it **first** writes the directory entry with size 0 and first cluster 0 (a single sector write, which touches neither name, attributes, date nor time), and **then** frees the clusters of the chain in every copy of the FAT. If the power fails in the middle, the file is as before or empty, and at worst some clusters are left used with no owner, never a file whose chain was already freed. Before writing anything, everything that can fail is checked (volume, parent, type, a file open by someone, full table, space, valid chain): `ERR_MFILE` never empties the file.
+
+### What was left out
+
+The text editor, reading a key without waiting, Caps Lock, Alt, F1 to F12, the keypad as numbers, layouts other than US, accents, mouse, `Ctrl+C` as an interrupt, ANSI escape sequences, blinking, more than 16 colors, reading the screen contents, windows, more than one program owning the screen, `seek`, truncating to an arbitrary size, arguments with quotes and environment variables.

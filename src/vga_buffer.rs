@@ -1,6 +1,7 @@
 //! Escrita de texto no buffer de vídeo VGA (modo texto, 0xb8000).
 
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use spin::Mutex;
 use volatile::Volatile;
@@ -68,7 +69,14 @@ struct Buffer {
 
 /// Escreve texto na tela, controlando cursor lógico, avanço de linha e
 /// rolagem simples quando o conteúdo ultrapassa a altura da tela.
+///
+/// O cursor tem linha e coluna. A linha começa na **última** (como sempre foi)
+/// e só sai de lá quando um programa usa `SYS_SCREEN`: enquanto estiver na
+/// última, o `Writer` se comporta exatamente como antes (escreve ali e rola a
+/// tela ao quebrar a linha). Acima da última, `\n` e a quebra de coluna só
+/// descem o cursor, sem rolar nada.
 pub struct Writer {
+    row_position: usize,
     column_position: usize,
     color_code: ColorCode,
     buffer: &'static mut Buffer,
@@ -83,7 +91,7 @@ impl Writer {
                     self.new_line();
                 }
 
-                let row = BUFFER_HEIGHT - 1;
+                let row = self.row_position;
                 let col = self.column_position;
                 let color_code = self.color_code;
                 self.buffer.chars[row][col].write(ScreenChar {
@@ -122,6 +130,13 @@ impl Writer {
     /// rola todo o conteúdo uma linha para cima (rolagem simples) em vez
     /// de travar ou sobrescrever de forma ilegível.
     fn new_line(&mut self) {
+        // Acima da última linha o kernel não rola nem apaga nada: só desce o
+        // cursor. Quem desenha apaga o que quer apagar.
+        if self.row_position < BUFFER_HEIGHT - 1 {
+            self.row_position += 1;
+            self.column_position = 0;
+            return;
+        }
         for row in 1..BUFFER_HEIGHT {
             for col in 0..BUFFER_WIDTH {
                 let character = self.buffer.chars[row][col].read();
@@ -142,13 +157,46 @@ impl Writer {
         }
     }
 
-    /// Limpa a tela inteira e volta o cursor lógico para o início.
+    /// Limpa a tela inteira e volta o cursor lógico para o início **da última
+    /// linha** (o prompt no pé). Sem efeito visível a mais: o cursor já estava
+    /// lá, a não ser depois de um programa que usou `SYS_SCREEN`.
     fn clear_screen(&mut self) {
         for row in 0..BUFFER_HEIGHT {
             self.clear_row(row);
         }
+        self.row_position = BUFFER_HEIGHT - 1;
         self.column_position = 0;
         self.move_hardware_cursor();
+    }
+
+    /// `SCREEN_CLEAR`: apaga as 25 linhas com a cor **atual** e leva o cursor
+    /// ao canto de cima, à esquerda.
+    fn clear_all(&mut self) {
+        for row in 0..BUFFER_HEIGHT {
+            self.clear_row(row);
+        }
+        self.row_position = 0;
+        self.column_position = 0;
+        self.move_hardware_cursor();
+    }
+
+    /// `SCREEN_MOVE`: leva o cursor a `(row, col)`. Quem chama já conferiu os
+    /// limites.
+    fn move_to(&mut self, row: usize, col: usize) {
+        self.row_position = row;
+        self.column_position = col;
+        self.move_hardware_cursor();
+    }
+
+    /// `SCREEN_COLOR`: a cor de tudo o que for escrito daí em diante. Quem
+    /// chama já conferiu os limites (texto `0..=15`, fundo `0..=7`).
+    fn set_color(&mut self, text: u8, background: u8) {
+        self.color_code = ColorCode((background << 4) | text);
+    }
+
+    /// Volta ao amarelo sobre preto.
+    fn reset_color(&mut self) {
+        self.color_code = ColorCode::new(Color::Yellow, Color::Black);
     }
 
     /// Remove o último caractere escrito, apagando-o da tela e voltando o
@@ -160,7 +208,7 @@ impl Writer {
         }
         self.column_position -= 1;
 
-        let row = BUFFER_HEIGHT - 1;
+        let row = self.row_position;
         let col = self.column_position;
         let blank = ScreenChar {
             ascii_character: b' ',
@@ -171,10 +219,11 @@ impl Writer {
     }
 
     /// Move o cursor de hardware do modo texto VGA para acompanhar a
-    /// posição atual de escrita — sempre na última linha visível, já que
-    /// este `Writer` só escreve ali e rola a tela ao quebrar linha.
+    /// posição atual de escrita. Com a coluna em 80 (linha cheia, a quebra
+    /// só acontece quando chega o próximo caractere) o cursor fica na coluna
+    /// 79: a coluna 80 não existe na grade.
     fn move_hardware_cursor(&self) {
-        let position = (BUFFER_HEIGHT - 1) * BUFFER_WIDTH + self.column_position;
+        let position = self.row_position * BUFFER_WIDTH + self.column_position.min(BUFFER_WIDTH - 1);
 
         let mut index_port: Port<u8> = Port::new(CRTC_INDEX_PORT);
         let mut data_port: Port<u8> = Port::new(CRTC_DATA_PORT);
@@ -203,6 +252,7 @@ lazy_static! {
     /// O `Writer` global usado por `print!`/`println!` em todo o kernel,
     /// incluindo o handler de panic.
     pub static ref WRITER: Mutex<Writer> = Mutex::new(Writer {
+        row_position: BUFFER_HEIGHT - 1,
         column_position: 0,
         color_code: ColorCode::new(Color::Yellow, Color::Black),
         buffer: unsafe {
@@ -239,6 +289,71 @@ pub fn _print(args: fmt::Arguments) {
 /// Limpa a tela do buffer VGA global (chamado uma vez, no boot).
 pub fn clear_screen() {
     WRITER.lock().clear_screen();
+}
+
+/// Marca de que um programa usou `SYS_SCREEN` neste `run`: na volta ao prompt a
+/// última linha é apagada e a cor padrão volta (ver [`restore_prompt_line`]).
+static SCREEN_POSITIONED: AtomicBool = AtomicBool::new(false);
+
+/// Registra que a tela foi posicionada por um programa (qualquer das três
+/// operações de `SYS_SCREEN` que foi aceita).
+pub fn mark_positioned() {
+    SCREEN_POSITIONED.store(true, Ordering::SeqCst);
+}
+
+/// `SCREEN_CLEAR`: apaga as 25 linhas com a cor atual e leva o cursor a `(0, 0)`.
+pub fn screen_clear_all() {
+    WRITER.lock().clear_all();
+}
+
+/// `SCREEN_MOVE`: leva o cursor a `(row, col)`, que o chamador já conferiu
+/// (`row < 25`, `col < 80`).
+pub fn screen_move(row: usize, col: usize) {
+    WRITER.lock().move_to(row, col);
+}
+
+/// `SCREEN_COLOR`: escolhe a cor atual. O chamador já conferiu os limites
+/// (`text <= 15`, `background <= 7`).
+pub fn screen_set_color(text: u8, background: u8) {
+    WRITER.lock().set_color(text, background);
+}
+
+/// Volta à cor padrão (amarelo sobre preto).
+pub fn reset_color() {
+    WRITER.lock().reset_color();
+}
+
+/// A volta ao prompt depois de um programa que usou a tela: se a marca está
+/// ligada, leva o cursor a `(24, 0)`, restaura a cor padrão, apaga a última
+/// linha (já com a cor padrão) e desliga a marca. As outras 24 linhas ficam
+/// como o programa as deixou, com as cores. Sem marca não faz nada. Devolve se
+/// restaurou.
+pub fn restore_prompt_line() -> bool {
+    if !SCREEN_POSITIONED.swap(false, Ordering::SeqCst) {
+        return false;
+    }
+    let mut writer = WRITER.lock();
+    writer.reset_color();
+    writer.row_position = BUFFER_HEIGHT - 1;
+    writer.column_position = 0;
+    writer.clear_row(BUFFER_HEIGHT - 1);
+    writer.move_hardware_cursor();
+    true
+}
+
+/// Onde está o cursor, no formato `(linha, coluna)`: a posição que vai ao
+/// cursor de hardware (a coluna chega a 79, nunca a 80). Só para os testes.
+#[doc(hidden)]
+pub fn screen_cursor() -> (usize, usize) {
+    let writer = WRITER.lock();
+    (writer.row_position, writer.column_position.min(BUFFER_WIDTH - 1))
+}
+
+/// O byte de cor (`fundo << 4 | texto`) da célula `(row, col)`. Só para os
+/// testes.
+#[doc(hidden)]
+pub fn screen_cell_color(row: usize, col: usize) -> u8 {
+    WRITER.lock().buffer.chars[row][col].read().color_code.0
 }
 
 /// Apaga o último caractere escrito no `Writer` VGA global (Backspace).
@@ -435,5 +550,174 @@ mod tests {
             writer.buffer.chars[BUFFER_HEIGHT - 1][1].read().ascii_character,
             b' '
         );
+    }
+
+    // --- linha do cursor, cor e volta ao prompt (Marco 13) ---
+
+    const PADRAO: u8 = 0x0E;
+
+    fn restaura() {
+        restore_prompt_line();
+        reset_color();
+        clear_screen();
+    }
+
+    fn celula(row: usize, col: usize) -> u8 {
+        WRITER.lock().buffer.chars[row][col].read().ascii_character
+    }
+
+    #[test_case]
+    fn sem_syscall_de_tela_o_writer_e_igual_ao_de_antes() {
+        restaura();
+        crate::print!("\nPRIMEIRA\nSEGUNDA");
+        for (i, c) in "PRIMEIRA".bytes().enumerate() {
+            assert_eq!(celula(BUFFER_HEIGHT - 2, i), c);
+            assert_eq!(screen_cell_color(BUFFER_HEIGHT - 2, i), PADRAO);
+        }
+        for (i, c) in "SEGUNDA".bytes().enumerate() {
+            assert_eq!(celula(BUFFER_HEIGHT - 1, i), c);
+        }
+        assert_eq!(screen_cursor(), (BUFFER_HEIGHT - 1, 7));
+        restaura();
+    }
+
+    #[test_case]
+    fn acima_da_ultima_linha_a_quebra_so_desce_o_cursor() {
+        restaura();
+        screen_clear_all();
+        screen_move(5, 10);
+        crate::print!("ab\ncd");
+        assert_eq!((celula(5, 10), celula(5, 11)), (b'a', b'b'));
+        assert_eq!((celula(6, 0), celula(6, 1)), (b'c', b'd'));
+        // Nada rolou: a linha 0 continua em branco e o cursor está logo depois do `d`.
+        assert_eq!(celula(0, 0), b' ');
+        assert_eq!(screen_cursor(), (6, 2));
+        restaura();
+    }
+
+    #[test_case]
+    fn passar_da_coluna_79_acima_da_ultima_linha_vai_para_a_seguinte_sem_rolar() {
+        restaura();
+        screen_clear_all();
+        screen_move(3, 79);
+        crate::print!("xy");
+        assert_eq!(celula(3, 79), b'x');
+        assert_eq!(celula(4, 0), b'y');
+        assert_eq!(celula(0, 0), b' ');
+        restaura();
+    }
+
+    #[test_case]
+    fn na_ultima_linha_a_quebra_de_coluna_rola_como_sempre() {
+        restaura();
+        screen_clear_all();
+        screen_move(BUFFER_HEIGHT - 1, 79);
+        crate::print!("xy");
+        // O `x` subiu para a linha 23 e o `y` começa a linha 24.
+        assert_eq!(celula(BUFFER_HEIGHT - 2, 79), b'x');
+        assert_eq!(celula(BUFFER_HEIGHT - 1, 0), b'y');
+        restaura();
+    }
+
+    #[test_case]
+    fn oitenta_caracteres_a_partir_de_24_0_nao_rolam_e_o_cursor_fica_na_79() {
+        restaura();
+        screen_clear_all();
+        screen_move(BUFFER_HEIGHT - 1, 0);
+        for _ in 0..BUFFER_WIDTH {
+            crate::print!("z");
+        }
+        assert_eq!(celula(BUFFER_HEIGHT - 1, 0), b'z');
+        assert_eq!(celula(BUFFER_HEIGHT - 1, 79), b'z');
+        assert_eq!(celula(BUFFER_HEIGHT - 2, 0), b' ');
+        assert_eq!(screen_cursor(), (BUFFER_HEIGHT - 1, 79));
+        // O caractere seguinte é que quebra a linha.
+        crate::print!("w");
+        assert_eq!(celula(BUFFER_HEIGHT - 2, 0), b'z');
+        assert_eq!(celula(BUFFER_HEIGHT - 1, 0), b'w');
+        restaura();
+    }
+
+    #[test_case]
+    fn limpar_tudo_deixa_as_25_linhas_em_branco_e_o_cursor_em_0_0() {
+        restaura();
+        crate::print!("lixo");
+        screen_clear_all();
+        for row in 0..BUFFER_HEIGHT {
+            assert_eq!(celula(row, 0), b' ');
+        }
+        assert_eq!(screen_cursor(), (0, 0));
+        restaura();
+    }
+
+    #[test_case]
+    fn sem_marca_restaurar_nao_faz_nada() {
+        restaura();
+        crate::print!("fica");
+        assert!(!restore_prompt_line());
+        assert_eq!(celula(BUFFER_HEIGHT - 1, 0), b'f');
+        restaura();
+    }
+
+    #[test_case]
+    fn com_marca_restaurar_apaga_so_a_linha_24_e_volta_a_cor_padrao() {
+        restaura();
+        screen_clear_all();
+        screen_set_color(0, 7);
+        screen_move(0, 0);
+        crate::print!("titulo");
+        screen_move(BUFFER_HEIGHT - 1, 0);
+        crate::print!("rodape");
+        mark_positioned();
+        assert!(restore_prompt_line());
+        // As linhas de cima ficaram, com a cor do programa.
+        assert_eq!(celula(0, 0), b't');
+        assert_eq!(screen_cell_color(0, 0), 0x70);
+        // A linha 24 foi apagada com a cor padrão e o cursor está nela.
+        assert_eq!(celula(BUFFER_HEIGHT - 1, 0), b' ');
+        assert_eq!(screen_cell_color(BUFFER_HEIGHT - 1, 0), PADRAO);
+        assert_eq!(screen_cursor(), (BUFFER_HEIGHT - 1, 0));
+        // E a marca foi desligada.
+        assert!(!restore_prompt_line());
+        crate::print!("p");
+        assert_eq!(screen_cell_color(BUFFER_HEIGHT - 1, 0), PADRAO);
+        restaura();
+    }
+
+    #[test_case]
+    fn a_cor_escolhida_vale_para_o_que_se_escreve_a_rolagem_e_o_clear_all() {
+        restaura();
+        screen_set_color(0, 7);
+        crate::print!("A");
+        assert_eq!(screen_cell_color(BUFFER_HEIGHT - 1, 0), 0x70);
+        // A linha nova aberta pela rolagem usa a cor atual.
+        crate::print!("\n");
+        assert_eq!(screen_cell_color(BUFFER_HEIGHT - 1, 5), 0x70);
+        // O que já estava escrito não mudou de cor.
+        reset_color();
+        crate::print!("B");
+        assert_eq!(screen_cell_color(BUFFER_HEIGHT - 1, 0), PADRAO);
+        // `screen_clear_all` pinta as 25 linhas com a cor atual e não a muda.
+        screen_set_color(15, 7);
+        screen_clear_all();
+        assert_eq!(screen_cell_color(0, 0), 0x7F);
+        assert_eq!(screen_cell_color(BUFFER_HEIGHT - 1, 79), 0x7F);
+        crate::print!("C");
+        assert_eq!(screen_cell_color(0, 0), 0x7F);
+        restaura();
+    }
+
+    #[test_case]
+    fn todas_as_cores_de_texto_e_fundo_viram_o_byte_certo() {
+        restaura();
+        for fundo in 0..8u8 {
+            for texto in 0..16u8 {
+                screen_set_color(texto, fundo);
+                screen_move(1, 1);
+                crate::print!("x");
+                assert_eq!(screen_cell_color(1, 1), (fundo << 4) | texto);
+            }
+        }
+        restaura();
     }
 }

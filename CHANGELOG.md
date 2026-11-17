@@ -7,6 +7,63 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.13.0] - 2026-11-17
+
+Marco 13: teclado cru, tela e arquivo regravável. O contrato de syscalls passa da
+versão 8 para a 9, só acrescentando: os programas das versões 1 a 8 continuam
+funcionando. **O editor de textos não está nesta versão**: estas syscalls e o
+comando `exec` são o que falta para que um editor de tela cheia seja escrito
+depois, como programa de usuário.
+
+### Adicionado
+
+- As quatro syscalls novas, sem nenhum erro novo: `SYS_READ_KEY` (24, uma tecla
+  qualquer, com setas e Ctrl, sem eco), `SYS_SCREEN` (25, limpar, mover o cursor e
+  escolher as cores, vídeo reverso inclusive), `SYS_OPEN_WRITE` (26, abrir um
+  arquivo zerando o conteúdo) e `SYS_ARGS` (27, o texto de argumentos).
+- O comando `exec <programa> [argumentos...]` do prompt, que inicia um programa e
+  entrega o resto da linha a ele (o `run` não muda e continua sem argumentos).
+- `SCREEN_COLOR` e as 16 constantes de cor do VGA (`COLOR_BLACK` a `COLOR_WHITE`,
+  `COLOR_DEFAULT_TEXT`, `COLOR_DEFAULT_BACKGROUND`), os códigos `KEY_*` e `KEY_CTRL`,
+  `SCREEN_*` e `MAX_ARGS_LEN` na crate `abi`.
+- O decodificador de teclas do kernel (`keyboard::decode`), com o prefixo `0xE0`, a
+  sequência do Pause e o estado de Ctrl, que enxerga todo scancode que o kernel
+  consome.
+- A linha do cursor e a cor atual do `Writer` do VGA, a marca de "tela posicionada"
+  e a volta ao prompt que apaga só a última linha e restaura a cor padrão.
+- Esvaziar um arquivo na FAT (`Fat::truncate`): a entrada do diretório primeiro e os
+  clusters depois, como no `remove`.
+- Na biblioteca de runtime: `Key`, `KeyEvent` e `read_key`, o módulo `screen`
+  (`clear`, `move_to`, `set_color`, `reset_color`), o módulo `args` (`read`,
+  `words`) e `FileWriter::overwrite`.
+- Programa `teclas` (`programs/src/bin/teclas.rs`, embutido na imagem de boot): as
+  setas movem um `@` colorido, a barra de título aparece em vídeo reverso, `Ctrl+Q`
+  sai e o programa regrava o arquivo dado em `exec teclas <arquivo>` (por padrão
+  `/ram/teclas.txt`) com o total de teclas lidas.
+- Guias do programador (português e inglês): as seções **Teclado e tela**
+  (**Keyboard and screen**) e **Argumentos de linha de comando**
+  (**Command-line arguments**), "Programa de exemplo 16: teclas" e `FileWriter::overwrite`;
+  capítulo do Marco 13 no percurso (`WALKTHROUGH.md` e `WALKTHROUGH.en.md`); o
+  Marco 13 e o `exec` no README.
+- Testes: `tests/teclado_tela.rs` e `tests/regravar_arquivo.rs`, mais os testes de
+  unidade do decodificador, do `Writer`, de `Fat::truncate`, de `open_write` e do `exec`.
+
+### Alterado
+
+- Contrato de syscalls na versão 9 (`SYSCALLS.md` e `SYSCALLS.en.md`): as quatro
+  syscalls, a tabela de códigos de tecla, a tela e as cores, o `exec`, a seção do
+  teclado (entregue ao programa que espera, linha ou tecla) e o "fora de 1 a 27".
+- A volta ao prompt, no `run` e no `exec`, restaura a tela quando um programa usou
+  `SYS_SCREEN` (apaga a última linha e volta ao amarelo sobre preto) e descarta um
+  prefixo de tecla pendente.
+- O cursor de hardware, com a linha cheia, fica na coluna 79 em vez de na posição 80,
+  que não existe na grade.
+- Versão para `0.13.0` em `Cargo.toml` (a identificação do boot, do `sobre` e das
+  telas de erro acompanham).
+- Os testes existentes que fixavam a versão 0.12.1 ou o contrato 8 passam a conferir
+  `0.13.0` e o contrato 9, e os que usavam o número 24 como "syscall inexistente"
+  passam a usar o 28 (o primeiro número livre do contrato 9).
+
 ## [0.12.1] - 2026-10-24
 
 Versão de manutenção: traz o `ftpd` ao Marco 12. Não há marco novo, não há mudança

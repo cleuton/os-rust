@@ -35,8 +35,12 @@ pub use abi::{
     SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_LISTEN, SYS_TCP_RECV, SYS_TCP_SEND, SYS_TCP_TIMEOUT,
     SYS_TIME, SYS_WRITE, SYS_WRITE_FILE, SYS_YIELD, TIME_SIZE,
 };
+pub use abi::{SYS_ARGS, SYS_OPEN_WRITE, SYS_READ_KEY, SYS_SCREEN};
 pub use abi::{ERR_ADDRINUSE, ERR_CONNREFUSED, ERR_CONNRESET, ERR_NOBUFS, ERR_TIMEDOUT};
-use abi::{DIR_ENTRY_SIZE, KIND_DIR, KIND_FILE, MAX_PATH_LEN, TCP_MAX_TIMEOUT_MS};
+use abi::{
+    DIR_ENTRY_SIZE, KIND_DIR, KIND_FILE, MAX_PATH_LEN, SCREEN_CLEAR, SCREEN_COLOR, SCREEN_COLS,
+    SCREEN_MOVE, SCREEN_ROWS, TCP_MAX_TIMEOUT_MS,
+};
 
 use crate::fat::Kind;
 use crate::fs::FsError;
@@ -190,6 +194,11 @@ extern "C" fn syscall_dispatch(ctx: &mut TaskContext) {
         SYS_WRITE => ctx.rax = sys_write(a1, a2) as u64,
         SYS_EXIT => scheduler::terminate_current(Termination::Exit { code: a1 }),
         SYS_READ_LINE => sys_read_line(ctx, a1, a2),
+        // Sem argumentos e sem erro possível: só espera a tecla.
+        SYS_READ_KEY => scheduler::block_on_key(ctx),
+        SYS_SCREEN => ctx.rax = sys_screen(a1, a2, a3) as u64,
+        SYS_ARGS => ctx.rax = sys_args(a1, a2) as u64,
+        SYS_OPEN_WRITE => ctx.rax = sys_open_write(a1, a2) as u64,
         SYS_ALLOC => {
             ctx.rax = match user::grow_heap(a1) {
                 Ok(start) => start,
@@ -248,6 +257,72 @@ fn validate_user_range(ptr: u64, len: u64, writable: bool) -> Result<(), i64> {
         page += 4096;
     }
     Ok(())
+}
+
+/// `screen(op, a, b)`: controla a tela de 25 por 80. Toda operação confere os
+/// valores **antes** de qualquer efeito: uma recusa (`ERR_INVAL`) não move o
+/// cursor, não muda a cor e não marca a tela como posicionada. Só uma operação
+/// aceita marca (`vga_buffer::mark_positioned`), para o `run` e o `exec`
+/// apagarem a última linha e restaurarem a cor na volta ao prompt.
+fn sys_screen(op: u64, a: u64, b: u64) -> i64 {
+    match op {
+        SCREEN_CLEAR => {
+            vga_buffer::screen_clear_all();
+            vga_buffer::mark_positioned();
+            0
+        }
+        SCREEN_MOVE => {
+            if a >= SCREEN_ROWS as u64 || b >= SCREEN_COLS as u64 {
+                return ERR_INVAL;
+            }
+            vga_buffer::screen_move(a as usize, b as usize);
+            vga_buffer::mark_positioned();
+            0
+        }
+        SCREEN_COLOR => {
+            // O fundo só vai até 7: no modo de texto padrão o bit mais alto do
+            // fundo faz o caractere piscar, e o kernel não oferece piscar.
+            if a > 15 || b > 7 {
+                return ERR_INVAL;
+            }
+            vga_buffer::screen_set_color(a as u8, b as u8);
+            vga_buffer::mark_positioned();
+            0
+        }
+        _ => ERR_INVAL,
+    }
+}
+
+/// `args(ptr, len)`: copia o texto de argumentos da tarefa (o que veio depois do
+/// nome no `exec`) para `ptr` e devolve o tamanho **total** do texto, mesmo que
+/// não caiba (a cópia é cortada em `len` bytes e o valor maior que `len` avisa).
+/// Com `len == 0` o ponteiro nem é olhado. Com `len > 0` o intervalo inteiro é
+/// conferido **antes** de copiar (região do usuário, mapeado, gravável; o fim é
+/// calculado com `checked_add`): qualquer falha, inclusive um `len` enorme, é
+/// `ERR_FAULT` sem copiar nada. Nunca bloqueia e repetir dá o mesmo resultado.
+fn sys_args(ptr: u64, len: u64) -> i64 {
+    let total = scheduler::with_current_args(|args| args.as_bytes().len()).unwrap_or(0);
+    if len == 0 {
+        return total as i64;
+    }
+    if let Err(code) = validate_user_range(ptr, len, true) {
+        return code;
+    }
+    let copied = scheduler::with_current_args(|args| {
+        let n = args.as_bytes().len().min(len as usize);
+        // SAFETY: `validate_user_range` conferiu que `ptr..ptr + len` está na
+        // região do usuário, mapeado, acessível e gravável, e `n <= len`; o
+        // espaço de endereçamento da tarefa que chamou está ativo durante a
+        // syscall; os bytes de origem vivem na `Task` do kernel, que nunca se
+        // sobrepõe à memória do usuário.
+        unsafe {
+            core::ptr::copy_nonoverlapping(args.as_bytes().as_ptr(), ptr as *mut u8, n);
+        }
+    });
+    if copied.is_none() {
+        return ERR_FAULT;
+    }
+    total as i64
 }
 
 /// `read_line(ptr, len)`: espera uma linha do teclado e a escreve em `ptr`
@@ -478,6 +553,24 @@ fn sys_create(ptr: u64, len: u64) -> i64 {
         Err(code) => return code,
     };
     match scheduler::with_current_files(|files| files.create(&path[..len])) {
+        Some(Ok(fd)) => fd as i64,
+        Some(Err(error)) => errno(error),
+        None => ERR_BADF,
+    }
+}
+
+/// `open_write(path_ptr, path_len)`: abre um arquivo para acrescentar, criando-o
+/// se não existe e **zerando-o** se existe. Mesma ordem de verificação de
+/// `create` (caminho, volume, somente leitura, pai) mais o último componente
+/// (diretório: `ERR_TYPE`; aberto por qualquer programa: `ERR_BUSY`), a tabela
+/// cheia (`ERR_MFILE`, **antes** de esvaziar) e a falta de espaço na criação.
+/// Nenhuma falha altera o volume (`FileTable::open_write`).
+fn sys_open_write(ptr: u64, len: u64) -> i64 {
+    let (path, len) = match copy_path(ptr, len) {
+        Ok(copied) => copied,
+        Err(code) => return code,
+    };
+    match scheduler::with_current_files(|files| files.open_write(&path[..len])) {
         Some(Ok(fd)) => fd as i64,
         Some(Err(error)) => errno(error),
         None => ERR_BADF,
@@ -825,9 +918,9 @@ mod tests {
     }
 
     #[test_case]
-    fn contrato_declara_a_versao_8() {
-        assert!(CONTRATO.contains("**Versão do contrato**: 8"));
-        assert!(CONTRATO.contains("os-rust 0.12.0 (Marco 12)"));
+    fn contrato_declara_a_versao_9() {
+        assert!(CONTRATO.contains("**Versão do contrato**: 9"));
+        assert!(CONTRATO.contains("os-rust 0.13.0 (Marco 13)"));
     }
 
     #[test_case]
@@ -938,5 +1031,36 @@ mod tests {
         assert!(CONTRATO.contains(&format!("no máximo **{}** programas", abi::MAX_TASKS)));
         assert!(CONTRATO.contains(&format!("**{} ticks**", abi::SLICE_TICKS)));
         assert!(CONTRATO.contains(&format!("**{} Hz**", abi::TIMER_HZ)));
+    }
+
+    #[test_case]
+    fn contrato_9_numera_as_quatro_syscalls_novas_e_o_28_e_o_primeiro_livre() {
+        assert_eq!((SYS_READ_KEY, SYS_SCREEN, SYS_OPEN_WRITE, SYS_ARGS), (24, 25, 26, 27));
+        assert_eq!(SYS_TCP_TIMEOUT + 1, SYS_READ_KEY);
+        assert_eq!(abi::MAX_ARGS_LEN, 128);
+        assert_eq!(abi::KEY_CTRL, 0x1_0000);
+        assert_eq!((abi::SCREEN_CLEAR, abi::SCREEN_MOVE, abi::SCREEN_COLOR), (1, 2, 3));
+    }
+
+    #[test_case]
+    fn sys_screen_valida_antes_de_qualquer_efeito() {
+        use crate::vga_buffer;
+        vga_buffer::clear_screen();
+        let cursor = vga_buffer::screen_cursor();
+        for (a, b) in [(25, 0), (0, 80), (u64::MAX, 0), (0, u64::MAX)] {
+            assert_eq!(sys_screen(abi::SCREEN_MOVE, a, b), ERR_INVAL);
+        }
+        for (a, b) in [(16, 0), (0, 8), (u64::MAX, 0), (0, u64::MAX)] {
+            assert_eq!(sys_screen(abi::SCREEN_COLOR, a, b), ERR_INVAL);
+        }
+        for op in [0, 4, u64::MAX] {
+            assert_eq!(sys_screen(op, 0, 0), ERR_INVAL);
+        }
+        // Nada mudou: nem o cursor, nem a cor, e a tela não foi marcada.
+        assert_eq!(vga_buffer::screen_cursor(), cursor);
+        assert!(!vga_buffer::restore_prompt_line());
+        crate::print!("x");
+        assert_eq!(vga_buffer::screen_cell_color(24, 0), 0x0E);
+        vga_buffer::clear_screen();
     }
 }

@@ -22,7 +22,10 @@ The runtime library (`runtime/`, at the repository root) exists so that you do n
 - A global allocator: lets you use `Box`, `Vec`, `String`, and the rest of the `alloc` crate (with `extern crate alloc;` in your program), through the memory syscall. The program's heap grows up to 1 MiB.
 - `yield_now()`: yields the CPU to another program that is running at the same time (see the **Multitasking** section).
 - `File`, `Dir`, `DirEntry`, and `FsError`: open and read files and list directories (see the **Files** section). `File` and `Dir` only read.
-- `FileWriter`, `remove`, `mkdir` and `rmdir`: create a file, append bytes to its end, delete it, and create and remove directories, on the `/ram` and `/disco` volumes (see the **Writing files** section).
+- `FileWriter`, `remove`, `mkdir` and `rmdir`: create a file, append bytes to its end, rewrite it from scratch (`FileWriter::overwrite`), delete it, and create and remove directories, on the `/ram` and `/disco` volumes (see the **Writing files** section).
+- `read_key()`, `Key` and `KeyEvent`: wait for any key (arrows, Home, End and Ctrl included), without waiting for Enter and with no echo (see the **Keyboard and screen** section).
+- `screen`: clear the screen, move the cursor and choose colors, reverse video included (see the **Keyboard and screen** section).
+- `args::read` and `args::words`: the argument text that the `exec` command hands to the program (see the **Command-line arguments** section).
 - `time::now()`: the current date and time, in UTC (see the **The time** section).
 - `exit(codigo)`: ends the program early, if you need to.
 - A `panic!` handler: writes `[panic] <message>` to the screen and ends the program with code 101.
@@ -71,6 +74,10 @@ The official, versioned document for the syscall contract is [`SYSCALLS.md`](SYS
 | 12 | `SYS_OPEN_APPEND` | Opens an existing file for appending | `FileWriter::append` |
 | 13 | `SYS_WRITE_FILE` | Writes bytes at the end of the file | `FileWriter::write`, `FileWriter::write_all` |
 | 14 | `SYS_REMOVE` | Deletes a file | `remove` |
+| 24 | `SYS_READ_KEY` | Waits for any key, with no echo | `read_key()` |
+| 25 | `SYS_SCREEN` | Clears the screen, moves the cursor, chooses the color | `screen::clear`, `screen::move_to`, `screen::set_color` |
+| 26 | `SYS_OPEN_WRITE` | Opens a file to write from scratch (creates or zeroes) | `FileWriter::overwrite` |
+| 27 | `SYS_ARGS` | Copies the argument text | `args::read` |
 
 If your program needs to call a syscall directly (beyond what the runtime library already covers), consult `SYSCALLS.md` for the exact number and convention.
 
@@ -632,7 +639,7 @@ fn main() -> i32 {
 
 ## Writing files
 
-The `/ram` and `/disco` volumes accept writes. Writing is simple on purpose: **a file is born empty and only grows at the end; deleting gives the space back; nothing is kept for later** (every `write` already leaves the data on the volume, there is no `flush`). To replace the contents of a file, delete it and create it again.
+The `/ram` and `/disco` volumes accept writes. Writing is simple on purpose: **a file is born empty and only grows at the end; deleting gives the space back; nothing is kept for later** (every `write` already leaves the data on the volume, there is no `flush`). To replace the contents of a file, use `FileWriter::overwrite`, which zeroes it (or creates it, if it does not exist) and leaves it open for appending.
 
 ```rust
 use runtime::{mkdir, remove, rmdir, FileWriter, FsError};
@@ -642,6 +649,7 @@ arquivo.write_all(b"ola, ramdisk\n")?;                   // writes everything, r
 let n = arquivo.write(b"mais")?;                         // Result<usize, FsError>; may write less than asked
 
 let mut mesmo = FileWriter::append("/ram/nota.txt")?;    // opens an existing file, for appending
+let mut novo = FileWriter::overwrite("/ram/nota.txt")?;  // creates, or ZEROES if it exists: rewrites from the start (Busy if anyone has it open)
 remove("/ram/nota.txt")?;                                // Result<(), FsError>
 mkdir("/ram/docs/novo")?;                               // creates an empty directory; Exists if the name exists
 rmdir("/ram/docs/novo")?;                               // removes an empty directory; NotEmpty if it has entries
@@ -649,7 +657,7 @@ rmdir("/ram/docs/novo")?;                               // removes an empty dire
 
 The rules:
 
-- **Only at the end.** There is no seeking, overwriting in the middle or truncating. `FileWriter::create` fails with `Exists` if the name exists: nothing is overwritten by accident.
+- **Only at the end.** There is no seeking, overwriting in the middle or truncating to an arbitrary size. `FileWriter::create` fails with `Exists` if the name exists: nothing is overwritten by accident. To replace the whole content, `FileWriter::overwrite` zeroes the file (and creates it, if it does not exist) with no need to delete and create again, and a failure in the middle does not lose the old text ahead of time. `FileWriter::append` requires the file to exist and keeps what is in it.
 - **An open file is not deleted.** `remove` of a file that *any* program has open (including yours) returns `Busy`. Close it first: let the `File` or `FileWriter` go out of scope (`drop(arquivo)`).
 - **Full volume.** `write` returns how many bytes fit; the next call returns `NoSpace`. What fit stays written.
 - **A reader sees the size from when it opened.** A `File` opened before a `write` does not see what was appended later; a new open sees everything.
@@ -1972,6 +1980,300 @@ FTP uses **two connections**, and the program combines the two kinds of socket w
 - **Validation comes before `150`**: `RETR` opens the file and reads the first chunk, `LIST` reads the directory and `STOR` creates the file before saying `150`. So a missing or invalid name becomes `550` or `553` without opening any transfer.
 - **Cleaning up the partial file**: if a `STOR` fails halfway, the file is closed (`drop`) and only then deleted with `remove`, because the kernel does not delete an open file. Since `FileWriter::create` never overwrites, a name that already exists is an error and the old file stays intact.
 - There is no infinite wait and no Ctrl+C, so every wait has a timeout and `SITE EXIT` ends the program.
+
+## Keyboard and screen
+
+Until now the keyboard was by **line** (`read_line`) and the screen was just text in sequence, at the bottom, always in the same color. For a truly interactive program (a game, an editor), there are three new tools.
+
+**Raw keys.** `read_key()` waits for **one key** and returns it, without waiting for Enter and with no echo (the program decides what to show):
+
+```rust
+use runtime::{read_key, Key, KeyEvent};
+
+let KeyEvent { key, ctrl } = read_key();  // blocks, without spending CPU, until a key is pressed
+match key {
+    Key::Char('q') if ctrl => { /* Ctrl+Q */ }
+    Key::Up | Key::Down | Key::Left | Key::Right => { /* arrows */ }
+    Key::Char(c) => { /* a printable character, with Shift already applied */ }
+    _ => {}  // Enter, Backspace, Tab, Esc, Home, End, PageUp, PageDown, Delete, Insert
+}
+```
+
+Only **pressing** generates an event (releasing does not). With Ctrl, a letter always arrives in **lowercase**: `Ctrl+Q` is `Key::Char('q')` with `ctrl: true`. Keys outside the table (F1 to F12, Alt, Caps Lock, Windows) generate no event. Keys typed before the request arrive in order. The codes the kernel returns (`KEY_UP`, `KEY_CTRL`...) are in `SYSCALLS.md`. **`Ctrl+C` interrupts nothing**: it is just another key, and the program only exits when its own code decides to.
+
+**The screen.** The screen has **25 rows by 80 columns**. The `screen` module controls the cursor and the color:
+
+```rust
+use runtime::screen::{self, COLOR_BLACK, COLOR_LIGHT_GRAY};
+
+screen::clear();                                   // erases the 25 rows and moves the cursor to (0, 0)
+screen::move_to(5, 10)?;                           // row 5, column 10; Err(OutOfRange) if outside the grid
+print!("@");                                       // what is written goes from the cursor
+screen::set_color(COLOR_BLACK, COLOR_LIGHT_GRAY)?; // text 0..=15 and background 0..=7; Err(BadColor) if outside
+screen::reset_color();                             // back to yellow on black
+```
+
+- The kernel **erases nothing on its own** and **does not scroll the screen** outside the last row: `\n` on a row above the last just moves the cursor down. Whoever draws erases what it wants erased, by writing spaces. On the **last** row (24) the line break scrolls the screen, as it always did.
+- **Colors.** The colors are the VGA ones (`COLOR_BLACK` 0 to `COLOR_WHITE` 15); the color applies to everything written afterwards and to `screen::clear()`, which paints the 25 rows with it. The **background only goes from 0 to 7**: in the default text mode the highest background bit makes the character blink, and the kernel does not offer blinking. **Reverse video** is just swapping the two colors: black text on a light gray background (`set_color(COLOR_BLACK, COLOR_LIGHT_GRAY)`), and a full bar is made by writing spaces.
+- **Return to the prompt.** When `run` (or `exec`) gives the prompt back and the program used the screen, the kernel moves the cursor to the start of the last row, goes back to the default color and erases **only** that row. The other 24 stay as the program left them, with the colors.
+- **Run alone.** A program that uses the screen should run alone: the kernel has only one cursor, and two programs writing at the same time mix the drawing.
+
+### Example program 16: teclas
+
+A program that uses all of this together: the title bar in reverse video, a green `@` that the arrows move, the name of each key read and, on `Ctrl+Q`, the file rewritten with the total number of keys. File: `programs/src/bin/teclas.rs`. Run it with `run teclas`, press some keys and `Ctrl+Q`, and check with `cat /ram/teclas.txt`; to write to another file, `exec teclas /ram/contagem.txt`.
+
+```rust
+//! `teclas`: a demonstração do teclado cru, da tela de texto com cores, dos
+//! argumentos de linha de comando e do arquivo regravável.
+//!
+//! A tela é limpa e o programa mostra, em vídeo reverso (texto preto sobre
+//! fundo cinza claro), uma barra de título. Cada tecla lida (setas, Home, Ctrl,
+//! qualquer uma) aparece pelo nome e entra na contagem; as setas movem um `@`
+//! verde pela área do meio da tela. `Ctrl+Q` sai: o programa regrava um
+//! arquivo com o total de teclas lidas (`FileWriter::overwrite` zera o arquivo,
+//! então regravar nunca acrescenta) e mostra o resultado mais embaixo.
+//!
+//! O arquivo vem dos argumentos, que só o comando `exec` passa:
+//!
+//! ```text
+//! os-rust> run teclas                      (grava /ram/teclas.txt)
+//! os-rust> exec teclas /ram/contagem.txt   (grava o arquivo dado)
+//! ```
+//!
+//! Quem usa a tela deve rodar **sozinho**: o kernel só tem um cursor. O kernel
+//! não apaga nada sozinho, por isso cada texto é completado com espaços até a
+//! largura em que foi escrito, para não sobrar resto da tecla anterior.
+//!
+//! Compilado à parte do kernel e embutido na imagem de boot.
+
+#![no_std]
+#![no_main]
+
+use core::fmt::Write;
+
+use runtime::screen::{self, COLOR_BLACK, COLOR_LIGHT_GRAY, COLOR_LIGHT_GREEN};
+use runtime::{args, entry, print, println, read_key, FileWriter, FsError, Key, KeyEvent};
+
+entry!(main);
+
+/// O arquivo que o programa regrava quando não recebe outro.
+const ARQUIVO_PADRAO: &str = "/ram/teclas.txt";
+/// O maior caminho aceito: com ele, a linha `teclas: gravado em <arquivo> (N
+/// bytes)` ainda cabe nas 80 colunas da tela.
+const MAX_CAMINHO: usize = 40;
+/// A barra de título, escrita em vídeo reverso na linha 0.
+const TITULO: &str = "teclas: setas movem o @, Ctrl+Q sai";
+/// Onde o programa mostra a última tecla e a contagem.
+const LINHA_TECLA: usize = 2;
+const LINHA_CONTAGEM: usize = 3;
+/// Largura em que essas duas linhas são reescritas (apaga o resto da anterior).
+const LARGURA_STATUS: usize = 40;
+/// Onde o `@` pode andar (linhas 5 a 18, colunas 0 a 79) e onde ele começa.
+const PRIMEIRA_LINHA: usize = 5;
+const ULTIMA_LINHA: usize = 18;
+const INICIO: (usize, usize) = (12, 40);
+/// Onde o resultado é mostrado ao sair (o que vem antes não é apagado).
+const LINHA_RESULTADO: usize = 20;
+
+/// Um texto curto montado na pilha, para completar com espaços antes de
+/// escrever (sem usar o heap).
+struct Texto {
+    bytes: [u8; 96],
+    len: usize,
+}
+
+impl Texto {
+    fn new() -> Texto {
+        Texto { bytes: [0; 96], len: 0 }
+    }
+
+    fn como_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
+    }
+}
+
+impl Write for Texto {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let livre = self.bytes.len() - self.len;
+        let n = s.len().min(livre);
+        self.bytes[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+        self.len += n;
+        Ok(())
+    }
+}
+
+/// O nome da tecla, como aparece na linha 2.
+fn nome_da_tecla(evento: KeyEvent, saida: &mut Texto) {
+    if evento.ctrl {
+        let _ = saida.write_str("Ctrl+");
+    }
+    let _ = match evento.key {
+        // Com Ctrl, uma letra chega minúscula e aparece maiúscula (`Ctrl+Q`).
+        Key::Char(c) if evento.ctrl => saida.write_char(c.to_ascii_uppercase()),
+        Key::Char(c) => write!(saida, "caractere '{}'", c),
+        Key::Enter => saida.write_str("Enter"),
+        Key::Backspace => saida.write_str("Backspace"),
+        Key::Tab => saida.write_str("Tab"),
+        Key::Esc => saida.write_str("Esc"),
+        Key::Up => saida.write_str("seta acima"),
+        Key::Down => saida.write_str("seta abaixo"),
+        Key::Left => saida.write_str("seta esquerda"),
+        Key::Right => saida.write_str("seta direita"),
+        Key::Home => saida.write_str("Home"),
+        Key::End => saida.write_str("End"),
+        Key::PageUp => saida.write_str("Page Up"),
+        Key::PageDown => saida.write_str("Page Down"),
+        Key::Delete => saida.write_str("Delete"),
+        Key::Insert => saida.write_str("Insert"),
+    };
+}
+
+/// Vai para o começo de `linha`. As linhas usadas estão sempre dentro da tela,
+/// então a recusa (`OutOfRange`) não acontece; ignorá-la deixa o cursor onde
+/// estava, que é o pior caso inofensivo.
+fn vai_para(linha: usize, coluna: usize) {
+    let _ = screen::move_to(linha, coluna);
+}
+
+/// Reescreve a linha `numero` com `texto`, completada com espaços até
+/// `largura` colunas.
+fn escreve_linha(numero: usize, texto: &str, largura: usize) {
+    vai_para(numero, 0);
+    print!("{:<1$}", texto, largura);
+}
+
+/// As duas linhas de status: a última tecla e quantas já foram lidas.
+fn mostra_status(tecla: &str, lidas: u32) {
+    let mut linha = Texto::new();
+    let _ = write!(linha, "ultima tecla: {}", tecla);
+    escreve_linha(LINHA_TECLA, linha.como_str(), LARGURA_STATUS);
+    let mut contagem = Texto::new();
+    let _ = write!(contagem, "teclas lidas: {}", lidas);
+    escreve_linha(LINHA_CONTAGEM, contagem.como_str(), LARGURA_STATUS);
+}
+
+/// Escreve o `@` em verde claro sobre preto na posição dada.
+fn desenha_arroba((linha, coluna): (usize, usize)) {
+    let _ = screen::set_color(COLOR_LIGHT_GREEN, COLOR_BLACK);
+    vai_para(linha, coluna);
+    print!("@");
+    screen::reset_color();
+}
+
+/// Apaga a posição com um espaço, na cor padrão.
+fn apaga((linha, coluna): (usize, usize)) {
+    vai_para(linha, coluna);
+    print!(" ");
+}
+
+/// Para onde a seta leva o `@`, sem sair da área (nas bordas, não se move).
+fn proxima_posicao(tecla: Key, (linha, coluna): (usize, usize)) -> (usize, usize) {
+    match tecla {
+        Key::Up if linha > PRIMEIRA_LINHA => (linha - 1, coluna),
+        Key::Down if linha < ULTIMA_LINHA => (linha + 1, coluna),
+        Key::Left if coluna > 0 => (linha, coluna - 1),
+        Key::Right if coluna + 1 < screen::COLS => (linha, coluna + 1),
+        _ => (linha, coluna),
+    }
+}
+
+/// Regrava `arquivo` com `<lidas>\n`, do zero, e devolve quantos bytes gravou.
+fn grava(arquivo: &str, lidas: u32) -> Result<usize, FsError> {
+    let mut texto = Texto::new();
+    let _ = writeln!(texto, "{}", lidas);
+    let mut destino = FileWriter::overwrite(arquivo)?;
+    destino.write_all(texto.como_str().as_bytes())?;
+    Ok(texto.len)
+}
+
+fn main() -> i32 {
+    // Os argumentos chegam como um texto só; sem argumento vale o padrão, com
+    // uma palavra é o arquivo, com mais de uma é erro de uso. Tudo isso é
+    // decidido **antes** de mexer na tela.
+    let mut area = [0u8; args::MAX_ARGS_LEN];
+    let texto = args::read(&mut area);
+    let mut palavras = args::words(texto);
+    let arquivo = match (palavras.next(), palavras.next()) {
+        (None, _) => ARQUIVO_PADRAO,
+        (Some(arquivo), None) => arquivo,
+        (Some(_), Some(_)) => {
+            println!("teclas: uso: teclas [arquivo]");
+            return 1;
+        }
+    };
+    if arquivo.len() > MAX_CAMINHO {
+        println!("teclas: caminho muito longo (maximo {} bytes)", MAX_CAMINHO);
+        return 1;
+    }
+
+    screen::clear();
+    // A barra de título em vídeo reverso, completada até as 80 colunas.
+    let _ = screen::set_color(COLOR_BLACK, COLOR_LIGHT_GRAY);
+    escreve_linha(0, TITULO, screen::COLS);
+    screen::reset_color();
+    mostra_status("(nenhuma)", 0);
+    let mut posicao = INICIO;
+    desenha_arroba(posicao);
+
+    let mut lidas: u32 = 0;
+    loop {
+        let evento = read_key();
+        lidas += 1;
+        let nova = proxima_posicao(evento.key, posicao);
+        if nova != posicao {
+            apaga(posicao);
+            desenha_arroba(nova);
+            posicao = nova;
+        }
+        let mut nome = Texto::new();
+        nome_da_tecla(evento, &mut nome);
+        mostra_status(nome.como_str(), lidas);
+        // `Ctrl+Q` também conta e aparece antes de sair.
+        if evento.ctrl && evento.key == Key::Char('q') {
+            break;
+        }
+    }
+
+    // Tenta regravar; mostra o resultado mais embaixo, sem apagar a tela.
+    let resultado = grava(arquivo, lidas);
+    vai_para(LINHA_RESULTADO, 0);
+    print!("teclas: {} teclas lidas", lidas);
+    vai_para(LINHA_RESULTADO + 1, 0);
+    match resultado {
+        Ok(bytes) => {
+            print!("teclas: gravado em {} ({} bytes)", arquivo, bytes);
+            0
+        }
+        Err(erro) => {
+            print!("teclas: nao gravou {}: {}", arquivo, erro);
+            1
+        }
+    }
+}
+```
+
+## Command-line arguments
+
+A program receives arguments as **a single text**: what comes after its name in the **`exec`** command.
+
+```text
+os-rust> exec teclas /ram/contagem.txt
+```
+
+```rust
+use runtime::args;
+
+let mut area = [0u8; args::MAX_ARGS_LEN];  // 128 bytes, the contract maximum
+let texto = args::read(&mut area);          // &str; empty if there are no arguments
+for palavra in args::words(texto) {         // splits by spaces
+    // ...
+}
+```
+
+- **Why `exec` and not `run`.** `run` treats every word after it as **another program** to start together (`run ping pong`), so a program started by `run` receives empty arguments. `exec` starts **one** program (built in or a file, like `exec /ram/prog`) and hands the rest of the line over to it.
+- **The text arrives raw.** Without leading and trailing spaces, but with the ones in the middle kept; **no quotes and no escapes**: `exec p "a b"` delivers the characters `"a b"` as they are, and `args::words` splits them into `"a` and `b"`. Interpreting the text is up to the program.
+- **The limit.** The contract allows up to 128 bytes, but the prompt limits the whole line to 128 bytes (with `exec` and the program name inside), so through the prompt the text is smaller.
+- The arguments disappear when the program ends and never pass from one program to another.
 
 ## Writing and building your own program
 
