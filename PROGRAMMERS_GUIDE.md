@@ -2252,6 +2252,10 @@ fn main() -> i32 {
 }
 ```
 
+**A complete example.** The `mano` editor (`programs/src/bin/mano.rs`) is an entire full-screen program,
+written only with what this section shows: raw keys, the colored screen with reverse video, the `exec`
+arguments and `FileWriter::overwrite`. See the [manual](MANO.en.md) and the [code walkthrough](WALKTHROUGH-MANO.en.md).
+
 ## Command-line arguments
 
 A program receives arguments as **a single text**: what comes after its name in the **`exec`** command.

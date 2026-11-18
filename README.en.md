@@ -14,7 +14,8 @@ right below.
 
 If you have never seen how a kernel/bootloader works, also read
 [`WALKTHROUGH.md`](./WALKTHROUGH.md): it explains what is happening behind
-the boot and the code.
+the boot and the code. To edit text inside os-rust itself, see the `mano`
+editor: the [manual](./MANO.en.md) and the code [walkthrough](./WALKTHROUGH-MANO.en.md).
 
 ## Vision
 
@@ -30,7 +31,7 @@ multitasking.
 
 The project documentation is also available in English (see the `ENGLISH VERSION` link at the top of each `.md` file).
 
-**Current version: 0.13.0.** Milestones 0 (boot in VGA text mode, with a
+**Current version: 0.13.1.** Milestones 0 (boot in VGA text mode, with a
 welcome message, scrolling and readable panic handling), 1 (interrupts,
 keyboard and command prompt), 2 (debugging infrastructure: serial output
 and automated tests inside QEMU), 3 (memory: physical frame allocator,
@@ -60,11 +61,50 @@ colors, rewriting a file and command-line arguments, with `run teclas` and `exec
 are completed and are what this repository runs today. Version 0.12.1 brings the
 `ftpd` program to Milestone 12: an FTP server to exchange files with the real
 computer without rebuilding (see [FTP server](#ftp-server)). Version 0.13.0
-delivers Milestone 13: what a full-screen editor needs, which will come later as a
-user program (see the [programmer's guide](PROGRAMMERS_GUIDE.md), section
-**Keyboard and screen**). The
+delivers Milestone 13: what a full-screen editor needed (see the
+[programmer's guide](PROGRAMMERS_GUIDE.md), section **Keyboard and screen**).
+Version 0.13.1, like 0.12.1, is **not a milestone**: it adds the `mano` editor,
+written as an ordinary user program with what Milestone 13 already offered,
+without changing the kernel (see [The `mano` editor](#the-mano-editor)). The
 original talk demo, in the format used in class, is preserved
 in the git tag `v1.0-demo` and can still be used as is.
+
+## The `mano` editor
+
+`mano` is a simple full-screen text editor in the style of `nano`. It is an ordinary user
+program and it is already in the boot image: after `cargo run` it is ready, with no file to
+copy, no FTP and no `/disco`.
+
+```text
+os-rust> run mano                       (new text, no name)
+os-rust> exec mano /ram/nota.txt        (opens the file; if it does not exist, starts a new one with that name)
+```
+
+```text
+ mano  /ram/nota.txt                                              Modificado   <- title (reverse video)
+um                                                                             <- the text (lines 1 to 21)
+dois
+tres
+...
+Gravadas 3 linhas                                                              <- messages (line 22)
+^G Ajuda     ^O Gravar    ^W Buscar    ^K Cortar    ^C Posicao   ^X Sair       <- shortcuts (lines 23 and 24)
+^R Ler       ^\ Subst.    ^U Colar     ^_ Linha     ^Y Pag ant   ^V Pag seg
+```
+
+| Shortcut | What it does |
+|---|---|
+| `Ctrl+O` | saves (asks for the name); `Ctrl+S` saves directly |
+| `Ctrl+X` | quits (asks if there are changes) |
+| `Ctrl+W` | search; `Ctrl+W` and `Enter` with an empty field repeats |
+| `Ctrl+\` (or `Ctrl+T`) | search and replace, asking one by one (`S`, `N`, `A`) |
+| `Ctrl+K`, `Ctrl+U` | cuts the line, pastes the cut lines |
+| `Ctrl+G` | help |
+
+The shortcuts are the `nano` ones whenever the os-rust keyboard allows it; there is no Alt,
+undo or selection. The text has up to 65536 bytes and 4096 lines, and the path is absolute,
+up to 40 bytes. It is all in the [`mano` manual](MANO.en.md) and the code, explained line by
+line, in the [`mano` walkthrough](WALKTHROUGH-MANO.en.md). The on-screen messages are
+Portuguese without accents, like the rest of os-rust.
 
 ## Roadmap
 
@@ -269,9 +309,10 @@ clusters afterwards); the `exec` command, which starts a program and hands the
 rest of the line over to it (`run` takes no arguments); `Key`, `KeyEvent`,
 `screen`, `args` and `FileWriter::overwrite` in the runtime library; and the
 `teclas` program, which shows it all working. Demonstrable: `run teclas` and
-`exec teclas /ram/contagem.txt`. **The text editor is not part of this
-milestone**: these syscalls and `exec` are what is missing for it to be written
-later, as a user program, in another spec. Depends on Milestone 12.
+`exec teclas /ram/contagem.txt`. **The text editor was not part of this
+milestone**: these syscalls and `exec` are what was missing to write it as a user
+program. It arrived in version 0.13.1, `mano` (see [The `mano` editor](#the-mano-editor)),
+without changing the kernel. Depends on Milestone 12.
 
 ### Why this order
 
@@ -409,7 +450,7 @@ This will: compile the kernel for this project's custom bare-metal target
 QEMU window that boots via BIOS straight into that binary. Within a few
 seconds you should see the os-rust logo (the 20 lines of the symbol and the
 name, at the top of the screen), followed by the identification line
-`os-rust v0.13.0` — the project's current version — and the `os-rust> `
+`os-rust v0.13.1` — the project's current version — and the `os-rust> `
 prompt ready for typing, not an ordinary terminal.
 
 The same `cargo run` also compiles the runtime library (`runtime/`) and the
@@ -456,9 +497,9 @@ is needed for this: it is the same `cargo run` as always.
 | `ping <ip>` | Sends 4 ICMP echo requests (one per second) and shows the replies, for example `ping 10.0.2.2` or `ping 127.0.0.1`. **It is not the `ping` program of `run ping pong`** (Milestone 7), which only alternates with `pong` |
 | `data` | Shows the date and time of the computer's clock, in UTC, in the format `AAAA-MM-DD HH:MM:SS UTC`; if the clock is invalid or does not respond, shows a clear message. Extra arguments are ignored |
 | `run <target> [<target>...]` | Executes user programs in user mode (ring 3), up to 4 at the same time (the same target may repeat), and returns to the prompt when the last one ends. A target that starts with `/` is the path of an ELF64 executable (up to 64 KiB) read from a volume, like `/disco/bin/visita`; any other is the name of a program embedded in the image. The two can be mixed (`run /disco/bin/visita hello`). With no argument, with an invalid target or with more than 4 targets, it starts none |
-| `exec <program> [<arguments>...]` | Starts **one** program (built in or a file, as in `run`) and hands the rest of the line over to it as argument text, which the program reads with `SYS_ARGS` (without leading and trailing spaces, no quotes or escapes), for example `exec teclas /ram/contagem.txt`. `run` does **not** take arguments: it treats each word after it as another program to start together. The text has at most 128 bytes (through the prompt, less: the whole line has 128) |
+| `exec <program> [<arguments>...]` | Starts **one** program (built in or a file, as in `run`) and hands the rest of the line over to it as argument text, which the program reads with `SYS_ARGS` (without leading and trailing spaces, no quotes or escapes), for example `exec teclas /ram/contagem.txt` or `exec mano /ram/nota.txt`. `run` does **not** take arguments: it treats each word after it as another program to start together. The text has at most 128 bytes (through the prompt, less: the whole line has 128) |
 
-### User programs: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `teclas`, `visita` and `labirint`
+### User programs: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `teclas`, `mano`, `visita` and `labirint`
 
 The `run` command executes programs written outside the kernel. Each one
 lives in `programs/src/bin/` (except `visita` and `labirint`, in
@@ -624,6 +665,18 @@ lives in `programs/src/bin/` (except `visita` and `labirint`, in
 
   With more than one word (`exec teclas a b`) or a path longer than 40 bytes, it
   writes the usage message and exits with code 1, without touching the screen.
+- **`mano`** (`run mano` or `exec mano <file>`): the full-screen text editor, in version
+  0.13.1. It uses only what Milestone 13 already offered (raw keys, the colored screen,
+  `FileWriter::overwrite` and the `exec` arguments), so the kernel did not change. It
+  edits, moves the cursor, cuts and pastes lines, searches, searches and replaces,
+  inserts a file, saves and quits; see [The `mano` editor](#the-mano-editor), the
+  [manual](MANO.en.md) and the [walkthrough](WALKTHROUGH-MANO.en.md). Run it alone: the
+  program uses the whole screen.
+
+  ```text
+  os-rust> exec mano /ram/nota.txt
+  ```
+
 - **`leitor`** (`run leitor`): opens `/disco/docs/longo.txt`, a file that
   takes up more than one cluster of the disk, and writes the contents to the
   screen, reading in 128-byte chunks through the file syscalls. The program
@@ -1098,6 +1151,34 @@ QEMU to see `/ram` go back to its initial contents. The automated suite
   to the same file, `/disco` unchanged, unavailable volume, tampered FAT,
   `/ram` restored, and the contract and the guide (literal program code).
 
+### What the version 0.13.1 tests cover
+
+0.13.1 is not a milestone: it brings the `mano` editor to Milestone 13, without changing the
+kernel, the runtime library or the contract. The automated suite (`cargo test`) covers,
+besides the earlier tests, in one new `tests/` binary. `mano` runs **for real**, started from
+the prompt, and the tests type by pushing scancodes into the kernel queue, one key at a time,
+only when the program is waiting for a key; screen checks run in the scheduler hook, because
+`mano` clears the screen on exit:
+
+- `tests/mano.rs`: opening (no argument, an existing file, a missing one, an empty one, only
+  `\n`, no final `\n`, with a tab, `\r` and UTF-8) and the five screen regions with text and
+  colors; saving with a new name, with a name that exists (both answers) and with an error,
+  with the exact bytes; each key in the table, the Ctrl aliases and `Ctrl+T`; vertical and
+  horizontal scrolling, the desired column and pages, with the screen always at 80 bytes per
+  line; cut and paste (with and without accumulation); search (found, not found, the wrap,
+  repeat with an empty field, upper case) and replace (`S`, `N`, `A`, `Ctrl+C`, `Esc`, empty
+  new text, new text that contains the term, equal to the term and several matches on the same
+  line); quitting with each answer; usage errors, the 65536-byte and 4096-line limits (files of
+  65535, 65536 and 65537 bytes, with 4095 and 4096 `\n`, `docs/grande.bin`) and refusals by
+  typing; help; the clean return to the prompt; text at the limit with many small lines, with
+  no `panic`; the kernel sleeping while `mano` waits for a key; and the documents (the manual,
+  the walkthrough, the READMEs, the CHANGELOGs, and every function name in the walkthrough
+  exists in the code);
+- the tests that check the version (`os-rust v0.13.1` in the banner and in `sobre`, and
+  `version` in `Cargo.toml`) in `tests/ftpd.rs`, `tests/rede_programas.rs`,
+  `tests/escrita_no_disco.rs`, `tests/escrita_no_ramdisk.rs`, `tests/teclado_tela.rs` and
+  `tests/user_runtime.rs`.
+
 ### What the Milestone 13 tests cover
 
 The automated suite (`cargo test`) covers, besides the earlier tests. No test
@@ -1139,7 +1220,7 @@ and talks to `ftpd` over the loopback:
   a partial file, `MKD`/`RMD`/`DELE` and each error, commands together, split and
   with just `\n`, the long line, the client that disappears, 50 sessions without
   leaking anything, `run ftpd ftpd`, sending an ELF that runs with `run`, version
-  0.13.0, the guide (literal code), the READMEs and the CHANGELOGs;
+  0.13.1, the guide (literal code), the READMEs and the CHANGELOGs;
 - `tests/ftpd_espera.rs`: with no client, `ftpd` gives up after 30 s and the
   kernel sleeps; a data connection nobody opens gives `425` in 10 s and deletes
   the created file;
@@ -1176,7 +1257,7 @@ QEMU's `guestfwd`, which runs the computer's `cat` utility (Linux and macOS):
   buffer;
 - `tests/rede_programas.rs`: `servidor` and `cliente` end to end (33 bytes sent,
   88 received), the refusal, the invalid address, 50 runs without leaking
-  anything, version 0.13.0, contract version 9, the guide (literal code), the
+  anything, version 0.13.1, contract version 9, the guide (literal code), the
   README and the QEMU arguments in `Cargo.toml`;
 - `tests/rede_espera.rs`: the `servidor` alone gives up after 30 s.
 
@@ -1206,7 +1287,7 @@ tests:
   for an open directory and the release after `close`, `exit` and a fault,
   `mkdir` with 4 open files, number 17, `caderno` end to end, the 2-sectors-per-cluster
   volume that stays read-only, a missing disk, 50 cycles without leaking
-  clusters, frames or descriptors, version 0.13.0, contract version 9, the
+  clusters, frames or descriptors, version 0.13.1, contract version 9, the
   guide (literal `caderno` code), the README (the keep-the-disk and USB-stick
   commands) and `snapshot=on` in `Cargo.toml`.
 
@@ -1420,7 +1501,7 @@ chapter in [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   files, `FileWriter`/`remove`/`mkdir`/`rmdir` for writing them, `time::now()`, global allocator, `panic` handler).
 - `programs/`: the user programs crate (`hello`, `crash`, `eco`,
   `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`,
-  `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, one file per program in `src/bin/`, plus
+  `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `teclas`, `mano`, one file per program in `src/bin/`, plus
   `visita` and `labirint` in `src/disco/`, which only go to the disk), with the linker
   script (`link.ld`); compiled for the user target by the root `build.rs`,
   never directly.
@@ -1447,7 +1528,7 @@ chapter in [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   time: context switching, preemption, isolation and keyboard),
   `disco_ata.rs` (the ATA driver), `escrita_no_ramdisk.rs` (writing to `/ram`: commands, syscalls, `gravador` and
   `apagador`), `escrita_no_disco.rs` (writing to `/disco`, `mkdir`, `rmdir`,
-  `caderno`, contract version 9 and the README), `rede.rs`, `rede_pilha.rs`, `rede_syscalls.rs`, `rede_programas.rs` and `rede_espera.rs` (the Milestone 12 networking), `ftpd.rs`, `ftpd_espera.rs` and `ftpd_ocioso.rs` (the 0.12.1 FTP server), `teclado_tela.rs` and `regravar_arquivo.rs` (the raw keyboard, the screen, the arguments, `exec`, `teclas` and file rewriting of Milestone 13), `sistema_de_arquivos.rs` (`ls`, `cat`,
+  `caderno`, contract version 9 and the README), `rede.rs`, `rede_pilha.rs`, `rede_syscalls.rs`, `rede_programas.rs` and `rede_espera.rs` (the Milestone 12 networking), `mano.rs` (the 0.13.1 `mano` editor, end to end), `ftpd.rs`, `ftpd_espera.rs` and `ftpd_ocioso.rs` (the 0.12.1 FTP server), `teclado_tela.rs` and `regravar_arquivo.rs` (the raw keyboard, the screen, the arguments, `exec`, `teclas` and file rewriting of Milestone 13), `sistema_de_arquivos.rs` (`ls`, `cat`,
   `run` by path, file syscalls and invalid volumes) and `artefatos.rs`
   (hygiene of the delivered files).
 - `x86_64-os_rust.json`: the custom bare-metal target specification (no
@@ -1457,4 +1538,7 @@ chapter in [`WALKTHROUGH.md`](./WALKTHROUGH.md).
 - `.cargo/config.toml`: configures `cargo run`/`cargo test` to use
   `bootimage` as the *runner* automatically, and enables compiling the
   `alloc` crate for this custom target.
+- `programs/src/bin/mano.rs`: the `mano` text editor (0.13.1), a user program built into the
+  boot image.
+- `MANO.en.md` and `WALKTHROUGH-MANO.en.md`: the `mano` manual and its code explained.
 - `CHANGELOG.md`: the project's change history, version by version.

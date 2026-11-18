@@ -865,8 +865,8 @@ fn a_imagem_embutida_nunca_e_alterada_e_reiniciar_restaura_o_ram() {
 
 #[test_case]
 fn a_versao_0_12_1_aparece_no_sobre() {
-    assert_eq!(os_rust::VERSION, "os-rust v0.13.0");
-    exige(&rodar_comando("sobre"), "os-rust v0.13.0");
+    assert_eq!(os_rust::VERSION, "os-rust v0.13.1");
+    exige(&rodar_comando("sobre"), "os-rust v0.13.1");
 }
 
 const CONTRATO: &str = include_str!("../SYSCALLS.md");

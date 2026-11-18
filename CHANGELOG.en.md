@@ -5,6 +5,35 @@ at a time. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/), and the versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.13.1] - 2026-11-18
+
+The `mano` text editor. It is not a milestone (like 0.12.1): **the kernel, the syscall
+contract (version 9) and the runtime library did not change**. `mano` is an ordinary user
+program that uses only what Milestone 13 already offered.
+
+### Added
+
+- The `mano` program (`programs/src/bin/mano.rs`, built into the boot image): a full-screen text
+  editor in the style of `nano`, with a reverse-video title bar, a text area, a message line and
+  two shortcut panels. It edits, moves the cursor, cuts and pastes lines, searches, searches and
+  replaces, inserts a file, saves and quits. Started with `run mano` (new text) or
+  `exec mano <file>`. The text has up to 65536 bytes and 4096 lines, and the file bytes are
+  preserved (an empty file, or one ending in `\n`, comes back identical).
+- The manual (`MANO.md` and `MANO.en.md`) and the code walkthrough (`WALKTHROUGH-MANO.md` and
+  `WALKTHROUGH-MANO.en.md`).
+- The **The `mano` editor** section of the README, right after Status, and one paragraph in each
+  programmer's guide, in the "Keyboard and screen" section.
+- The `tests/mano.rs` tests, which run `mano` for real inside QEMU: the screen, the keys,
+  scrolling, cut and paste, search, replace, save, quit, usage errors, the limits and the
+  documents.
+
+### Changed
+
+- The project version goes from 0.13.0 to 0.13.1 (`Cargo.toml`).
+- The tests that check the version (`os-rust v0.13.1` in the banner and in `sobre`, and `version`
+  in `Cargo.toml`) in `tests/ftpd.rs`, `tests/rede_programas.rs`, `tests/escrita_no_disco.rs`,
+  `tests/escrita_no_ramdisk.rs`, `tests/teclado_tela.rs` and `tests/user_runtime.rs`.
+
 ## [0.13.0] - 2026-11-17
 
 Milestone 13: raw keyboard, screen and a file that can be rewritten. The syscall

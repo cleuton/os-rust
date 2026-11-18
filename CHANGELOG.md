@@ -7,6 +7,35 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.13.1] - 2026-11-18
+
+O editor de textos `mano`. Não é um marco (como a 0.12.1): **o kernel, o contrato de
+syscalls (versão 9) e a biblioteca de runtime não mudaram**. O `mano` é um programa de
+usuário comum, que usa só o que o Marco 13 já oferecia.
+
+### Adicionado
+
+- O programa `mano` (`programs/src/bin/mano.rs`, embutido na imagem de boot): um editor de
+  textos de tela cheia, no jeito do `nano`, com barra de título em vídeo reverso, área de texto,
+  linha de mensagens e dois quadros de atalhos. Edita, move o cursor, corta e cola linhas, busca,
+  busca e substitui, insere um arquivo, grava e sai. Inicia com `run mano` (texto novo) ou
+  `exec mano <arquivo>`. O texto tem até 65536 bytes e 4096 linhas, e os bytes do arquivo são
+  preservados (um arquivo vazio ou terminado em `\n` volta idêntico).
+- O manual (`MANO.md` e `MANO.en.md`) e o percurso pelo código (`WALKTHROUGH-MANO.md` e
+  `WALKTHROUGH-MANO.en.md`).
+- A seção **O editor `mano`** do README, logo depois do Status, e um parágrafo em cada guia do
+  programador, na seção "Teclado e tela".
+- Os testes `tests/mano.rs`, que rodam o `mano` de verdade dentro do QEMU: a tela, as teclas, a
+  rolagem, cortar e colar, buscar, substituir, gravar, sair, os erros de uso, os limites e os
+  documentos.
+
+### Alterado
+
+- A versão do projeto passa de 0.13.0 para 0.13.1 (`Cargo.toml`).
+- Os testes que conferem a versão (`os-rust v0.13.1` no banner e no `sobre`, e `version` em
+  `Cargo.toml`) em `tests/ftpd.rs`, `tests/rede_programas.rs`, `tests/escrita_no_disco.rs`,
+  `tests/escrita_no_ramdisk.rs`, `tests/teclado_tela.rs` e `tests/user_runtime.rs`.
+
 ## [0.13.0] - 2026-11-17
 
 Marco 13: teclado cru, tela e arquivo regravável. O contrato de syscalls passa da

@@ -1712,8 +1712,8 @@ fn o_readme_traz_o_marco_13_nos_dois_idiomas() {
 
 #[test_case]
 fn a_versao_0_13_0_aparece_no_boot_e_no_sobre() {
-    assert_eq!(os_rust::VERSION, "os-rust v0.13.0");
-    exige(&rodar_comando("sobre"), "os-rust v0.13.0");
+    assert_eq!(os_rust::VERSION, "os-rust v0.13.1");
+    exige(&rodar_comando("sobre"), "os-rust v0.13.1");
 }
 
 // ---------------------------------------------------------------------------

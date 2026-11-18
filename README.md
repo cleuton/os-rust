@@ -16,7 +16,8 @@ objetivo maior: veja a seção Visão logo abaixo.
 
 Se você nunca viu como um kernel/bootloader funciona, leia também o
 [`WALKTHROUGH.md`](./WALKTHROUGH.md): ele explica o que está acontecendo
-por trás do boot e do código.
+por trás do boot e do código. Para editar textos dentro do próprio os-rust, veja
+o editor `mano`: o [manual](./MANO.md) e o [walkthrough](./WALKTHROUGH-MANO.md) do código.
 
 ## Visão
 
@@ -32,7 +33,7 @@ sistema de arquivos ou multitarefa completa.
 
 A documentação do projeto também está disponível em inglês (veja o link `ENGLISH VERSION` no início de cada arquivo `.md`).
 
-**Versão atual: 0.13.0.** Os Marcos 0 (boot em modo texto VGA, com
+**Versão atual: 0.13.1.** Os Marcos 0 (boot em modo texto VGA, com
 mensagem de boas-vindas, rolagem e tratamento de panic legível), 1
 (interrupções, teclado e prompt de comandos), 2 (infraestrutura de
 depuração: saída serial e testes automatizados dentro do QEMU), 3
@@ -62,11 +63,49 @@ Ctrl, cursor e cores, regravar um arquivo e argumentos de linha de comando, com
 `run teclas` e `exec`) estão concluídos e são o que este repositório executa
 hoje. A versão 0.12.1 traz o programa `ftpd` ao Marco 12: um servidor FTP para
 trocar arquivos com o computador de verdade, sem rebuildar (veja [Servidor
-FTP](#servidor-ftp)). A versão 0.13.0 entrega o Marco 13: o que falta para um
-editor de tela cheia, que virá depois como programa de usuário (veja o
-[guia do programador](GUIA_DO_PROGRAMADOR.md), seção **Teclado e tela**). A demonstração original de palestra, no
+FTP](#servidor-ftp)). A versão 0.13.0 entrega o Marco 13: o que faltava para um
+editor de tela cheia (veja o [guia do programador](GUIA_DO_PROGRAMADOR.md),
+seção **Teclado e tela**). A versão 0.13.1, como a 0.12.1, **não é um marco**:
+acrescenta o editor `mano`, escrito como programa de usuário comum com o que o
+Marco 13 já oferecia, sem mudar o kernel (veja [O editor `mano`](#o-editor-mano)). A demonstração original de palestra, no
 formato usado em aula, está preservada na tag git `v1.0-demo` e continua
 podendo ser usada como está.
+
+## O editor `mano`
+
+O `mano` é um editor de textos de tela cheia, simples, no jeito do `nano`. É um
+programa de usuário comum e já vem na imagem de boot: depois de `cargo run` ele está
+pronto, sem copiar arquivo, sem FTP e sem `/disco`.
+
+```text
+os-rust> run mano                       (texto novo, sem nome)
+os-rust> exec mano /ram/nota.txt        (abre o arquivo; se não existe, começa um novo com esse nome)
+```
+
+```text
+ mano  /ram/nota.txt                                              Modificado   <- título (vídeo reverso)
+um                                                                             <- o texto (linhas 1 a 21)
+dois
+tres
+...
+Gravadas 3 linhas                                                              <- mensagens (linha 22)
+^G Ajuda     ^O Gravar    ^W Buscar    ^K Cortar    ^C Posicao   ^X Sair       <- atalhos (linhas 23 e 24)
+^R Ler       ^\ Subst.    ^U Colar     ^_ Linha     ^Y Pag ant   ^V Pag seg
+```
+
+| Atalho | O que faz |
+|---|---|
+| `Ctrl+O` | grava (pergunta o nome); `Ctrl+S` grava direto |
+| `Ctrl+X` | sai (pergunta se há alterações) |
+| `Ctrl+W` | busca; `Ctrl+W` e `Enter` com o campo vazio repete |
+| `Ctrl+\` (ou `Ctrl+T`) | busca e substitui, perguntando uma a uma (`S`, `N`, `A`) |
+| `Ctrl+K`, `Ctrl+U` | corta a linha, cola as linhas cortadas |
+| `Ctrl+G` | ajuda |
+
+Os atalhos são os do `nano` sempre que o teclado do os-rust permite; não há Alt, desfazer
+nem seleção. O texto tem até 65536 bytes e 4096 linhas, e o caminho é absoluto, de até 40
+bytes. Tudo está no [manual do `mano`](MANO.md) e o código, explicado linha por linha, no
+[walkthrough do `mano`](WALKTHROUGH-MANO.md).
 
 ## Roadmap
 
@@ -269,8 +308,9 @@ inicia um programa e passa o resto da linha a ele (o `run` não recebe
 argumentos); `Key`, `KeyEvent`, `screen`, `args` e `FileWriter::overwrite` na
 biblioteca de runtime; e o programa `teclas`, que mostra tudo funcionando.
 Demonstrável: `run teclas` e `exec teclas /ram/contagem.txt`. **O editor de
-textos não faz parte deste marco**: estas syscalls e o `exec` são o que falta
-para que ele seja escrito depois, como programa de usuário, em outra spec.
+textos não fez parte deste marco**: estas syscalls e o `exec` são o que faltava
+para escrevê-lo como programa de usuário. Ele chegou na versão 0.13.1, o `mano`
+(veja [O editor `mano`](#o-editor-mano)), sem mudar o kernel.
 Depende do Marco 12.
 
 ### Por que essa ordem
@@ -410,7 +450,7 @@ projeto (`x86_64-os_rust.json`), gerar uma imagem de boot com `bootimage`,
 e abrir uma janela do QEMU que dá boot via BIOS direto nesse binário. Em
 poucos segundos você deve ver o logo do os-rust (as 20 linhas do símbolo
 e do nome, no topo da tela), seguido da linha de identificação
-`os-rust v0.13.0` — a versão atual do projeto — e do prompt `os-rust> `
+`os-rust v0.13.1` — a versão atual do projeto — e do prompt `os-rust> `
 pronto para digitação, não um terminal comum.
 
 O mesmo `cargo run` também compila a biblioteca de runtime (`runtime/`) e
@@ -459,9 +499,9 @@ Não é preciso nenhum passo manual adicional para isso: é o mesmo
 | `ping <ip>` | Manda 4 pedidos de eco ICMP (um por segundo) e mostra as respostas, por exemplo `ping 10.0.2.2` ou `ping 127.0.0.1`. **Não é o programa `ping` de `run ping pong`** (Marco 7), que só se alterna com o `pong` |
 | `data` | Mostra a data e a hora do relógio do computador, em UTC, no formato `AAAA-MM-DD HH:MM:SS UTC`; se o relógio estiver inválido ou não responder, mostra uma mensagem clara. Argumentos extras são ignorados |
 | `run <alvo> [<alvo>...]` | Executa programas de usuário em modo usuário (ring 3), até 4 ao mesmo tempo (o mesmo alvo pode se repetir), e volta ao prompt quando o último termina. Um alvo que começa com `/` é o caminho de um executável ELF64 (até 64 KiB) lido de um volume, como `/disco/bin/visita`; qualquer outro é o nome de um programa embutido na imagem. Os dois se misturam (`run /disco/bin/visita hello`). Sem argumento, com um alvo inválido ou com mais de 4 alvos, não inicia nenhum |
-| `exec <programa> [<argumentos>...]` | Inicia **um** programa (embutido ou arquivo, como no `run`) e entrega a ele o resto da linha como texto de argumentos, que o programa lê com `SYS_ARGS` (sem os espaços das pontas, sem aspas nem escapes), por exemplo `exec teclas /ram/contagem.txt`. O `run` **não** recebe argumentos: ele trata cada palavra depois dele como outro programa a iniciar junto. O texto tem no máximo 128 bytes (pelo prompt, menos: a linha toda tem 128) |
+| `exec <programa> [<argumentos>...]` | Inicia **um** programa (embutido ou arquivo, como no `run`) e entrega a ele o resto da linha como texto de argumentos, que o programa lê com `SYS_ARGS` (sem os espaços das pontas, sem aspas nem escapes), por exemplo `exec teclas /ram/contagem.txt` ou `exec mano /ram/nota.txt`. O `run` **não** recebe argumentos: ele trata cada palavra depois dele como outro programa a iniciar junto. O texto tem no máximo 128 bytes (pelo prompt, menos: a linha toda tem 128) |
 
-### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `teclas`, `visita` e `labirint`
+### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `teclas`, `mano`, `visita` e `labirint`
 
 O comando `run` executa programas escritos fora do kernel. Cada um vive em
 `programs/src/bin/` (exceto `visita` e `labirint`, em
@@ -623,6 +663,18 @@ O comando `run` executa programas escritos fora do kernel. Cada um vive em
 
   Com mais de uma palavra (`exec teclas a b`) ou um caminho de mais de 40
   bytes, escreve a mensagem de uso e sai com o código 1, sem mexer na tela.
+- **`mano`** (`run mano` ou `exec mano <arquivo>`): o editor de textos de tela
+  cheia, na versão 0.13.1. Usa só o que o Marco 13 já oferecia (tecla crua, tela
+  com cores, `FileWriter::overwrite` e os argumentos do `exec`), então o kernel não
+  mudou. Edita, move o cursor, corta e cola linhas, busca, busca e substitui,
+  insere um arquivo, grava e sai; veja [O editor `mano`](#o-editor-mano), o
+  [manual](MANO.md) e o [walkthrough](WALKTHROUGH-MANO.md). Rode sozinho: o programa
+  usa a tela inteira.
+
+  ```text
+  os-rust> exec mano /ram/nota.txt
+  ```
+
 - **`leitor`** (`run leitor`): abre `/disco/docs/longo.txt`, um arquivo que
   ocupa mais de um cluster do disco, e escreve o conteúdo na tela, lendo em
   pedaços de 128 bytes pelas syscalls de arquivo. O programa nunca fala com o
@@ -1096,6 +1148,35 @@ QEMU para ver o `/ram` voltar ao conteúdo inicial. A suíte automatizada
   mesmo arquivo, o `/disco` que não muda, volume indisponível, FAT adulterada,
   o `/ram` restaurado e o contrato e o guia (código literal dos programas).
 
+### O que os testes da versão 0.13.1 cobrem
+
+A 0.13.1 não é um marco: traz o editor `mano` ao Marco 13, sem mudar o kernel, a
+biblioteca de runtime nem o contrato. A suíte automatizada (`cargo test`) cobre, além
+dos testes anteriores, em um binário novo de `tests/`. O `mano` roda **de verdade**,
+iniciado pelo prompt, e os testes digitam empurrando scancodes na fila do kernel, uma
+tecla por vez, só quando o programa espera tecla; as conferências de tela rodam no
+gancho do escalonador, porque o `mano` limpa a tela ao sair:
+
+- `tests/mano.rs`: a abertura (sem argumento, arquivo existente, inexistente, vazio,
+  só `\n`, sem `\n` no fim, com tabulação, `\r` e UTF-8) e as cinco regiões da tela
+  com texto e cores; gravar com nome novo, com nome que existe (as duas respostas) e
+  com erro, com o conteúdo exato dos bytes; cada tecla da tabela, os apelidos de Ctrl
+  e `Ctrl+T`; a rolagem vertical e horizontal, a coluna desejada e as páginas, com a
+  tela sempre em 80 bytes por linha; cortar e colar (com e sem acúmulo); buscar
+  (achou, não achou, a volta, repetir com o campo vazio, maiúscula) e substituir
+  (`S`, `N`, `A`, `Ctrl+C`, `Esc`, texto novo vazio, que contém o termo, igual ao
+  termo e várias ocorrências na mesma linha); sair com cada resposta; os erros de
+  uso, os limites de 65536 bytes e 4096 linhas (arquivos de 65535, 65536 e 65537
+  bytes, com 4095 e 4096 `\n`, `docs/grande.bin`) e as recusas por digitação; a
+  ajuda; a volta ao prompt limpa; o texto no limite com muitas linhas pequenas, sem
+  `panic`; o kernel dormindo enquanto o `mano` espera tecla; e os documentos (o
+  manual, o walkthrough, o README, o CHANGELOG, e todo nome de função do walkthrough
+  existe no código);
+- os testes que conferem a versão (`os-rust v0.13.1` no banner e no `sobre`, e
+  `version` em `Cargo.toml`) em `tests/ftpd.rs`, `tests/rede_programas.rs`,
+  `tests/escrita_no_disco.rs`, `tests/escrita_no_ramdisk.rs`, `tests/teclado_tela.rs` e
+  `tests/user_runtime.rs`.
+
 ### O que os testes do Marco 13 cobrem
 
 A suíte automatizada (`cargo test`) cobre, além dos testes anteriores. Nenhum
@@ -1137,7 +1218,7 @@ pelo loopback:
   fora do 8.3, raiz, pasta inexistente), a pasta cheia sem arquivo parcial,
   `MKD`/`RMD`/`DELE` e cada erro, comandos juntos, partidos e só com `\n`, a linha
   longa, o cliente que some, 50 sessões sem vazar nada, `run ftpd ftpd`, o envio
-  de um ELF que roda com `run`, a versão 0.13.0, o guia (código literal), os
+  de um ELF que roda com `run`, a versão 0.13.1, o guia (código literal), os
   README e os CHANGELOG;
 - `tests/ftpd_espera.rs`: sem cliente, o `ftpd` desiste em 30 s e o kernel dorme;
   uma conexão de dados que ninguém abre dá `425` em 10 s e apaga o arquivo criado;
@@ -1172,7 +1253,7 @@ usuário do QEMU responde a ARP e a `ping`, e os testes de TCP pela placa usam o
   conexões, o término por `exit` e por falha, e o envio com o buffer cheio;
 - `tests/rede_programas.rs`: `servidor` e `cliente` ponta a ponta (33 bytes
   enviados, 88 recebidos), a recusa, o endereço inválido, 50 execuções sem vazar
-  nada, a versão 0.13.0, o contrato versão 9, o guia (código literal), o README
+  nada, a versão 0.13.1, o contrato versão 9, o guia (código literal), o README
   e os argumentos do QEMU no `Cargo.toml`;
 - `tests/rede_espera.rs`: o `servidor` sozinho desiste depois de 30 s.
 
@@ -1202,7 +1283,7 @@ anteriores:
   diretório aberto e a liberação depois de `close`, de `exit` e de falha,
   `mkdir` com 4 arquivos abertos, o número 17, `caderno` ponta a ponta, o volume
   de 2 setores por cluster que continua somente leitura, disco ausente, 50
-  ciclos sem vazar clusters, frames nem descritores, a versão 0.13.0, o
+  ciclos sem vazar clusters, frames nem descritores, a versão 0.13.1, o
   contrato versão 9, o guia (código literal do `caderno`), o README (os
   comandos de preservar o disco e do pen drive) e `snapshot=on` no
   `Cargo.toml`.
@@ -1412,7 +1493,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   alocador global, tratador de `panic`).
 - `programs/`: a crate dos programas de usuário (`hello`, `crash`, `eco`,
   `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`,
-  `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, um arquivo por programa em `src/bin/`, mais `visita` e `labirint` em
+  `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `teclas`, `mano`, um arquivo por programa em `src/bin/`, mais `visita` e `labirint` em
   `src/disco/`, que só vão para o disco), com o linker
   script (`link.ld`); compilada para o target de usuário pelo `build.rs` da
   raiz, nunca diretamente.
@@ -1438,7 +1519,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   preempção, isolamento e teclado), `disco_ata.rs` (o driver ATA),
   `escrita_no_ramdisk.rs` (escrita no `/ram`: comandos, syscalls, `gravador` e
   `apagador`), `escrita_no_disco.rs` (escrita no `/disco`, `mkdir`, `rmdir`,
-  `caderno`, o contrato versão 9 e o README), `rede.rs`, `rede_pilha.rs`, `rede_syscalls.rs`, `rede_programas.rs` e `rede_espera.rs` (a rede do Marco 12), `ftpd.rs`, `ftpd_espera.rs` e `ftpd_ocioso.rs` (o servidor FTP da 0.12.1), `teclado_tela.rs` e `regravar_arquivo.rs` (o teclado cru, a tela, os argumentos, o `exec`, o `teclas` e a regravação de arquivos do Marco 13), `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
+  `caderno`, o contrato versão 9 e o README), `rede.rs`, `rede_pilha.rs`, `rede_syscalls.rs`, `rede_programas.rs` e `rede_espera.rs` (a rede do Marco 12), `ftpd.rs`, `ftpd_espera.rs` e `ftpd_ocioso.rs` (o servidor FTP da 0.12.1), `teclado_tela.rs` e `regravar_arquivo.rs` (o teclado cru, a tela, os argumentos, o `exec`, o `teclas` e a regravação de arquivos do Marco 13), `mano.rs` (o editor `mano` da 0.13.1, de ponta a ponta), `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
   e volumes inválidos) e `artefatos.rs` (higiene dos arquivos entregues).
 - `x86_64-os_rust.json`: a especificação do target bare-metal customizado
   (sem sistema operacional por baixo).
@@ -1447,4 +1528,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
 - `.cargo/config.toml`: configura o `cargo run`/`cargo test` para usar o
   `bootimage` como *runner* automaticamente, e habilita a compilação da
   crate `alloc` para este target customizado.
+- `programs/src/bin/mano.rs`: o editor de textos `mano` (0.13.1), um programa de
+  usuário embutido na imagem de boot.
+- `MANO.md` e `WALKTHROUGH-MANO.md`: o manual do `mano` e o código dele explicado.
 - `CHANGELOG.md`: o histórico de mudanças do projeto, versão por versão.

@@ -2254,6 +2254,10 @@ fn main() -> i32 {
 }
 ```
 
+**Um exemplo completo.** O editor `mano` (`programs/src/bin/mano.rs`) é um programa de tela cheia
+inteiro, escrito só com o que esta seção mostra: tecla crua, tela com cores e vídeo reverso, argumentos do
+`exec` e `FileWriter::overwrite`. Veja o [manual](MANO.md) e o [percurso pelo código](WALKTHROUGH-MANO.md).
+
 ## Argumentos de linha de comando
 
 Um programa recebe argumentos por **um texto só**: o que vem depois do nome dele no comando **`exec`**.
