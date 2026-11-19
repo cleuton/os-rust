@@ -2291,6 +2291,15 @@ for palavra in args::words(texto) {         // separa por espaços
 
 Não existe nenhum passo de compilação manual separado: se `cargo run` funciona, seu programa está embutido. Isso vale para programas dentro do repositório; para criar um programa fora dele, veja a seção seguinte.
 
+## Duas formas de criar programas
+
+Há dois caminhos para criar um programa do os-rust, e eles se complementam:
+
+1. **Fora**, em **Rust completo**: você escreve o programa no seu computador, compila para o target de usuário e sobe o binário por FTP. Pode usar tudo o que a biblioteca de runtime oferece (`Vec`, `String`, arquivos, rede, teclado e tela). É o caminho da seção seguinte, **Programas fora do repositório**.
+2. **Dentro**, com o **`nanorust`**: você escreve o programa com o `mano`, compila com o `nanorust` e roda com o `run`, tudo dentro do os-rust, sem recompilar o kernel e sem computador de apoio (`exec nanorust /ram/prog.rs /ram/prog`, depois `run /ram/prog`).
+
+A diferença é o que a linguagem aceita. O primeiro caminho é Rust completo. O segundo é um **subconjunto estrito**: só `i64` e `bool`, funções, `let`, `if`, `while`, `println!` e `ler_i64()`, com limites pequenos. Em troca, tudo o que o `nanorust` aceita também compila no `rustc` e se comporta igual. Veja o [manual do `nanorust`](NANORUST.md) e o [percurso pelo código](WALKTHROUGH-NANORUST.md).
+
 ## Programas fora do repositório
 
 Até aqui, todo programa vivia dentro do repositório, em `programs/src/bin/`, e entrava no kernel a cada `cargo run`. Esta seção ensina o outro caminho: criar o programa **fora** do repositório, numa pasta sua, compilá-lo para o os-rust e levá-lo para dentro do sistema por FTP, **sem recompilar o kernel**. O ciclo tem quatro passos:

@@ -7,6 +7,40 @@ uma versão por vez. O formato segue, livremente,
 [Keep a Changelog](https://keepachangelog.com/), e as versões seguem
 [Versionamento Semântico](https://semver.org/lang/pt-BR/).
 
+## [0.13.2] - 2026-11-18
+
+O compilador `nanorust`. Não é um marco (como a 0.12.1 e a 0.13.1): **o kernel, o contrato de
+syscalls (versão 9) e a biblioteca de runtime não mudaram**. O `nanorust` é um programa de
+usuário comum, que compila dentro do os-rust um subconjunto estrito de Rust para um executável
+ELF64 que o `run` carrega. Com o `mano`, fecha-se o ciclo: escrever, compilar e rodar dentro do
+os-rust, sem recompilar o kernel e sem computador de apoio.
+
+### Adicionado
+
+- O programa `nanorust` (`programs/src/bin/nanorust.rs`, embutido na imagem de boot):
+  `exec nanorust <fonte> <saida>`. Lê o fonte, confere os tipos e gera o código no mesmo passo
+  (máquina de pilha, sem árvore sintática e sem otimização), e só grava o executável se não houve
+  erro. A linguagem tem `i64`, `bool`, funções recursivas, `let` (com sombreamento), `if`, `while`,
+  `println!`/`print!` e `ler_i64()`; estouro e divisão por zero terminam com `panic:` e código 101.
+  Para no primeiro erro, com linha e coluna (vinte mensagens, M01 a M20). Limites: fonte de 16384
+  bytes, 10 níveis de aninhamento, 8 parâmetros, 8 argumentos e executável de 65536 bytes.
+- O prelúdio `programs/nano/prelude.rs`, que dá o `ler_i64` ao `rustc`, e seis exemplos em
+  `programs/nano/exemplos/` (`ola`, `aritm`, `fibo`, `primos`, `logica`, `entrada`), todos conferidos
+  com o `rustc`.
+- O manual (`NANORUST.md` e `NANORUST.en.md`) e o percurso pelo código (`WALKTHROUGH-NANORUST.md`
+  e `WALKTHROUGH-NANORUST.en.md`).
+- A seção **O compilador `nanorust`** do README, logo depois da do `mano`, e a seção **Duas formas
+  de criar programas** em cada guia do programador.
+- Os testes `tests/nanorust.rs`, que rodam o compilador de verdade dentro do QEMU: os exemplos, cada
+  mensagem de erro, os panics, regravar a saída, os limites nas bordas e os documentos.
+
+### Alterado
+
+- A versão do projeto passa de 0.13.1 para 0.13.2 (`Cargo.toml`).
+- Os testes que conferem a versão (`os-rust v0.13.2` no banner e no `sobre`, e `version` em
+  `Cargo.toml`) em `tests/ftpd.rs`, `tests/rede_programas.rs`, `tests/escrita_no_disco.rs`,
+  `tests/escrita_no_ramdisk.rs`, `tests/teclado_tela.rs`, `tests/user_runtime.rs` e `tests/mano.rs`.
+
 ## [0.13.1] - 2026-11-18
 
 O editor de textos `mano`. Não é um marco (como a 0.12.1): **o kernel, o contrato de

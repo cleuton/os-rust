@@ -5,6 +5,41 @@ at a time. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/), and the versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.13.2] - 2026-11-18
+
+The `nanorust` compiler. It is not a milestone (like 0.12.1 and 0.13.1): **the kernel, the syscall
+contract (version 9) and the runtime library did not change**. `nanorust` is an ordinary user
+program that compiles, inside os-rust, a strict subset of Rust into an ELF64 executable that `run`
+loads. Together with `mano`, it closes the loop: write, compile and run inside os-rust, without
+rebuilding the kernel and without a helper computer.
+
+### Added
+
+- The `nanorust` program (`programs/src/bin/nanorust.rs`, built into the boot image):
+  `exec nanorust <source> <output>`. It reads the source, checks the types and generates the code in
+  the same step (stack machine, no syntax tree and no optimization), and only writes the executable
+  if there was no error. The language has `i64`, `bool`, recursive functions, `let` (with shadowing),
+  `if`, `while`, `println!`/`print!` and `ler_i64()`; overflow and division by zero end with `panic:`
+  and exit code 101. It stops at the first error, with line and column (twenty messages, M01 to M20).
+  Limits: a 16384-byte source, 10 levels of nesting, 8 parameters, 8 arguments and a 65536-byte
+  executable.
+- The prelude `programs/nano/prelude.rs`, which gives `rustc` the `ler_i64` function, and six examples in
+  `programs/nano/exemplos/` (`ola`, `aritm`, `fibo`, `primos`, `logica`, `entrada`), all checked with
+  `rustc`.
+- The manual (`NANORUST.md` and `NANORUST.en.md`) and the code walkthrough (`WALKTHROUGH-NANORUST.md`
+  and `WALKTHROUGH-NANORUST.en.md`).
+- The **The `nanorust` compiler** section of the README, right after the `mano` one, and the **Two ways
+  to create programs** section in each programmer's guide.
+- The `tests/nanorust.rs` tests, which run the compiler for real inside QEMU: the examples, each error
+  message, the panics, rewriting the output, the limits at the edges and the documents.
+
+### Changed
+
+- The project version goes from 0.13.1 to 0.13.2 (`Cargo.toml`).
+- The tests that check the version (`os-rust v0.13.2` in the banner and in `sobre`, and `version` in
+  `Cargo.toml`) in `tests/ftpd.rs`, `tests/rede_programas.rs`, `tests/escrita_no_disco.rs`,
+  `tests/escrita_no_ramdisk.rs`, `tests/teclado_tela.rs`, `tests/user_runtime.rs` and `tests/mano.rs`.
+
 ## [0.13.1] - 2026-11-18
 
 The `mano` text editor. It is not a milestone (like 0.12.1): **the kernel, the syscall

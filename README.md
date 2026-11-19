@@ -18,6 +18,8 @@ Se você nunca viu como um kernel/bootloader funciona, leia também o
 [`WALKTHROUGH.md`](./WALKTHROUGH.md): ele explica o que está acontecendo
 por trás do boot e do código. Para editar textos dentro do próprio os-rust, veja
 o editor `mano`: o [manual](./MANO.md) e o [walkthrough](./WALKTHROUGH-MANO.md) do código.
+Para compilar programas dentro do próprio os-rust, veja o compilador `nanorust`: o
+[manual](./NANORUST.md) e o [walkthrough](./WALKTHROUGH-NANORUST.md) do código.
 
 ## Visão
 
@@ -33,7 +35,7 @@ sistema de arquivos ou multitarefa completa.
 
 A documentação do projeto também está disponível em inglês (veja o link `ENGLISH VERSION` no início de cada arquivo `.md`).
 
-**Versão atual: 0.13.1.** Os Marcos 0 (boot em modo texto VGA, com
+**Versão atual: 0.13.2.** Os Marcos 0 (boot em modo texto VGA, com
 mensagem de boas-vindas, rolagem e tratamento de panic legível), 1
 (interrupções, teclado e prompt de comandos), 2 (infraestrutura de
 depuração: saída serial e testes automatizados dentro do QEMU), 3
@@ -67,7 +69,10 @@ FTP](#servidor-ftp)). A versão 0.13.0 entrega o Marco 13: o que faltava para um
 editor de tela cheia (veja o [guia do programador](GUIA_DO_PROGRAMADOR.md),
 seção **Teclado e tela**). A versão 0.13.1, como a 0.12.1, **não é um marco**:
 acrescenta o editor `mano`, escrito como programa de usuário comum com o que o
-Marco 13 já oferecia, sem mudar o kernel (veja [O editor `mano`](#o-editor-mano)). A demonstração original de palestra, no
+Marco 13 já oferecia, sem mudar o kernel (veja [O editor `mano`](#o-editor-mano)). A versão 0.13.2
+também **não é um marco**: acrescenta o compilador `nanorust`, outro programa de usuário comum, que
+fecha o ciclo escrever, compilar e rodar dentro do os-rust (veja [O compilador
+`nanorust`](#o-compilador-nanorust)). A demonstração original de palestra, no
 formato usado em aula, está preservada na tag git `v1.0-demo` e continua
 podendo ser usada como está.
 
@@ -106,6 +111,31 @@ Os atalhos são os do `nano` sempre que o teclado do os-rust permite; não há A
 nem seleção. O texto tem até 65536 bytes e 4096 linhas, e o caminho é absoluto, de até 40
 bytes. Tudo está no [manual do `mano`](MANO.md) e o código, explicado linha por linha, no
 [walkthrough do `mano`](WALKTHROUGH-MANO.md).
+
+## O compilador `nanorust`
+
+O `nanorust` compila, dentro do próprio os-rust, um **subconjunto estrito de Rust** para um executável ELF64 que o
+`run` carrega. Com o [`mano`](MANO.md) fecha-se o ciclo: escrever, compilar e rodar, **sem recompilar o kernel e sem
+computador de apoio**. É um programa de usuário comum e já vem na imagem de boot, como o `mano`.
+
+```text
+os-rust> exec mano /ram/fibo.rs                  (escreva o programa e grave com Ctrl+S)
+os-rust> exec nanorust /ram/fibo.rs /ram/fibo
+nanorust: ok, 741 bytes
+os-rust> run /ram/fibo
+fib(0) = 0
+...
+fib(10) = 55
+```
+
+Estrito quer dizer: tudo o que o `nanorust` aceita também compila no `rustc` e se comporta igual. A linguagem tem
+`i64`, `bool`, funções (recursivas), `let`, `if`, `while`, `println!` e `ler_i64()`; um erro mostra a linha e a coluna e
+não cria arquivo. **Fluxo alternativo:** confira o fonte no computador, com
+`cat programs/nano/prelude.rs fonte.rs > x.rs && rustc x.rs`, e suba o arquivo para o os-rust por FTP (veja [Servidor
+FTP](#servidor-ftp)) para compilá-lo lá. O `/ram` zera a cada boot e o `/disco` do `cargo run` usa `snapshot=on`
+(veja [Preservando o disco entre boots](#preservando-o-disco-entre-boots)). Tudo está no [manual do
+`nanorust`](NANORUST.md) e o código, explicado, no [walkthrough](WALKTHROUGH-NANORUST.md); seis exemplos
+ficam em `programs/nano/exemplos/`.
 
 ## Roadmap
 
@@ -450,7 +480,7 @@ projeto (`x86_64-os_rust.json`), gerar uma imagem de boot com `bootimage`,
 e abrir uma janela do QEMU que dá boot via BIOS direto nesse binário. Em
 poucos segundos você deve ver o logo do os-rust (as 20 linhas do símbolo
 e do nome, no topo da tela), seguido da linha de identificação
-`os-rust v0.13.1` — a versão atual do projeto — e do prompt `os-rust> `
+`os-rust v0.13.2` — a versão atual do projeto — e do prompt `os-rust> `
 pronto para digitação, não um terminal comum.
 
 O mesmo `cargo run` também compila a biblioteca de runtime (`runtime/`) e
@@ -501,7 +531,7 @@ Não é preciso nenhum passo manual adicional para isso: é o mesmo
 | `run <alvo> [<alvo>...]` | Executa programas de usuário em modo usuário (ring 3), até 4 ao mesmo tempo (o mesmo alvo pode se repetir), e volta ao prompt quando o último termina. Um alvo que começa com `/` é o caminho de um executável ELF64 (até 64 KiB) lido de um volume, como `/disco/bin/visita`; qualquer outro é o nome de um programa embutido na imagem. Os dois se misturam (`run /disco/bin/visita hello`). Sem argumento, com um alvo inválido ou com mais de 4 alvos, não inicia nenhum |
 | `exec <programa> [<argumentos>...]` | Inicia **um** programa (embutido ou arquivo, como no `run`) e entrega a ele o resto da linha como texto de argumentos, que o programa lê com `SYS_ARGS` (sem os espaços das pontas, sem aspas nem escapes), por exemplo `exec teclas /ram/contagem.txt` ou `exec mano /ram/nota.txt`. O `run` **não** recebe argumentos: ele trata cada palavra depois dele como outro programa a iniciar junto. O texto tem no máximo 128 bytes (pelo prompt, menos: a linha toda tem 128) |
 
-### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `teclas`, `mano`, `visita` e `labirint`
+### Programas de usuário: `hello`, `crash`, `eco`, `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`, `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `teclas`, `mano`, `nanorust`, `visita` e `labirint`
 
 O comando `run` executa programas escritos fora do kernel. Cada um vive em
 `programs/src/bin/` (exceto `visita` e `labirint`, em
@@ -673,6 +703,15 @@ O comando `run` executa programas escritos fora do kernel. Cada um vive em
 
   ```text
   os-rust> exec mano /ram/nota.txt
+  ```
+
+- **`nanorust`** (`exec nanorust <fonte> <saida>`): o compilador de um subconjunto estrito
+  de Rust, na versão 0.13.2. Lê o fonte, confere os tipos, gera um ELF64 e só grava se não
+  houve erro; o resultado roda com `run`. Veja [O compilador `nanorust`](#o-compilador-nanorust),
+  o [manual](NANORUST.md) e o [walkthrough](WALKTHROUGH-NANORUST.md).
+
+  ```text
+  os-rust> exec nanorust /ram/fibo.rs /ram/fibo
   ```
 
 - **`leitor`** (`run leitor`): abre `/disco/docs/longo.txt`, um arquivo que
@@ -1148,6 +1187,25 @@ QEMU para ver o `/ram` voltar ao conteúdo inicial. A suíte automatizada
   mesmo arquivo, o `/disco` que não muda, volume indisponível, FAT adulterada,
   o `/ram` restaurado e o contrato e o guia (código literal dos programas).
 
+### O que os testes da versão 0.13.2 cobrem
+
+A 0.13.2 não é um marco: traz o compilador `nanorust`, sem mudar o kernel, a biblioteca de runtime nem o
+contrato. A suíte automatizada (`cargo test`) cobre, além dos testes anteriores, em um binário novo de `tests/`.
+O `nanorust` roda **de verdade**, iniciado pelo prompt, e o programa que ele gera também roda; quando o programa
+lê números, os testes digitam empurrando scancodes, um caractere por vez:
+
+- `tests/nanorust.rs`: os seis exemplos (cada executável aceito pelo `elf::parse`, com um segmento de leitura e
+  execução e entrada em `0x4000_0078`, e a saída conferida na tela); cada mensagem de erro M01 a M20 com texto, linha
+  e coluna exatos, código de término 1 e **nenhum arquivo criado** (e a saída que já existia, intacta); a ordem de detecção
+  e o escopo dos nomes; o estouro, a divisão por zero e a pilha esgotada, com `panic:` e o código 101; recompilar sobre o
+  mesmo nome e os arquivos iguais byte a byte; os limites nas bordas (10 e 11 níveis, com parênteses e com a mistura de
+  formas, 8 e 9 parâmetros, 8 e 9 argumentos, fonte de 16384 e 16385 bytes, a soma de 1000 termos e a de 8000, que passa de
+  65536 bytes); e os documentos (os manuais, os walkthroughs, o README, os CHANGELOGs, e todo nome de função do walkthrough
+  existe no código);
+- os testes que conferem a versão (`os-rust v0.13.2` no banner e no `sobre`, e `version` em `Cargo.toml`) em
+  `tests/ftpd.rs`, `tests/rede_programas.rs`, `tests/escrita_no_disco.rs`, `tests/escrita_no_ramdisk.rs`,
+  `tests/teclado_tela.rs`, `tests/user_runtime.rs` e `tests/mano.rs`.
+
 ### O que os testes da versão 0.13.1 cobrem
 
 A 0.13.1 não é um marco: traz o editor `mano` ao Marco 13, sem mudar o kernel, a
@@ -1172,10 +1230,6 @@ gancho do escalonador, porque o `mano` limpa a tela ao sair:
   `panic`; o kernel dormindo enquanto o `mano` espera tecla; e os documentos (o
   manual, o walkthrough, o README, o CHANGELOG, e todo nome de função do walkthrough
   existe no código);
-- os testes que conferem a versão (`os-rust v0.13.1` no banner e no `sobre`, e
-  `version` em `Cargo.toml`) em `tests/ftpd.rs`, `tests/rede_programas.rs`,
-  `tests/escrita_no_disco.rs`, `tests/escrita_no_ramdisk.rs`, `tests/teclado_tela.rs` e
-  `tests/user_runtime.rs`.
 
 ### O que os testes do Marco 13 cobrem
 
@@ -1218,7 +1272,7 @@ pelo loopback:
   fora do 8.3, raiz, pasta inexistente), a pasta cheia sem arquivo parcial,
   `MKD`/`RMD`/`DELE` e cada erro, comandos juntos, partidos e só com `\n`, a linha
   longa, o cliente que some, 50 sessões sem vazar nada, `run ftpd ftpd`, o envio
-  de um ELF que roda com `run`, a versão 0.13.1, o guia (código literal), os
+  de um ELF que roda com `run`, a versão 0.13.2, o guia (código literal), os
   README e os CHANGELOG;
 - `tests/ftpd_espera.rs`: sem cliente, o `ftpd` desiste em 30 s e o kernel dorme;
   uma conexão de dados que ninguém abre dá `425` em 10 s e apaga o arquivo criado;
@@ -1253,7 +1307,7 @@ usuário do QEMU responde a ARP e a `ping`, e os testes de TCP pela placa usam o
   conexões, o término por `exit` e por falha, e o envio com o buffer cheio;
 - `tests/rede_programas.rs`: `servidor` e `cliente` ponta a ponta (33 bytes
   enviados, 88 recebidos), a recusa, o endereço inválido, 50 execuções sem vazar
-  nada, a versão 0.13.1, o contrato versão 9, o guia (código literal), o README
+  nada, a versão 0.13.2, o contrato versão 9, o guia (código literal), o README
   e os argumentos do QEMU no `Cargo.toml`;
 - `tests/rede_espera.rs`: o `servidor` sozinho desiste depois de 30 s.
 
@@ -1283,7 +1337,7 @@ anteriores:
   diretório aberto e a liberação depois de `close`, de `exit` e de falha,
   `mkdir` com 4 arquivos abertos, o número 17, `caderno` ponta a ponta, o volume
   de 2 setores por cluster que continua somente leitura, disco ausente, 50
-  ciclos sem vazar clusters, frames nem descritores, a versão 0.13.1, o
+  ciclos sem vazar clusters, frames nem descritores, a versão 0.13.2, o
   contrato versão 9, o guia (código literal do `caderno`), o README (os
   comandos de preservar o disco e do pen drive) e `snapshot=on` no
   `Cargo.toml`.
@@ -1493,7 +1547,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   alocador global, tratador de `panic`).
 - `programs/`: a crate dos programas de usuário (`hello`, `crash`, `eco`,
   `falha_memoria`, `ping`, `pong`, `contador_a`, `contador_b`, `eco2`, `leitor`,
-  `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `teclas`, `mano`, um arquivo por programa em `src/bin/`, mais `visita` e `labirint` em
+  `listador`, `hora`, `gravador`, `apagador`, `caderno`, `servidor`, `cliente`, `ftpd`, `teclas`, `mano`, `nanorust`, um arquivo por programa em `src/bin/`, mais `visita` e `labirint` em
   `src/disco/`, que só vão para o disco), com o linker
   script (`link.ld`); compilada para o target de usuário pelo `build.rs` da
   raiz, nunca diretamente.
@@ -1519,7 +1573,7 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
   preempção, isolamento e teclado), `disco_ata.rs` (o driver ATA),
   `escrita_no_ramdisk.rs` (escrita no `/ram`: comandos, syscalls, `gravador` e
   `apagador`), `escrita_no_disco.rs` (escrita no `/disco`, `mkdir`, `rmdir`,
-  `caderno`, o contrato versão 9 e o README), `rede.rs`, `rede_pilha.rs`, `rede_syscalls.rs`, `rede_programas.rs` e `rede_espera.rs` (a rede do Marco 12), `ftpd.rs`, `ftpd_espera.rs` e `ftpd_ocioso.rs` (o servidor FTP da 0.12.1), `teclado_tela.rs` e `regravar_arquivo.rs` (o teclado cru, a tela, os argumentos, o `exec`, o `teclas` e a regravação de arquivos do Marco 13), `mano.rs` (o editor `mano` da 0.13.1, de ponta a ponta), `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
+  `caderno`, o contrato versão 9 e o README), `rede.rs`, `rede_pilha.rs`, `rede_syscalls.rs`, `rede_programas.rs` e `rede_espera.rs` (a rede do Marco 12), `ftpd.rs`, `ftpd_espera.rs` e `ftpd_ocioso.rs` (o servidor FTP da 0.12.1), `teclado_tela.rs` e `regravar_arquivo.rs` (o teclado cru, a tela, os argumentos, o `exec`, o `teclas` e a regravação de arquivos do Marco 13), `mano.rs` (o editor `mano` da 0.13.1, de ponta a ponta), `nanorust.rs` (o compilador `nanorust` da 0.13.2, de ponta a ponta), `sistema_de_arquivos.rs` (`ls`, `cat`, `run` por caminho, syscalls de arquivo
   e volumes inválidos) e `artefatos.rs` (higiene dos arquivos entregues).
 - `x86_64-os_rust.json`: a especificação do target bare-metal customizado
   (sem sistema operacional por baixo).
@@ -1531,4 +1585,8 @@ correspondente no [`WALKTHROUGH.md`](./WALKTHROUGH.md).
 - `programs/src/bin/mano.rs`: o editor de textos `mano` (0.13.1), um programa de
   usuário embutido na imagem de boot.
 - `MANO.md` e `WALKTHROUGH-MANO.md`: o manual do `mano` e o código dele explicado.
+- `programs/src/bin/nanorust.rs`: o compilador `nanorust` (0.13.2), um programa de usuário
+  embutido na imagem de boot.
+- `programs/nano/`: o prelúdio (`prelude.rs`, que dá `ler_i64` ao `rustc`) e os seis exemplos (`exemplos/`).
+- `NANORUST.md` e `WALKTHROUGH-NANORUST.md`: o manual do `nanorust` e o código dele explicado.
 - `CHANGELOG.md`: o histórico de mudanças do projeto, versão por versão.

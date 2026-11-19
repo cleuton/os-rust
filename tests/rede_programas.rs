@@ -240,8 +240,8 @@ fn rodar_comando(comando: &str) -> Vec<String> {
 
 #[test_case]
 fn a_versao_0_12_1_aparece_e_o_que_existia_continua_igual() {
-    assert_eq!(os_rust::VERSION, "os-rust v0.13.1");
-    exige(&rodar_comando("sobre"), "os-rust v0.13.1");
+    assert_eq!(os_rust::VERSION, "os-rust v0.13.2");
+    exige(&rodar_comando("sobre"), "os-rust v0.13.2");
     // Um comando de cada marco anterior segue funcionando.
     exige(&rodar_comando("ls /ram"), "ola.txt");
     exige(&rodar_comando("cat /ram/ola.txt"), "ola");
@@ -352,5 +352,5 @@ fn o_cargo_toml_traz_a_placa_e_mantem_o_snapshot() {
     assert!(teste.contains("user,model=rtl8139,guestfwd=tcp:10.0.2.100:7-cmd:cat"), "{}", teste);
     assert!(!teste.contains("hostfwd"), "{}", teste);
     assert_eq!(teste.matches("snapshot=on").count(), 2, "os dois discos continuam com snapshot=on");
-    assert!(toml.contains("version = \"0.13.1\""));
+    assert!(toml.contains("version = \"0.13.2\""));
 }

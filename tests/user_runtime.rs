@@ -726,5 +726,5 @@ fn os_guias_nao_mudam_a_versao() {
         assert!(!minusculas.contains("programas fora"), "{} fala de programas fora", nome);
         assert!(!minusculas.contains("outside the repository"), "{} fala de outside the repository", nome);
     }
-    assert!(CARGO_RAIZ.contains("version = \"0.13.1\""), "a versao do projeto mudou");
+    assert!(CARGO_RAIZ.contains("version = \"0.13.2\""), "a versao do projeto mudou");
 }

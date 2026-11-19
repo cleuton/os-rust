@@ -1,6 +1,6 @@
 [package]
 name = "os-rust"
-version = "0.13.1"
+version = "0.13.2"
 edition = "2021"
 
 [dependencies]
@@ -64,7 +64,7 @@ test-args = [
     "-nic", "user,model=rtl8139,guestfwd=tcp:10.0.2.100:7-cmd:cat",
 ]
 test-success-exit-code = 33
-test-timeout = 60
+test-timeout = 120
 
 # `fatimg` escreve imagens FAT16 em memória. Roda em dois lugares: no
 # `build.rs` (host, gera o ramdisk e o disco) e nos testes do kernel (target

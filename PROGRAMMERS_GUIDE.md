@@ -2289,6 +2289,15 @@ for palavra in args::words(texto) {         // splits by spaces
 
 There is no separate manual build step: if `cargo run` works, your program is embedded. This applies to programs inside the repository; to create a program outside it, see the next section.
 
+## Two ways to create programs
+
+There are two ways to create an os-rust program, and they complement each other:
+
+1. **Outside**, in **full Rust**: you write the program on your computer, compile it for the user target and upload the binary by FTP. You can use everything the runtime library offers (`Vec`, `String`, files, network, keyboard and screen). This is the path of the next section, **Programs outside the repository**.
+2. **Inside**, with **`nanorust`**: you write the program with `mano`, compile it with `nanorust` and run it with `run`, all inside os-rust, without rebuilding the kernel and without a helper computer (`exec nanorust /ram/prog.rs /ram/prog`, then `run /ram/prog`).
+
+The difference is what the language accepts. The first path is full Rust. The second is a **strict subset**: only `i64` and `bool`, functions, `let`, `if`, `while`, `println!` and `ler_i64()`, with small limits. In exchange, everything `nanorust` accepts also compiles with `rustc` and behaves the same. See the [`nanorust` manual](NANORUST.en.md) and the [code walkthrough](WALKTHROUGH-NANORUST.en.md).
+
 ## Programs outside the repository
 
 Until now, every program lived inside the repository, in `programs/src/bin/`, and went into the kernel on every `cargo run`. This section teaches the other way: create the program **outside** the repository, in a folder of your own, build it for os-rust, and bring it into the system over FTP, **without rebuilding the kernel**. The cycle has four steps:

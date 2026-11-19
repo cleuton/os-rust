@@ -1956,10 +1956,10 @@ fn os_quatro_documentos_novos_existem_com_a_troca_de_idioma_e_o_readme_e_o_chang
 }
 
 #[test_case]
-fn a_versao_e_0_13_1_e_o_mano_aparece_uma_vez_na_lista_de_programas_em_ordem_alfabetica() {
+fn a_versao_e_0_13_2_e_o_mano_aparece_uma_vez_na_lista_de_programas_em_ordem_alfabetica() {
     restaurar_tela();
-    assert_eq!(os_rust::VERSION, "os-rust v0.13.1");
-    exige(&rodar_comando("sobre"), "os-rust v0.13.1");
+    assert_eq!(os_rust::VERSION, "os-rust v0.13.2");
+    exige(&rodar_comando("sobre"), "os-rust v0.13.2");
     let nomes: Vec<&str> = user::program_names().collect();
     assert_eq!(nomes.iter().filter(|&&n| n == "mano").count(), 1);
     assert!(nomes.windows(2).all(|w| w[0] < w[1]), "fora de ordem alfabetica: {:?}", nomes);
